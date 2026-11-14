@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""
+strategies/momentum/scoring.py
+==============================
+Dual-Scoring Engine for Bidirectional Momentum Setups:
+1. Relative Setup Score (S_rel in [0, 100]): Bounded continuous 5-pillar score for screening.
+2. Unbounded Absolute Score (S_abs): Convex alpha score calculated after screening to capture
+   exceptional events (massive RVOL, explosive volume acceleration, extreme tick thrust,
+   and macro Nifty regime alignment).
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any, Dict, List, Optional, Tuple
+
+
+def calculate_setup_score(
+    ltp: float,
+    high: float,
+    low: float,
+    close: float,
+    volume_stats: Dict[str, Any],
+    tech_indicators: Optional[Dict[str, Any]] = None,
+    pattern_state: Optional[Dict[str, Any]] = None,
+    nifty_stats: Optional[Dict[str, Any]] = None,
+    recent_ticks: Optional[List[float]] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Computes both the 100-Point Relative Setup Score (S_rel) and Unbounded Absolute Score (S_abs).
+    """
+    if tech_indicators is None:
+        tech_indicators = {}
+    if pattern_state is None:
+        pattern_state = {}
+    if nifty_stats is None:
+        nifty_stats = {}
+    if recent_ticks is None:
+        recent_ticks = []
+
+    rvol_5m = float(volume_stats.get("rvol_5m", 0.0))
+    rvol_cum = float(volume_stats.get("rvol_cum", 0.0))
+    a_vol = float(volume_stats.get("a_vol", 0.0))
+    pace = float(volume_stats.get("pace", 0.0))
+    z_vol = float(volume_stats.get("z_vol", 0.0))
+    has_baseline = bool(volume_stats.get("has_baseline", True))
+
+    # Day Range & Position
+    day_span = max(0.01, high - low)
+    eff_span = max(ltp * 0.005, day_span)
+    range_pos = max(0.0, min(100.0, ((ltp - low) / day_span) * 100.0)) if day_span > 0 else 50.0
+
+    # Net day change and 5m impulse
+    net_chg = ltp - close if close > 0 else 0.0
+    pct_chg = (net_chg / close) * 100.0 if close > 0 else 0.0
+    p_5m_delta = float(volume_stats.get("p_5m_delta", 0.0))
+    p_5m_pct = (p_5m_delta / (ltp - p_5m_delta)) * 100.0 if (ltp - p_5m_delta) > 0 else 0.0
+
+    # Configuration extraction with fallbacks to standard defaults
+    cfg = config or {}
+    sc_cfg = cfg.get("scoring", cfg)
+    gate_cfg = cfg.get("volume_inflation_gate", {})
+    regime_cfg = cfg.get("market_regime", {})
+
+    p1_max = float(sc_cfg.get("pillar1_volume_rvol_weight", 25.0))
+    p1_rvol_min = float(sc_cfg.get("pillar1_rvol_min", 0.60))
+    p1_rvol_max = float(sc_cfg.get("pillar1_rvol_max", 2.50))
+    p1_rvol_pts = float(sc_cfg.get("pillar1_rvol_pts", 15.0))
+    p1_pace_min = float(sc_cfg.get("pillar1_pace_min", 0.80))
+    p1_pace_max = float(sc_cfg.get("pillar1_pace_max", 2.00))
+    p1_pace_pts = float(sc_cfg.get("pillar1_pace_pts", 6.0))
+    p1_zvol_min = float(sc_cfg.get("pillar1_zvol_min", 0.20))
+    p1_zvol_max = float(sc_cfg.get("pillar1_zvol_max", 2.00))
+    p1_zvol_pts = float(sc_cfg.get("pillar1_zvol_pts", 4.0))
+
+    p2_max = float(sc_cfg.get("pillar2_consolidation_tightness_weight", 20.0))
+    p2_span_max = float(sc_cfg.get("pillar2_coiling_span_max_pct", 2.5))
+    p2_span_pts = float(sc_cfg.get("pillar2_span_pts", 12.0))
+    p2_coil_bonus = float(sc_cfg.get("pillar2_coiling_pattern_bonus", 8.0))
+
+    p3_max = float(sc_cfg.get("pillar3_directional_momentum_weight", 30.0))
+    p3_chg_tgt = float(sc_cfg.get("pillar3_pct_chg_target", 3.0))
+    p3_chg_pts = float(sc_cfg.get("pillar3_pct_chg_pts", 10.0))
+    p3_impulse_tgt = float(sc_cfg.get("pillar3_impulse_5m_target_pct", 0.50))
+    p3_impulse_pts = float(sc_cfg.get("pillar3_impulse_5m_pts", 20.0))
+
+    p4_max = float(sc_cfg.get("pillar4_position_freshness_weight", 15.0))
+
+    p5_max = float(sc_cfg.get("pillar5_micro_thrust_weight", 10.0))
+    p5_thrust_eff = float(sc_cfg.get("pillar5_thrust_eff_span_pct", 0.15))
+
+    # -----------------------------------------------------------------------
+    # Pillar 1: Volume & Participation (25 Points)
+    # -----------------------------------------------------------------------
+    # Tier 1: 5m RVOL Expansion (continuous rvol_min to rvol_max)
+    rvol_pts = 0.0
+    pace_pts = 0.0
+    z_pts = 0.0
+
+    if has_baseline:
+        if rvol_5m > p1_rvol_min and p1_rvol_max > p1_rvol_min:
+            rvol_pts = min(p1_rvol_pts, ((rvol_5m - p1_rvol_min) / (p1_rvol_max - p1_rvol_min)) * p1_rvol_pts)
+
+        # Tier 2: Pace Acceleration (continuous pace_min to pace_max)
+        if pace > p1_pace_min and p1_pace_max > p1_pace_min:
+            pace_pts = min(p1_pace_pts, ((pace - p1_pace_min) / (p1_pace_max - p1_pace_min)) * p1_pace_pts)
+
+        # Tier 3: Statistical Variance Surge (continuous zvol_min to zvol_max)
+        if z_vol > p1_zvol_min and p1_zvol_max > p1_zvol_min:
+            z_pts = min(p1_zvol_pts, ((z_vol - p1_zvol_min) / (p1_zvol_max - p1_zvol_min)) * p1_zvol_pts)
+
+    p1_volume = min(p1_max, rvol_pts + pace_pts + z_pts)
+
+    # -----------------------------------------------------------------------
+    # Pillar 2: Price Consolidation & Tightness (20 Points)
+    # -----------------------------------------------------------------------
+    p2_consolidation = 0.0
+    coiling_span_pct = (day_span / ltp) * 100.0 if ltp > 0 else 0.0
+    if coiling_span_pct <= p2_span_max and p2_span_max > 0:
+        p2_consolidation += min(p2_span_pts, (1.0 - (coiling_span_pct / p2_span_max)) * p2_span_pts)
+
+    if pattern_state.get("bull_coiling") or pattern_state.get("bear_coiling"):
+        p2_consolidation += p2_coil_bonus
+
+    p2_consolidation = min(p2_max, p2_consolidation)
+
+    # -----------------------------------------------------------------------
+    # Pillar 3: Directional Momentum (30 Points)
+    # -----------------------------------------------------------------------
+    bull_mom = 0.0
+    if pct_chg > 0 and p_5m_pct >= 0:
+        t1 = min(p3_chg_pts, (pct_chg / p3_chg_tgt) * p3_chg_pts) if p3_chg_tgt > 0 else 0.0
+        t2 = min(p3_impulse_pts, (p_5m_pct / p3_impulse_tgt) * p3_impulse_pts) if p3_impulse_tgt > 0 else 0.0
+        bull_mom = min(p3_max, t1 + t2)
+
+    bear_mom = 0.0
+    if pct_chg < 0 and p_5m_pct <= 0:
+        t1 = min(p3_chg_pts, (abs(pct_chg) / p3_chg_tgt) * p3_chg_pts) if p3_chg_tgt > 0 else 0.0
+        t2 = min(p3_impulse_pts, (abs(p_5m_pct) / p3_impulse_tgt) * p3_impulse_pts) if p3_impulse_tgt > 0 else 0.0
+        bear_mom = min(p3_max, t1 + t2)
+
+    # -----------------------------------------------------------------------
+    # Pillar 4: Position & Freshness (15 Points)
+    # -----------------------------------------------------------------------
+    bull_pos = min(p4_max, (range_pos / 100.0) * p4_max)
+    bear_pos = min(p4_max, ((100.0 - range_pos) / 100.0) * p4_max)
+
+    # -----------------------------------------------------------------------
+    # Pillar 5: Micro-Tick Velocity & Thrust (10 Points)
+    # -----------------------------------------------------------------------
+    thrust_pts = 0.0
+    thrust_velocity = 0.0
+    eff_thresh = eff_span * p5_thrust_eff
+    if len(recent_ticks) >= 3:
+        t1, t2, t3 = recent_ticks[-3], recent_ticks[-2], recent_ticks[-1]
+        delta_tick = t3 - t1
+        thrust_velocity = abs(delta_tick) / eff_span
+        if (t3 > t2 or t2 > t1) and delta_tick > 0:
+            thrust_pts = min(p5_max, (delta_tick / eff_thresh) * p5_max) if eff_thresh > 0 else 0.0
+        elif (t3 < t2 or t2 < t1) and delta_tick < 0:
+            thrust_pts = min(p5_max, (abs(delta_tick) / eff_thresh) * p5_max) if eff_thresh > 0 else 0.0
+
+    # Raw Relative Base Scores
+    raw_bull = p1_volume + p2_consolidation + bull_mom + bull_pos + thrust_pts
+    raw_bear = p1_volume + p2_consolidation + bear_mom + bear_pos + thrust_pts
+
+    # -----------------------------------------------------------------------
+    # Enhancement 1: Volume Inflation Gate & Pattern Bonuses
+    # -----------------------------------------------------------------------
+    is_vol_inflated = pattern_state.get("is_vol_inflated", False)
+    bull_breakout = pattern_state.get("bull_breakout", False)
+    bull_weak_break = pattern_state.get("bull_weak_break", False)
+    bear_breakdown = pattern_state.get("bear_breakdown", False)
+    bear_weak_break = pattern_state.get("bear_weak_break", False)
+    is_opening = pattern_state.get("is_opening_45m", True)
+
+    opening_rvol = float(gate_cfg.get("opening_breakout_rvol_5m", 1.50))
+    opening_accel = float(gate_cfg.get("opening_breakout_accel", 1.05))
+    midday_rvol = float(gate_cfg.get("midday_breakout_rvol_5m", 1.50))
+    midday_accel = float(gate_cfg.get("midday_breakout_accel", 1.05))
+    midday_pace = float(gate_cfg.get("midday_breakout_pace", 1.0))
+
+    breakout_bonus = float(sc_cfg.get("breakout_bonus", 15.0))
+    breakout_min_score = float(sc_cfg.get("breakout_min_score", 70.0))
+    bull_breakout_range_min = float(sc_cfg.get("bull_breakout_range_pos_min", 75.0))
+    bear_breakdown_range_max = float(sc_cfg.get("bear_breakdown_range_pos_max", 25.0))
+
+    fluff_dock = float(gate_cfg.get("fluff_break_dock", 15.0))
+    fluff_ceiling = float(gate_cfg.get("fluff_break_ceiling", 60.0))
+    coiling_bonus = float(sc_cfg.get("coiling_bonus", 5.0))
+    coiling_min_score = float(sc_cfg.get("coiling_min_score", 50.0))
+
+    breakout_pos_min = float(sc_cfg.get("breakout_range_pos_min", 90.0))
+    forming_pos_min = float(sc_cfg.get("forming_range_pos_min", 80.0))
+    breakdown_pos_max = float(sc_cfg.get("breakdown_range_pos_max", 10.0))
+    cracking_pos_max = float(sc_cfg.get("cracking_range_pos_max", 20.0))
+
+    low_vol_rvol_5m = float(sc_cfg.get("low_volume_damping_rvol_5m", 0.80))
+    low_vol_rvol_cum = float(sc_cfg.get("low_volume_damping_rvol_cum", 1.0))
+    low_vol_dock = float(sc_cfg.get("low_volume_dock", 15.0))
+    low_vol_cap = float(sc_cfg.get("low_volume_cap", 60.0))
+
+    regime_thresh = float(regime_cfg.get("bias_threshold_pct", 0.25))
+    pro_bonus = float(regime_cfg.get("pro_bias_bonus", 10.0))
+    counter_penalty = float(regime_cfg.get("counter_bias_penalty", -25.0))
+    raw_boost = float(regime_cfg.get("raw_score_boost", 5.0))
+    raw_suppress_penalty = float(regime_cfg.get("raw_score_suppress_penalty", -15.0))
+    raw_suppress_cap = float(regime_cfg.get("raw_score_suppress_cap", 65.0))
+
+    abs_rvol_thresh = float(sc_cfg.get("abs_bonus_rvol_thresh", 2.0))
+    abs_rvol_mult = float(sc_cfg.get("abs_bonus_rvol_mult", 10.0))
+    abs_accel_thresh = float(sc_cfg.get("abs_bonus_accel_thresh", 1.5))
+    abs_accel_mult = float(sc_cfg.get("abs_bonus_accel_mult", 12.0))
+    abs_thrust_thresh = float(sc_cfg.get("abs_bonus_thrust_thresh", 0.50))
+    abs_thrust_mult = float(sc_cfg.get("abs_bonus_thrust_mult", 15.0))
+    abs_zvol_thresh = float(sc_cfg.get("abs_bonus_zvol_thresh", 2.0))
+    abs_zvol_mult = float(sc_cfg.get("abs_bonus_zvol_mult", 8.0))
+    abs_clearance_max = float(sc_cfg.get("abs_bonus_clearance_max", 10.0))
+    abs_clearance_mult = float(sc_cfg.get("abs_bonus_clearance_mult", 2.0))
+
+    if is_opening:
+        # Early Market (09:15 - 10:00 IST): Agile breakout volume criteria
+        # Avoids overtuning the opening session where signals are active and profitable.
+        is_breakout_vol = has_baseline and ((rvol_5m >= opening_rvol) or (a_vol >= opening_accel))
+        is_breakdown_vol = has_baseline and ((rvol_5m >= opening_rvol) or (a_vol >= opening_accel))
+    else:
+        # Midday Session: Strict volume expansion AND intra-5m acceleration
+        # Rejects midday low-volume drift and decelerating volume as false breaks.
+        is_breakout_vol = has_baseline and (rvol_5m >= midday_rvol) and (a_vol >= midday_accel) and (pace >= midday_pace)
+        is_breakdown_vol = has_baseline and (rvol_5m >= midday_rvol) and (a_vol >= midday_accel) and (pace >= midday_pace)
+
+    bull_stage = "NORMAL"
+    bear_stage = "NORMAL"
+
+    if bull_breakout and range_pos >= bull_breakout_range_min:
+        # Confirmed volume-inflated breakout: award bonus, enforce minimum score
+        raw_bull = min(100.0, max(breakout_min_score, raw_bull + breakout_bonus))
+        bull_stage = "💥 BULL BREAKOUT"
+    elif bull_weak_break or (bull_breakout and range_pos < bull_breakout_range_min):
+        # Fluff / Low-volume fakeout or off-extreme drift: dock pts, enforce ceiling
+        raw_bull = min(fluff_ceiling, max(0.0, raw_bull - fluff_dock))
+        bull_stage = "👀 WEAK BREAK / NO VOL"
+    elif pattern_state.get("bull_coiling"):
+        raw_bull = min(100.0, max(coiling_min_score, raw_bull + coiling_bonus))
+        bull_stage = "🌀 BULL FLAG"
+    elif range_pos >= breakout_pos_min and is_breakout_vol:
+        bull_stage = "🚀 BREAKOUT"
+    elif range_pos >= forming_pos_min:
+        bull_stage = "⚡ FORMING"
+
+    if bear_breakdown and range_pos <= bear_breakdown_range_max:
+        raw_bear = min(100.0, max(breakout_min_score, raw_bear + breakout_bonus))
+        bear_stage = "💥 BEAR BREAKDOWN"
+    elif bear_weak_break or (bear_breakdown and range_pos > bear_breakdown_range_max):
+        raw_bear = min(fluff_ceiling, max(0.0, raw_bear - fluff_dock))
+        bear_stage = "👀 WEAK CRACK / NO VOL"
+    elif pattern_state.get("bear_coiling"):
+        raw_bear = min(100.0, max(coiling_min_score, raw_bear + coiling_bonus))
+        bear_stage = "🌀 BEAR FLAG"
+    elif range_pos <= breakdown_pos_max and is_breakdown_vol:
+        bear_stage = "🩸 BREAKDOWN"
+    elif range_pos <= cracking_pos_max:
+        bear_stage = "⚡ CRACKING"
+
+    # Low-volume damping: if volume completely dried up and not coiling
+    if has_baseline and rvol_5m < low_vol_rvol_5m and rvol_cum < low_vol_rvol_cum:
+        if not pattern_state.get("bull_coiling") and not bull_breakout:
+            raw_bull = min(low_vol_cap, max(0.0, raw_bull - low_vol_dock))
+        if not pattern_state.get("bear_coiling") and not bear_breakdown:
+            raw_bear = min(low_vol_cap, max(0.0, raw_bear - low_vol_dock))
+
+    # -----------------------------------------------------------------------
+    # Enhancement 3: Nifty Market Regime Bias
+    # -----------------------------------------------------------------------
+    nifty_pct = float(nifty_stats.get("pct_change", 0.0))
+    regime = "NEUTRAL"
+    bias_bonus_bull = 0.0
+    bias_bonus_bear = 0.0
+
+    if nifty_pct >= regime_thresh:
+        regime = "PRO_BULL"
+        raw_bull = min(100.0, raw_bull + raw_boost)
+        # Suppress bear setups in bull market
+        raw_bear = min(raw_suppress_cap, max(0.0, raw_bear + raw_suppress_penalty))
+        bias_bonus_bull = pro_bonus
+        bias_bonus_bear = counter_penalty
+    elif nifty_pct <= -regime_thresh:
+        regime = "PRO_BEAR"
+        raw_bear = min(100.0, raw_bear + raw_boost)
+        # Suppress bull setups in bear market
+        raw_bull = min(raw_suppress_cap, max(0.0, raw_bull + raw_suppress_penalty))
+        bias_bonus_bear = pro_bonus
+        bias_bonus_bull = counter_penalty
+
+    # Determine dominant direction
+    if raw_bull >= raw_bear:
+        rel_score = round(min(100.0, max(0.0, raw_bull)), 1)
+        direction = "BULL"
+        stage = bull_stage
+        regime_bias_bonus = bias_bonus_bull
+    else:
+        rel_score = round(min(100.0, max(0.0, raw_bear)), 1)
+        direction = "BEAR"
+        stage = bear_stage
+        regime_bias_bonus = bias_bonus_bear
+
+    # -----------------------------------------------------------------------
+    # Enhancement 2: Dual Scoring - Unbounded Absolute Score (S_abs)
+    # -----------------------------------------------------------------------
+    # Reward exceptional volume uncapped
+    bonus_rvol = max(0.0, (rvol_5m - abs_rvol_thresh) * abs_rvol_mult) if has_baseline else 0.0
+    # Reward explosive volume acceleration uncapped
+    bonus_accel = max(0.0, (a_vol - abs_accel_thresh) * abs_accel_mult)
+    # Reward extreme tick velocity uncapped
+    bonus_thrust = max(0.0, (thrust_velocity - abs_thrust_thresh) * abs_thrust_mult)
+    # Reward statistical variance surge uncapped
+    bonus_zvol = max(0.0, (z_vol - abs_zvol_thresh) * abs_zvol_mult) if has_baseline else 0.0
+
+    # Technical clearance bonus
+    clearance_pct = float(tech_indicators.get("clearance_pct", 0.0) if direction == "BULL" else tech_indicators.get("clearance_down_pct", 0.0))
+    bonus_clearance = min(abs_clearance_max, clearance_pct * abs_clearance_mult)
+
+    abs_score = rel_score + bonus_rvol + bonus_accel + bonus_thrust + bonus_zvol + bonus_clearance + regime_bias_bonus
+    abs_score = round(max(0.0, abs_score), 1)
+
+    return {
+        "score": rel_score,              # Bounded Relative Score [0, 100]
+        "absolute_score": abs_score,     # Unbounded Absolute Alpha Score
+        "direction": direction,
+        "stage": stage,
+        "has_baseline": has_baseline,
+        "market_regime": regime,
+        "nifty_pct": nifty_pct,
+        "is_vol_inflated": is_vol_inflated,
+        "pillars": {
+            "p1_volume": round(p1_volume, 1),
+            "p2_consolidation": round(p2_consolidation, 1),
+            "p3_momentum": round(bull_mom if direction == "BULL" else bear_mom, 1),
+            "p4_position": round(bull_pos if direction == "BULL" else bear_pos, 1),
+            "p5_thrust": round(thrust_pts, 1),
+        },
+        "bonuses": {
+            "rvol": round(bonus_rvol, 1),
+            "accel": round(bonus_accel, 1),
+            "thrust": round(bonus_thrust, 1),
+            "zvol": round(bonus_zvol, 1),
+            "clearance": round(bonus_clearance, 1),
+            "regime": round(regime_bias_bonus, 1),
+        },
+    }
+

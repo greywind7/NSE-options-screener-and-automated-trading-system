@@ -1,0 +1,59 @@
+{
+  "execution": {
+    "default_mode": "paper",
+    "enforce_market_hours": true,
+    "market_open_time": "09:15",
+    "eod_freeze_time": "15:15",
+    "eod_square_off_time": "15:20",
+    "market_close_time": "15:30",
+    "freeze_flag_dir": "logs",
+    "allowed_modes": [
+      "paper",
+      "paper_delayed",
+      "live",
+      "all"
+    ],
+    "paper": {
+      "starting_capital_per_sim": 250000.0,
+      "max_lots_per_trade": 1,
+      "max_capital_per_trade_pct": 0.50,
+      "brokerage_per_order": 30.0,
+      "output_csv": "recordings/{date}/paper_trades.csv",
+      "fill_at_spread": true
+    },
+    "paper_delayed": {
+      "starting_capital_per_sim": 250000.0,
+      "max_lots_per_trade": 1,
+      "max_capital_per_trade_pct": 0.50,
+      "brokerage_per_order": 30.0,
+      "output_csv": "recordings/{date}/paper_delayed_trades.csv",
+      "fill_at_spread": true,
+      "min_delay_ms": 200,
+      "max_delay_ms": 500
+    },
+    "sim": {
+      "starting_capital_per_sim": 100000.0,
+      "max_lots_per_trade": 1,
+      "brokerage_per_order": 30.0,
+      "output_csv": "recordings/{date}/trades_sim.csv",
+      "fill_against_depth": true,
+      "slippage_bps": 5.0,
+      "default_speed": 1.0
+    },
+    "live": {
+      "api_base_url": "https://api.upstox.com/v3",
+      "output_csv": "recordings/{date}/live_trades.csv",
+      "starting_capital_per_sim": 250000.0,
+      "max_capital_limit_inr": 250000.0,
+      "max_capital_per_trade_pct": 0.50,
+      "brokerage_per_order": 30.0,
+      "max_lots_limit": 2,
+      "kill_switch_loss_pct": 5.0,
+      "require_confirmation": true,
+      "settlement_quarantine_sec": 10.0,
+      "reconciliation_interval_sec": 30.0,
+      "eod_freeze_time": "15:10",
+      "eod_square_off_time": "15:15"
+    }
+  }
+}

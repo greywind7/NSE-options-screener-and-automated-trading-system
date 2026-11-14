@@ -1,0 +1,25 @@
+{
+  "instruments": {
+    "exchange": "NSE",
+    "universe_type": "FO_EQUITIES",
+    "min_lot_size": 1,
+    "max_underlying_count": 250,
+    "paths": {
+      "instrument_master_csv": "data/instrument.csv",
+      "filtered_universe_csv": "data/filtered.csv",
+      "volume_index_json": "data/index.json",
+      "subscription_manifest_json": "data/subscription_manifest.json"
+    },
+    "options_subscription": {
+      "mode": "hybrid",
+      "popular_strikes_above_atm": 3,
+      "popular_strikes_below_atm": 3,
+      "include_ce": true,
+      "include_pe": true,
+      "stream_depth": true,
+      "background_poll_remaining_strikes": true,
+      "background_poll_interval_sec": 30.0
+    }
+  }
+}
+

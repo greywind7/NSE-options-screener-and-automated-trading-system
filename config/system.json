@@ -1,0 +1,32 @@
+{
+  "system": {
+    "name": "Upstox Algorithmic Trading Infrastructure",
+    "version": "2.0.0",
+    "ipc": {
+      "transport": "multiprocessing.connection",
+      "address": "/tmp/upstox_market_feed.ipc",
+      "port": 5555,
+      "authkey": "upstox_algo_shared_secret",
+      "buffer_size_mb": 64,
+      "heartbeat_interval_sec": 1.0,
+      "max_reconnect_attempts": 10,
+      "backoff_factor": 1.5
+    },
+    "recorder": {
+      "enabled": true,
+      "record_dir": "recordings",
+      "flush_interval_sec": 2.0,
+      "buffer_capacity": 5000,
+      "format": "jsonl",
+      "compression": "none",
+      "split_option_depth": true
+    },
+    "logging": {
+      "level": "INFO",
+      "log_dir": "logs",
+      "main_log": "logs/runner.log",
+      "debug_log": "logs/debug.log"
+    }
+  }
+}
+
