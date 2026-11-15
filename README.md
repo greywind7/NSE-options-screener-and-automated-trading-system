@@ -192,5 +192,6 @@ python3 runner.py stop --all
 | [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SCORING_ENGINE_3_0.md) | Signal & Quantitative Specification (Zero score, 50% retracement invariant, directional thrust, CLV). |
 | [`SCORING_EVOLUTION.md`](file:///Users/yorha/Documents/Trading%20Stuff/SCORING_EVOLUTION.md) | Historical progression: Alpha rVOL $\to$ 100-Point Linear Sum Trap $\to$ Scoring 3.0 invariants. |
 | [`LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/LOW_LEVEL_DESIGN_2_0.md) | Implementation-ready Low-Level Design (DTypes, msgpack schemas, Strategy-Track-Mode IoC, Runner CLI). |
+| [`IMPLEMENTATION_MANIFEST.md`](file:///Users/yorha/Documents/Trading%20Stuff/IMPLEMENTATION_MANIFEST.md) | Granular 28-step engineering manifest (reasons, effects, failure risks, and regression fixes). |
 | [`SELF_AUDIT.md`](file:///Users/yorha/Documents/Trading%20Stuff/SELF_AUDIT.md) | Active bug registry, code reconnaissance, and architectural reconciliation matrix (CRIT-001 to MED-010). |
 | [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive) | Preserved historical brainstorms (`BRAINSTORM_A/B/C.md`), legacy audit, and scoring 1.0/2.0 specs. |
