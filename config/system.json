@@ -1,25 +1,38 @@
 {
   "system": {
-    "name": "Upstox Algorithmic Trading Infrastructure",
+    "name": "Upstox Algorithmic Trading Infrastructure Spec 2.0",
     "version": "2.0.0",
     "ipc": {
-      "transport": "multiprocessing.connection",
-      "address": "/tmp/upstox_market_feed.ipc",
-      "port": 5555,
+      "transport": "zeromq",
+      "feed_ipc": "ipc:///tmp/feed_equity.ipc",
+      "feed_equity_ipc": "ipc:///tmp/feed_equity.ipc",
+      "feed_options_ipc": "ipc:///tmp/feed_options.ipc",
+      "quotes_router_ipc": "ipc:///tmp/quotes_router.ipc",
+      "quotes_stream_ipc": "ipc:///tmp/quotes_stream.ipc",
+      "heartbeat_ipc": "ipc:///tmp/quotes_heartbeat.pub",
+      "scoring_alerts_ipc": "ipc:///tmp/scoring_alerts_pub.ipc",
+      "rms_strike_ipc": "ipc:///tmp/rms_strike_pub.ipc",
       "authkey": "upstox_algo_shared_secret",
-      "buffer_size_mb": 64,
-      "heartbeat_interval_sec": 1.0,
-      "max_reconnect_attempts": 10,
-      "backoff_factor": 1.5
+      "buffer_capacity": 200000,
+      "heartbeat_interval_sec": 1.0
+    },
+    "shm": {
+      "shm_name": "shm_ohlc_221",
+      "universe_size": 221,
+      "bars_per_day": 75,
+      "bytes_per_candle": 48
     },
     "recorder": {
       "enabled": true,
-      "record_dir": "recordings",
-      "flush_interval_sec": 2.0,
-      "buffer_capacity": 5000,
-      "format": "jsonl",
-      "compression": "none",
-      "split_option_depth": true
+      "output_dir": "recordings",
+      "flush_interval_sec": 300.0,
+      "batch_size": 5000,
+      "format": "parquet",
+      "compression": "snappy",
+      "split_option_depth": true,
+      "preserve_full_depth": true,
+      "debug": false,
+      "debug_log_path": "logs/recorder_ticks.log"
     },
     "logging": {
       "level": "INFO",
@@ -29,4 +42,3 @@
     }
   }
 }
-

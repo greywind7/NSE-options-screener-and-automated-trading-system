@@ -188,7 +188,7 @@ flowchart TD
 * **Decision**: Formally isolate the broker responsibilities:
   1. **Upstox API v2/v3**: Dedicated solely to **Market Data Ingestion**. Ingests the high-throughput WebSocket stream, downloads daily security masters, and builds the pre-market volume baseline.
   2. **Groww Trading API (`growwapi` / `GrowwAPI`)**: Dedicated exclusively to **Live Order Execution**. Uses the official Groww Python SDK for order placement, TOTP session management, resting Stop-Loss protection, and robust broker position reconciliation (`reconcile_broker_positions`).
-* **Parity Preservation**: All existing live adapter logic in `execution/live/live_adapter.py` is preserved intact.
+* **Parity Preservation**: All existing live adapter logic is preserved intact directly inside `execution/superstructures/live.py`.
 
 ---
 
@@ -455,9 +455,10 @@ CANDLE_DTYPE = np.dtype([
   - If a heartbeat arrives with `heartbeat.timestamp >= target_fill_ts`: Evaluates the pending order against its prevailing `cached_quote` without waiting for future ticks!
 * **Result**: Completely lazy, event-driven execution with zero CPU churn during quiet market intervals.
 
-### 6.2 Dynamic Unsubscribe Garbage Collection
-* When an active position hits its target or stop-loss, the superstructure sends an `UNSUB` frame to the `QuotesBroker` XPUB socket.
-* The broker immediately removes the IPC subscriber, preventing unneeded tick traffic over the bus.
+### 6.2 Dynamic Unsubscribe Garbage Collection with Multi-Client Reference Counting
+* When an active position hits its target or stop-loss, the superstructure sends an `UNSUBSCRIBE` request identifying its mode (`client_id="paper"`, `"paper_delayed"`, or `"live"`) to `QuotesBroker`.
+* The `QuotesBroker` manages subscriptions via reference counting (`subscribers_by_token[token] = set(client_ids)`).
+* When one superstructure exits a strike, its reference count decrements. Only when `ref_count == 0` (all concurrent modes have exited the contract) does the broker stop broadcasting ticks for that contract. This guarantees that concurrent modes (e.g. Paper and Paper Delayed) never prematurely truncate each other's live depth stream.
 
 ### 6.3 Process Failure & Auto-Recovery
 * Each process is managed by a lightweight supervisor (systemd / supervisord / launchd).

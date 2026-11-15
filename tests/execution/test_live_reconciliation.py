@@ -27,8 +27,8 @@ from unittest.mock import MagicMock, patch
 # Ensure project root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from execution.live.live_adapter import GrowwLiveAdapter
-from infrastructure.market_data.position_registry import ProtectedPositionRegistry
+from execution.superstructures.live import GrowwLiveAdapter, LiveSuperstructure
+from core.feed.position_registry import ProtectedPositionRegistry
 
 
 class MockGrowwReconciliationClient:

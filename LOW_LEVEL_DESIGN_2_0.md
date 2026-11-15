@@ -193,8 +193,25 @@ $$\text{Total Memory} = 221 \text{ symbols} \times 75 \text{ bars} \times 48 \te
 - **Index Lookup Formula**:
   $$\text{Row Index} = \text{Symbol Index} \times 75 + \text{Bar Index}$$
   - Where `Bar Index` runs from $0 \dots 74$ ($09:15 \dots 15:30$ IST).
-- **Write Fence Protocol**:
-  The `CandleManager` updates the active candle in-place. Because readers are reading single 48-byte aligned rows, NumPy memory-mapped reads are naturally atomic on 64-bit platforms without mutex contention. An integer `write_sequence` header in byte offset $0 \dots 7$ can be read before and after reading to ensure no torn reads during candle close transitions.
+- **Seqlock Memory Synchronization Protocol (Lightweight Zero-Mutex Sync)**:
+  To eliminate torn reads during in-place bar mutations without paying the steep cost of OS mutexes or semaphore context switches, `shm_layout.py` pre-allocates a 16-byte `SEQLOCK_DTYPE` header per symbol:
+  ```python
+  SEQLOCK_DTYPE = np.dtype([
+      ("sequence_id", "<u8"),     # 8 bytes: sequence counter (odd = updating, even = stable)
+      ("last_update_ns", "<i8"),  # 8 bytes: nanosecond timestamp of last tick
+  ], align=False)
+  ```
+  - **Single Writer Protocol (`CandleManager`)**:
+    1. Read current `seq = headers[idx]["sequence_id"]`.
+    2. Mark write in-progress: `headers[idx]["sequence_id"] = seq + 1` (odd).
+    3. Write candle values in-place (`close, high, low, volume, rvol, atr`).
+    4. Mark write complete: `headers[idx]["sequence_id"] = seq + 2` (even).
+  - **Lock-Free Reader Protocol (`ScoringEngine3`)**:
+    1. Read `seq1 = headers[idx]["sequence_id"]`. If `seq1 & 1` (odd), writer is updating; spin/retry.
+    2. Copy 48-byte candle data from Shared Memory into local register/stack.
+    3. Read `seq2 = headers[idx]["sequence_id"]`.
+    4. If `seq1 == seq2`, the read was atomic, consistent, and untorn.
+    5. If `seq1 != seq2`, writer mutated data during copy; discard and retry (up to 10 iterations, typical retry count: 0).
 
 #### Lifecycle & Process Ownership (Creator vs. Readers):
 - **Why `prepare` Does NOT Allocate SHM**: If a short-lived CLI command like `prepare` creates a Python `SharedMemory` segment and terminates, Python's internal `resource_tracker` daemon automatically unlinks the memory from the OS.
@@ -218,7 +235,7 @@ $$\text{Total Memory} = 221 \text{ symbols} \times 75 \text{ bars} \times 48 \te
 - **`ScoringEngine3` as Lock-Free Reader**:
   The scoring engine attaches to the named segment without creating it (`create=False`):
   ```python
-  # In core/scoring/engine.py (Lock-Free Reader)
+  # In strategies/momentum/scoring_engine.py (Lock-Free Reader)
   import time
   from multiprocessing.shared_memory import SharedMemory
   
@@ -287,36 +304,51 @@ All inter-process messages utilize MessagePack (`msgpack`) for sub-microsecond b
   ```
 
 #### D. Quotes Broker SNAPSHOT & STREAM
-- **Snapshot (`quotes_snapshot.ipc`)**:
-  - **Pattern**: ZeroMQ `REP` (QuotesBroker) / `REQ` (RMS)
-  - **Request**: `{"cmd": "SNAPSHOT", "tokens": [45120, 45121]}`
+- **Snapshot & Dynamic Sub/Unsub (`quotes_router.ipc`)**:
+  - **Pattern**: ZeroMQ `ROUTER` (QuotesBroker) / `DEALER` (Superstructures & RMS)
+  - **Requests**:
+    - `{"action": "GET_QUOTES", "tokens": ["NSE:45120"], "best_depth": true}` (Queries snapshot with 1-lot `best_depth=True` or full 5-level `best_depth=False`)
+    - `{"action": "SUBSCRIBE", "tokens": ["NSE:45120"], "client_id": "paper"}` (Registers subscription with client identification)
+    - `{"action": "UNSUBSCRIBE", "tokens": ["NSE:45120"], "client_id": "paper"}` (Decrements client subscription reference count)
+  - **Multi-Client Reference Counting**:
+    - `QuotesBroker` maintains `subscribers_by_token[token] = set(client_ids)` where `ref_count = len(subscribers_by_token[token])`.
+    - Multiple concurrent superstructures (`paper`, `paper_delayed`, `live`) can hold open trades on the same strike concurrently.
+    - When one mode exits and unsubs, `QuotesBroker` decrements that mode's subscription. Only when `ref_count == 0` (all holding superstructures have exited) does `QuotesBroker` stop broadcasting ticks for that contract.
   - **Response**:
     ```python
     {
-        "status": "OK",
+        "status": "SUCCESS",
+        "subscribed_tokens": ["NSE:45120"],
+        "ref_counts": {"NSE:45120": 2},
         "quotes": {
-            45120: {"ltp": 85.5, "bid": 85.4, "ask": 85.55, "bid_qty": 1800, "ask_qty": 2250, "ts": 1700000300}
+            "NSE:45120": {"token": "NSE:45120", "ltp": 85.5, "bid": 85.4, "ask": 85.55, "bid_qty": 1800, "ask_qty": 2250, "timestamp": 1700000300}
         }
     }
     ```
 - **Stream (`quotes_stream.ipc`)**:
-  - **Pattern**: ZeroMQ `XPUB` (QuotesBroker) / `XSUB` (Superstructure)
-  - **Topic**: `Q.<token>` or `HEARTBEAT`
+  - **Pattern**: ZeroMQ `PUB` (QuotesBroker) / `SUB` (Superstructures)
+  - **Topic**: `QUOTE.<token>` or `HEARTBEAT`
   - **Payload (`msgpack`)**:
     ```python
     {
-        "token": 45120,
+        "token": "NSE:45120",
+        "symbol": "TATAMOTORS",
         "ltp": 85.5,
         "bid": 85.4,
         "ask": 85.55,
-        "ts": 1700000301
+        "bid_qty": 1800,
+        "ask_qty": 2250,
+        "timestamp": 1700000301
     }
     ```
   - **Heartbeat Payload**:
     ```python
     {
         "type": "HEARTBEAT",
-        "ts": 1700000301
+        "timestamp": 1700000301,
+        "active_quotes_count": 3500,
+        "subscribed_count": 14,
+        "ref_counts": {"NSE:45120": 2}
     }
     ```
 
@@ -347,34 +379,52 @@ All inter-process messages utilize MessagePack (`msgpack`) for sub-microsecond b
 ## 4. Component Implementation Specifications
 
 ### 4.1 FeedHandler (`core/feed/feed_handler.py`)
-- **Objective**: Ingest live WebSocket ticks or replay recording files, isolate equity from derivatives, and publish onto separate ZeroMQ sockets.
-- **Critical Logic**:
-  - Pre-loads `instruments.json` mapping: `equity_tokens` (NSE cash) vs `option_tokens` (NFO).
-  - Ticks matching `equity_tokens` $\to$ serialize & push to `ipc:///tmp/feed_equity.ipc`.
-  - Ticks matching `option_tokens` $\to$ serialize & push to `ipc:///tmp/feed_options.ipc`.
-  - Zero option tick traffic touches `CandleManager` or `ScoringEngine`.
+- **Objective**: Multi-source market data ingestion engine (Upstox WebSocket v3 Protobuf, high-speed REST poller failover, and Mock engine) with strict separation of Cash Equities and Derivatives Options onto two physically distinct ZeroMQ IPC sockets:
+  - `feed_equity_ipc` (`ipc:///tmp/feed_equity.ipc`): Broadcasts `TICK.EQ` (consumed exclusively by `CandleManager` and `MarketRecorder`).
+  - `feed_options_ipc` (`ipc:///tmp/feed_options.ipc`): Broadcasts `TICK.OPT` (consumed exclusively by `QuotesBroker` and `MarketRecorder`).
+- **Dynamic Strike Subscription & Capacity Management**:
+  - Upstox imposes an account limit of **5,000 streamed instruments**. With 221 F&O equities and 35,000+ option strikes, streaming every strike simultaneously is physically impossible.
+  - `FeedHandler` maintains a dynamic **Popular Options Window**:
+    - Evaluates ATM strike on underlying price updates: $K_{\text{atm}} = \arg\min_K |K - \text{LTP}|$.
+    - Subscribes to ATM $\pm 3$ strikes (7 strikes total: 7 CE + 7 PE = 14 contracts per stock).
+    - Hysteresis Retention Window: ATM $\pm 4$ strikes (prevents unneeded sub/unsub oscillations when price fluctuates around strike edges).
+    - Capacity Ceiling (`max_stream_contracts` = 1,800): Enforces a hard budget (215 equities + ~1,500 active options), auto-pruning unheld dynamic options when capacity is reached.
+- **Critical Active Position Protection Guard**:
+  - Queries `ProtectedPositionRegistry.get_instance().get_protected_keys()`.
+  - Any contract key associated with an open position in ANY execution mode (`live`, `paper`, `paper_delayed`, `sim`) or track is **unconditionally protected**:
+    $$\text{keys\_to\_remove} = \text{keys\_to\_remove} - \text{protected\_keys}$$
+    $$\text{keys\_to\_add} = \text{keys\_to\_add} \cup (\text{protected\_keys} \cap \text{all\_options\_for\_symbol})$$
+  - Open positions are NEVER unsubscribed until the trade exits and position registry clears.
+- **Depth Preservation**:
+  - Full 5-level market depth arrays (`bids: [[p, q, o], ...]`, `asks: [[p, q, o], ...]`) are extracted from Protobuf `MarketLevel` and serialized in `TickEvent` for archival and simulation parity.
 
 ```python
 class FeedHandler:
-    def __init__(self, eq_pub_url="ipc:///tmp/feed_equity.ipc", opt_pub_url="ipc:///tmp/feed_options.ipc"):
+    def __init__(self, feed_equity_ipc="ipc:///tmp/feed_equity.ipc", feed_options_ipc="ipc:///tmp/feed_options.ipc"):
         self.ctx = zmq.Context()
-        self.eq_pub = self.ctx.socket(zmq.PUB)
-        self.eq_pub.bind(eq_pub_url)
-        self.opt_pub = self.ctx.socket(zmq.PUB)
-        self.opt_pub.bind(opt_pub_url)
-        self.equity_tokens = set() # Populated from instrument master
-        
-    def on_tick(self, token: int, ltp: float, vol: int, bid: float = 0.0, ask: float = 0.0, 
-                bid_qty: int = 0, ask_qty: int = 0, oi: int = 0, ts: int = 0):
-        if token in self.equity_tokens:
-            payload = msgpack.packb({"token": token, "ltp": ltp, "vol": vol, "ts": ts})
-            self.eq_pub.send_multipart([f"EQ.{token}".encode(), payload])
+        self.pub_eq = self.ctx.socket(zmq.PUB)
+        self.pub_eq.bind(feed_equity_ipc)
+        self.pub_opt = self.ctx.socket(zmq.PUB)
+        self.pub_opt.bind(feed_options_ipc)
+        self.position_registry = ProtectedPositionRegistry.get_instance()
+
+    def publish_tick(self, token: str, symbol: str, ltp: float, bid: float = 0.0, ask: float = 0.0,
+                     bid_qty: int = 0, ask_qty: int = 0, exchange_ts: float = 0.0, received_ts: float = 0.0,
+                     bids: list = None, asks: list = None):
+        canonical_token = normalize_instrument_token(token)
+        is_opt = is_option_contract(canonical_token)
+        event = TickEvent(
+            token=canonical_token, symbol=symbol, ltp=ltp, bid=bid, ask=ask,
+            bid_qty=bid_qty, ask_qty=ask_qty, exchange_timestamp=exchange_ts,
+            received_timestamp=received_ts, bids=bids or [], asks=asks or []
+        )
+        payload = pack_message(event)
+        if is_opt:
+            self.pub_opt.send_multipart([b"TICK.OPT", payload])
         else:
-            payload = msgpack.packb({
-                "token": token, "ltp": ltp, "bid": bid, "ask": ask,
-                "bid_qty": bid_qty, "ask_qty": ask_qty, "oi": oi, "ts": ts
-            })
-            self.opt_pub.send_multipart([f"OPT.{token}".encode(), payload])
+            self.pub_eq.send_multipart([b"TICK.EQ", payload])
+            if self.enable_dynamic_options:
+                self.evaluate_dynamic_options(canonical_token, ltp)
 ```
 
 ---
@@ -465,7 +515,7 @@ class QuotesBroker:
 
 ---
 
-### 4.4 Scoring Engine 3.0 (`core/scoring/engine.py`)
+### 4.4 Scoring Engine 3.0 (`strategies/momentum/scoring_engine.py`)
 - **Objective**: Sub-microsecond spin-loop scanning `shm_ohlc_221` for all 221 symbols, applying early exits, evaluating Flag Breakouts (50% retracement guard) and Pure 3-Candle Impulses, and pushing sorted actionable candidates to RMS.
 
 ```mermaid
@@ -1067,7 +1117,7 @@ def get_core_manifest(feed_mode: str = "ws", candlemanager: bool = True, quotesb
 
 def get_strategy_manifest(strategy: str, modes: list[str], no_dashboard: bool = False):
     manifest = [
-        ("ScoringEngine", [sys.executable, "-m", "core.scoring.engine", "--strategy", strategy]),
+        ("ScoringEngine", [sys.executable, "-m", "strategies.momentum.scoring_engine", "--strategy", strategy]),
         ("RMSResolver",   [sys.executable, "-m", "core.rms.rms_service"])
     ]
     for m in modes:

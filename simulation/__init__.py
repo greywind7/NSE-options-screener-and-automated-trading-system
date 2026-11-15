@@ -1,10 +1,9 @@
 """
 simulation
 ==========
-Deterministic historical simulation subsystem for algorithmic trading backtests.
+High-speed exact-timestamp columnar simulation subsystem.
 """
 
-from simulation.simulation_engine import SimulationEngine
+from simulation.columnar_sim_engine import ColumnarSimEngine
 
-__all__ = ["SimulationEngine"]
-
+__all__ = ["ColumnarSimEngine"]

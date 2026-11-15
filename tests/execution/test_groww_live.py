@@ -15,9 +15,10 @@ from unittest.mock import MagicMock
 # Ensure project root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from execution.live.live_adapter import (
+from execution.superstructures.live import (
     GrowwLiveAdapter,
     LiveExecutionAdapter,
+    LiveSuperstructure,
     generate_groww_access_token,
 )
 
@@ -117,6 +118,7 @@ class TestGrowwLiveAdapter(unittest.TestCase):
             self.assertFalse(adapter.live_confirmed)
             self.assertTrue(os.path.exists(csv_path))
             self.assertIs(LiveExecutionAdapter, GrowwLiveAdapter)
+            adapter.shutdown()
 
     def test_groww_adapter_dry_run_safety(self):
         """Verify that when live_confirmed is False, adapter executes in dry-run mode."""
@@ -149,6 +151,7 @@ class TestGrowwLiveAdapter(unittest.TestCase):
             self.assertEqual(len(positions), 1)
             self.assertEqual(positions[0]["symbol"], "NSE_INDEX|Nifty 50")
             self.assertEqual(positions[0]["quantity"], 50)
+            adapter.shutdown()
 
     def test_groww_adapter_official_sdk_client_integration(self):
         """Verify that GrowwLiveAdapter routes order calls directly to the GrowwAPI client object."""
@@ -241,6 +244,7 @@ class TestGrowwLiveAdapter(unittest.TestCase):
             self.assertEqual(canc_res.get("status"), "SUCCESS")
             self.assertEqual(len(mock_client.cancelled_orders), 1)
             self.assertEqual(mock_client.cancelled_orders[0]["groww_order_id"], "GROWW-1")
+            adapter.shutdown()
 
     def test_groww_adapter_lifecycle_order_status_modify_cancel(self):
         """Verify get_order_status, modify_order, and cancel_order contracts."""
@@ -278,6 +282,7 @@ class TestGrowwLiveAdapter(unittest.TestCase):
             self.assertEqual(canc_res.get("status"), "success")
             st_canc = adapter.get_order_status(oid)
             self.assertEqual(st_canc.get("status"), "CANCELLED")
+            adapter.shutdown()
 
     def test_groww_adapter_exit_and_pnl_summary(self):
         """Verify round-trip trade settlement, brokerage, and summary calculation."""
@@ -327,6 +332,7 @@ class TestGrowwLiveAdapter(unittest.TestCase):
             self.assertEqual(summary["losses"], 0)
             self.assertEqual(summary["win_rate"], 100.0)
             self.assertEqual(summary["net_realized"], 1710.0)
+            adapter.shutdown()
 
     def test_groww_adapter_polling_lifecycle(self):
         """Verify background polling thread lifecycle and shutdown."""

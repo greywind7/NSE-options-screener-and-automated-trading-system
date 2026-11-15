@@ -34,9 +34,9 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from infrastructure.common.time_utils import normalize_time_str
+from core.common.time_utils import normalize_time_str
 
 
 def load_json_config(path: str) -> Dict[str, Any]:
@@ -78,10 +78,10 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     print(f"Time        : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
 
-    from infrastructure.instruments.master_fetcher import run_master_fetcher
-    from infrastructure.instruments.instrument_filter import run_instrument_filter
-    from infrastructure.volume.volume_index import run_volume_indexer
-    from infrastructure.instruments.subscription_manifest import run_manifest_generator
+    from core.instruments.master_fetcher import run_master_fetcher
+    from core.instruments.instrument_filter import run_instrument_filter
+    from core.volume.volume_index import run_volume_indexer
+    from core.instruments.subscription_manifest import run_manifest_generator
 
     sys_cfg = load_json_config("config/system.json")
     inst_cfg = load_json_config("config/instruments.json")
@@ -208,8 +208,8 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 
     # Maintenance: Prune stale preparation files from older trading sessions and rotate debug logs
     try:
-        from infrastructure.instruments.cleanup import prune_old_preparation_files
-        from infrastructure.auth.upstox_auth import prune_debug_log
+        from core.instruments.cleanup import prune_old_preparation_files
+        from core.auth.upstox_auth import prune_debug_log
         prune_old_preparation_files(keep_session_date=session_date)
         prune_debug_log("logs/debug.log")
     except Exception as e:
@@ -218,9 +218,124 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+from scripts.run_distributed import (
+    spawn_process,
+    supervise_processes,
+    kill_all_registered,
+    load_pids,
+    is_pid_alive,
+)
+
+
+def cmd_core(args: argparse.Namespace) -> int:
+    """Launch centralized Core Tier: Ingestion, Shared Memory Candle Manager, Quotes Broker, and optional Recorder."""
+    feed_flag = getattr(args, "feed", False)
+    candle_flag = getattr(args, "candlemanager", False)
+    quotes_flag = getattr(args, "quotesbroker", False)
+    record_flag = getattr(args, "record", False)
+
+    # If none of the service flags are passed, start full core suite by default
+    if not (feed_flag or candle_flag or quotes_flag):
+        feed_flag = True
+        candle_flag = True
+        quotes_flag = True
+
+    print("=" * 80)
+    print("🚀 LAUNCHING TRADING SYSTEM SPEC 2.0 - CORE INFRASTRUCTURE TIER")
+    print("=" * 80)
+    py_bin = sys.executable
+    procs = []
+
+    # 1. Feed Handler
+    feed_mode = getattr(args, "mode", "ws")
+    feed_cmd = [py_bin, "-m", "core.feed.feed_handler", "--mode", feed_mode]
+    p_feed = spawn_process(feed_cmd, "feed_handler", "logs/feed_handler.log")
+    procs.append(p_feed)
+    print(f"  • Feed Handler      : Spawned (PID: {p_feed.pid}, Mode: {feed_mode})")
+
+    # 2. Candle Manager
+    candle_cmd = [py_bin, "-m", "core.candles.candle_manager"]
+    p_candle = spawn_process(candle_cmd, "candle_manager", "logs/candle_manager.log")
+    procs.append(p_candle)
+    print(f"  • Candle Manager    : Spawned (PID: {p_candle.pid})")
+
+    # 3. Quotes Broker
+    quotes_cmd = [py_bin, "-m", "core.quotes.quotes_broker"]
+    p_quotes = spawn_process(quotes_cmd, "quotes_broker", "logs/quotes_broker.log")
+    procs.append(p_quotes)
+    print(f"  • Quotes Broker     : Spawned (PID: {p_quotes.pid})")
+
+    # 4. Optional Market Recorder
+    if record_flag:
+        rec_cmd = [py_bin, "-m", "core.recorder.market_recorder"]
+        if getattr(args, "debug", False):
+            rec_cmd.append("--debug")
+        p_rec = spawn_process(rec_cmd, "market_recorder", "logs/market_recorder.log")
+        procs.append(p_rec)
+        print(f"  • Market Recorder   : Spawned (PID: {p_rec.pid})")
+
+    print("=" * 80)
+    print("✓ Core tier online. Press Ctrl+C to stop all core services.")
+    print("=" * 80)
+    return supervise_processes(procs)
+
+
+def cmd_feed(args: argparse.Namespace) -> int:
+    """Launch Feed Handler independently, with optional --candles and --record forks."""
+    feed_mode = getattr(args, "mode", "ws")
+    py_bin = sys.executable
+    procs = []
+
+    if getattr(args, "candles", False):
+        p_candle = spawn_process([py_bin, "-m", "core.candles.candle_manager"], "candle_manager", "logs/candle_manager.log")
+        procs.append(p_candle)
+        print(f"  • Candle Manager    : Spawned (PID: {p_candle.pid})")
+
+    if getattr(args, "record", False):
+        p_rec = spawn_process([py_bin, "-m", "core.recorder.market_recorder"], "market_recorder", "logs/market_recorder.log")
+        procs.append(p_rec)
+        print(f"  • Market Recorder   : Spawned (PID: {p_rec.pid})")
+
+    feed_cmd = [py_bin, "-m", "core.feed.feed_handler", "--mode", feed_mode]
+    p_feed = spawn_process(feed_cmd, "feed_handler")
+    procs.append(p_feed)
+    print(f"  • Feed Handler      : Spawned (PID: {p_feed.pid}, Mode: {feed_mode})")
+    return supervise_processes(procs)
+
+
+def cmd_candlemanager(args: argparse.Namespace) -> int:
+    """Launch Candle Manager independently."""
+    py_bin = sys.executable
+    cmd = [py_bin, "-m", "core.candles.candle_manager"]
+    p = spawn_process(cmd, "candle_manager")
+    print(f"  • Candle Manager    : Spawned (PID: {p.pid})")
+    return supervise_processes([p])
+
+
+def cmd_quotesbroker(args: argparse.Namespace) -> int:
+    """Launch Quotes Broker independently."""
+    py_bin = sys.executable
+    cmd = [py_bin, "-m", "core.quotes.quotes_broker"]
+    p = spawn_process(cmd, "quotes_broker")
+    print(f"  • Quotes Broker     : Spawned (PID: {p.pid})")
+    return supervise_processes([p])
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Launch Universal Terminal Dashboard."""
+    from ui.dashboard import TerminalDashboard
+    d = TerminalDashboard(
+        alerts_ipc=getattr(args, "alerts_ipc", "ipc:///tmp/scoring_alerts_pub.ipc"),
+        rms_ipc=getattr(args, "rms_ipc", "ipc:///tmp/rms_strike_pub.ipc"),
+        recordings_dir=getattr(args, "recordings_dir", "recordings"),
+    )
+    d.start(refresh_interval=getattr(args, "refresh", 1.0))
+    return 0
+
+
 def cmd_listen(args: argparse.Namespace) -> int:
     """Launch centralized Market Data Listener service."""
-    from infrastructure.market_data.listener import MarketDataListener
+    from core.feed.upstox_listener import MarketDataListener
     is_mcx = getattr(args, "mcx", False) or getattr(args, "exchange", "NSE").upper() == "MCX"
     exchange = "MCX" if is_mcx else "NSE"
     listener = MarketDataListener(
@@ -242,19 +357,17 @@ def cmd_listen(args: argparse.Namespace) -> int:
 
 def cmd_record(args: argparse.Namespace) -> int:
     """Launch independent market data recorder service."""
-    from infrastructure.recorder.recorder import MarketRecorder
-    session_date = getattr(args, "date", None) or datetime.now().strftime("%Y%m%d")
-    recorder = MarketRecorder(
-        record_dir=args.record_dir,
-        session_date=session_date,
-    )
+    from core.recorder.market_recorder import MarketRecorder
+    output_dir = getattr(args, "record_dir", "recordings")
+    debug_flag = getattr(args, "debug", False)
+    recorder = MarketRecorder(output_dir=output_dir, debug=debug_flag if debug_flag else None)
     print("=" * 80)
     print("💾 MARKET DATA RECORDER SERVICE ACTIVE")
-    print(f"Session Date: {session_date} | Output Directory: {args.record_dir}/{session_date}")
+    print(f"Output Directory: {output_dir}")
     print("=" * 80)
     try:
         recorder.start()
-        print("✓ Recorder online. Capturing ticks and option depth from local IPC stream...")
+        print("✓ Recorder online. Archiving ticks to columnar parquet...")
         print("  (Press Ctrl+C to stop recording)\n")
         while True:
             time.sleep(1)
@@ -264,180 +377,163 @@ def cmd_record(args: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_start_v2(args: argparse.Namespace) -> int:
+    """Launch 2.0 Distributed Multi-Track Trading System."""
+    mode_arg = getattr(args, "mode", "paper") or "paper"
+    modes = [m.strip().lower() for m in mode_arg.split(",") if m.strip()]
+
+    raw_tracks = getattr(args, "tracks", None)
+    if not raw_tracks or raw_tracks.strip().upper() == "ALL":
+        from common.tracks.factory import get_enabled_track_names
+        tracks = get_enabled_track_names()
+    else:
+        tracks = [t.strip() for t in raw_tracks.split(",") if t.strip()]
+
+    print("=" * 80)
+    print("⚡ LAUNCHING TRADING SYSTEM SPEC 2.0 - DISTRIBUTED EXECUTION")
+    print(f"Modes  : {', '.join(m.upper() for m in modes)}")
+    print(f"Tracks : {', '.join(tracks)}")
+    print("=" * 80)
+
+    py_bin = sys.executable
+    procs = []
+
+    # 1. Scoring Engine 3.0 (Momentum Strategy)
+    p_score = spawn_process([py_bin, "-m", "strategies.momentum.scoring_engine"], "scoring_engine", "logs/scoring_engine.log")
+    procs.append(p_score)
+    print(f"  • Scoring Engine 3.0 : Spawned (PID: {p_score.pid})")
+
+    # 2. RMS Service
+    p_rms = spawn_process([py_bin, "-m", "core.rms.rms_service"], "rms_service", "logs/rms_service.log")
+    procs.append(p_rms)
+    print(f"  • RMS & Strikes      : Spawned (PID: {p_rms.pid})")
+
+    # 3. Execution Superstructures (one child process per mode and track)
+    for m in modes:
+        for tr in tracks:
+            exec_code = f"from execution.superstructures.{'paper' if m == 'paper' else 'delayed' if m == 'paper_delayed' else 'live'} import {'Paper' if m == 'paper' else 'Delayed' if m == 'paper_delayed' else 'Live'}Superstructure; s = {'Paper' if m == 'paper' else 'Delayed' if m == 'paper_delayed' else 'Live'}Superstructure(track_names=['{tr}']); s.start()"
+            p_exec = spawn_process([py_bin, "-c", exec_code], f"exec_{m}_{tr}", f"logs/exec_{m}_{tr}.log")
+            procs.append(p_exec)
+            print(f"  • Track Process      : {m.upper()} [{tr}] (PID: {p_exec.pid})")
+
+    # 4. Optional Market Recorder
+    if getattr(args, "record", False):
+        rec_cmd = [py_bin, "-m", "core.recorder.market_recorder"]
+        if getattr(args, "debug", False):
+            rec_cmd.append("--debug")
+        p_rec = spawn_process(rec_cmd, "market_recorder", "logs/market_recorder.log")
+        procs.append(p_rec)
+        print(f"  • Market Recorder   : Spawned (PID: {p_rec.pid})")
+
+    # 5. Universal Dashboard (Started implicitly)
+    dash_cmd = [py_bin, "-m", "ui.dashboard", "--modes", ",".join(modes), "--tracks", ",".join(tracks)]
+    p_dash = spawn_process(dash_cmd, "dashboard")
+    procs.append(p_dash)
+    print(f"  • Universal Dashboard: Spawned (PID: {p_dash.pid})")
+
+    os.makedirs("logs", exist_ok=True)
+    with open("logs/strategy.pid", "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+
+    print("=" * 80)
+    print("✓ All distributed processes online. Press Ctrl+C to terminate.")
+    print("=" * 80)
+    return supervise_processes(procs)
+
+
 def cmd_start(args: argparse.Namespace) -> int:
-    """Launch trading strategy against local market data feed."""
-    track_filter = getattr(args, "track", "ALL")
-    view_mode = getattr(args, "view", "all")
-    is_mcx = getattr(args, "mcx", False) or getattr(args, "exchange", "NSE").upper() == "MCX"
-    exchange = "MCX" if is_mcx else "NSE"
-    vol_path = "data/index_mcx.json" if is_mcx else "data/index.json"
-    manifest_path = "data/subscription_manifest_mcx.json" if is_mcx else "data/subscription_manifest.json"
-
-    strat_config_path = getattr(args, "strategy_config", None) or getattr(args, "config", None) or "config/strategies.json"
-    exec_config_path = getattr(args, "execution_config", None) or "config/execution.json"
-
-    strat_cfg = load_json_config(strat_config_path)
-    exec_cfg = load_json_config(exec_config_path)
-
-    mom_cfg = strat_cfg.get("strategies", {}).get("momentum", {})
-    mode_arg = getattr(args, "mode", None)
-    if not mode_arg:
-        mode_arg = exec_cfg.get("execution", {}).get("default_mode", "paper")
-    primary_mode = mode_arg.split(",")[0].strip().lower()
-    mode_cfg = exec_cfg.get("execution", {}).get(primary_mode, {})
-
-    # 1. Capital resolution (CLI override > execution.json > fallback 100k)
-    capital = args.capital
-    if capital is None:
-        candidates_cap = [
-            mode_cfg.get("starting_capital_per_sim"),
-            mode_cfg.get("max_capital_limit_inr"),
-            mode_cfg.get("capital_limit"),
-            mode_cfg.get("limits"),
-            exec_cfg.get("execution", {}).get("starting_capital_per_sim"),
-            exec_cfg.get("execution", {}).get("max_capital_limit_inr"),
-            exec_cfg.get("execution", {}).get("capital_limit"),
-            exec_cfg.get("execution", {}).get("limits"),
-            exec_cfg.get("execution", {}).get("paper_delayed", {}).get("starting_capital_per_sim") if "delayed" in primary_mode else None,
-            exec_cfg.get("execution", {}).get("paper", {}).get("starting_capital_per_sim"),
-        ]
-        val_cap = next((c for c in candidates_cap if c is not None), 100000.0)
-        capital = float(val_cap)
-
-    # 2. View score resolution (CLI override > strategies.json > fallback 67)
-    min_score = args.min_score
-    if min_score is None:
-        candidates_vscore = [
-            mom_cfg.get("minimum_view_score"),
-            mom_cfg.get("min_view_score"),
-            mom_cfg.get("min_score"),
-            strat_cfg.get("strategies", {}).get("minimum_view_score"),
-            strat_cfg.get("strategies", {}).get("min_view_score"),
-        ]
-        val_vscore = next((s for s in candidates_vscore if s is not None), 67)
-        min_score = int(val_vscore)
-
-    # 3. Trade execution score resolution (CLI override > strategies.json > fallback 70)
-    min_trade_score = getattr(args, "min_trade_score", None)
-    if min_trade_score is None:
-        candidates_tscore = [
-            mom_cfg.get("minimum_trade_score"),
-            mom_cfg.get("min_trade_score"),
-            mom_cfg.get("trade_score"),
-            strat_cfg.get("strategies", {}).get("minimum_trade_score"),
-            strat_cfg.get("strategies", {}).get("min_trade_score"),
-        ]
-        val_tscore = next((s for s in candidates_tscore if s is not None), 70)
-        min_trade_score = int(val_tscore)
-
-    # 4. Show positions
-    show_positions = args.show_positions or mom_cfg.get("show_positions", False)
-
-    # 5. Market hours and EOD timing resolution (CLI override > strategies.json > fallback defaults)
-    market_open_time = normalize_time_str(getattr(args, "market_open_time", None) or mom_cfg.get("risk", {}).get("market_open_time", "09:00" if is_mcx else "09:15"), "09:00" if is_mcx else "09:15")
-    market_close_time = normalize_time_str(getattr(args, "market_close_time", None) or mom_cfg.get("risk", {}).get("market_close_time", "23:30" if is_mcx else "15:30"), "23:30" if is_mcx else "15:30")
-    eod_time = normalize_time_str(getattr(args, "eod_time", None) or mom_cfg.get("risk", {}).get("eod_square_off_time", "23:25" if is_mcx else "15:20"), "23:25" if is_mcx else "15:20")
-    eod_freeze_time = normalize_time_str(getattr(args, "eod_freeze_time", None) or mom_cfg.get("risk", {}).get("eod_freeze_time", "23:15" if is_mcx else "15:15"), "23:15" if is_mcx else "15:15")
-
-    print("=" * 80)
-    print("⚡ STARTING TRADING STRATEGY")
-    print(f"Strategy: {args.strategy} | Exchange: {exchange} | Mode: {args.mode.upper()} | Track: {track_filter} | View: {view_mode.upper()}")
-    print(f"Capital: ₹{capital:,.0f} | View Score: {min_score} | Min Trade Score: {min_trade_score}")
-    print(f"Continuous Trading: {market_open_time} - {market_close_time} IST | EOD Square-Off: {eod_time} IST")
-    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 80)
-
-    from strategies.momentum.strategy import MomentumStrategyRunner
-    runner = MomentumStrategyRunner(
-        mode=args.mode,
-        show_positions=show_positions,
-        track_filter=track_filter,
-        view_mode=view_mode,
-        capital=capital,
-        min_score=min_score,
-        min_trade_score=min_trade_score,
-        volume_index_path=vol_path,
-        manifest_path=manifest_path,
-        config_path=strat_config_path,
-        execution_config_path=exec_config_path,
-        dynamic_lookback=getattr(args, "dynamic_lookback", None),
-        eod_square_off_time=eod_time,
-        eod_freeze_time=eod_freeze_time,
-        market_open_time=market_open_time,
-        market_close_time=market_close_time,
-        start_time=getattr(args, "start_time", None),
-        backfill=getattr(args, "backfill", True),
-        is_mcx=is_mcx,
-    )
-    return runner.run()
+    """Launch 2.0 Distributed Multi-Track Trading System."""
+    return cmd_start_v2(args)
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    """Replay recorded session."""
+    """Replay recorded session via high-speed 2.0 Historical Replay Engine."""
+    session_date = getattr(args, "date", None)
+    data_path = getattr(args, "data_path", None)
+    if not data_path and session_date:
+        data_path = f"recordings/{session_date}"
+    if not data_path:
+        data_path = "recordings"
+
+    speed = float(getattr(args, "speed", 1.0))
     print("=" * 80)
-    print(f"⏪ HISTORICAL MARKET REPLAY: Date {args.date}")
-    print(f"Strategy: {args.strategy} | Speed: {args.speed}x")
+    print(f"⏪ HISTORICAL MARKET REPLAY: Date {session_date or 'ALL'}")
+    print(f"Speed: {speed}x | Data Path: {data_path}")
     print("=" * 80)
 
-    try:
-        from replay.replay_engine import ReplayEngine
-        engine = ReplayEngine(
-            session_date=args.date,
-            strategy_name=args.strategy,
-            speed=args.speed,
-        )
-        return engine.run()
-    except ImportError:
-        print("ℹ️ Replay engine is being built in Phase 7.")
-        return 0
+    from core.feed.historical_replay import HistoricalReplayIngestor
+    ingestor = HistoricalReplayIngestor(data_path=data_path, speed=speed)
+    return ingestor.run()
 
 
 def cmd_simulate(args: argparse.Namespace) -> int:
     """Execute high-speed deterministic historical market simulation."""
-    from simulation.simulation_engine import SimulationEngine
+    from simulation.columnar_sim_engine import ColumnarSimEngine
+    data_path = getattr(args, "data_path", None)
+    session_date = getattr(args, "date", None)
+    if not data_path and session_date:
+        candidates = [
+            f"recordings/{session_date}",
+            f"recordings/{session_date[:4]}-{session_date[4:6]}-{session_date[6:8]}" if len(session_date) == 8 and session_date.isdigit() else None,
+            f"recordings/{session_date.replace('-', '')}" if "-" in session_date else None,
+        ]
+        for c in candidates:
+            if c and os.path.exists(c):
+                data_path = c
+                break
+        if not data_path:
+            data_path = f"recordings/{session_date}"
+    if not data_path:
+        data_path = "recordings"
 
-    target_date = getattr(args, "date", None)
-    from_date = getattr(args, "from_date", None)
-    to_date = getattr(args, "to_date", None)
-    dates_list = [target_date] if target_date else None
-    is_mcx = getattr(args, "mcx", False) or getattr(args, "exchange", "NSE").upper() == "MCX"
+    delay_sec = float(getattr(args, "delay", 60.0))
+    print("=" * 80)
+    print(f"🚀 COLUMNAR MARKET SIMULATION ENGINE: Data Path '{data_path}'")
+    print(f"Delay Sec: {delay_sec}s")
+    print("=" * 80)
 
-    default_sim_cfg = "config/strategies_sim.json" if os.path.exists("config/strategies_sim.json") else "config/strategies.json"
-    engine = SimulationEngine(
-        dates=dates_list,
-        from_date=from_date,
-        to_date=to_date,
-        start_time=normalize_time_str(getattr(args, "start_time", "09:15"), "09:15"),
-        end_time=normalize_time_str(getattr(args, "end_time", "15:15"), "15:15"),
-        modes=getattr(args, "mode", "paper,paper_delayed") or "paper,paper_delayed",
-        track_filter=getattr(args, "track", "DYNAMIC_TRIO") or "DYNAMIC_TRIO",
-        capital=getattr(args, "capital", None),
-        min_score=getattr(args, "min_score", None),
-        min_trade_score=getattr(args, "min_trade_score", None),
-        strategy_config=getattr(args, "strategy_config", None) or default_sim_cfg,
-        execution_config=getattr(args, "execution_config", "config/execution.json"),
-        show_journal=getattr(args, "journal", False),
-        gen_pdf=getattr(args, "pdf", False),
-        pdf_path=getattr(args, "pdf_path", None),
-        exchange="MCX" if is_mcx else "NSE",
-        expand_tracks=getattr(args, "expand_tracks", False),
-    )
-    return engine.run()
+    engine = ColumnarSimEngine(data_path=data_path, delay_sec=delay_sec)
+    results = engine.run_simulation()
+    engine.print_summary(results)
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """Check health of infrastructure processes and prepared documents."""
+    """Check health of infrastructure processes, SHM segments, and prepared documents."""
     print("=" * 80)
     print("🩺 INFRASTRUCTURE STATUS & HEALTH CHECK")
     print("=" * 80)
-    sys_cfg = load_json_config("config/system.json")
-    ipc_addr = sys_cfg.get("system", {}).get("ipc", {}).get("address", "/tmp/upstox_market_feed.ipc")
 
-    print(f"IPC Socket Path : {ipc_addr}")
-    if os.path.exists(ipc_addr):
-        print("  -> IPC Socket Status: ACTIVE (Listener process is running)")
+    # 1. Distributed Process Registry (logs/pids.json)
+    pids = load_pids()
+    print("\nDistributed Process Registry (logs/pids.json):")
+    if pids:
+        print(f"  {'ROLE':<22} | {'PID':<8} | {'STATUS':<10} | {'STARTED AT'}")
+        print("  " + "-" * 65)
+        for role, info in pids.items():
+            pid = info.get("pid", 0)
+            alive = is_pid_alive(pid)
+            st = "RUNNING" if alive else "STOPPED"
+            print(f"  {role:<22} | {pid:<8} | {st:<10} | {info.get('started_at', 'N/A')}")
     else:
-        print("  -> IPC Socket Status: STOPPED (Listener process is not running)")
+        print("  ✓ No active background processes registered.")
+
+    # 2. Shared Memory Status
+    from core.candles.shm_layout import SHM_NAME
+    shm_path = f"/tmp/{SHM_NAME}.shm"
+    shm_exists = os.path.exists(shm_path)
+    print(f"\nShared Memory Status:")
+    print(f"  • Segment Name      : {SHM_NAME}")
+    print(f"  • SHM File          : {shm_path} ({'ACTIVE' if shm_exists else 'NOT ALLOCATED'})")
+
+    sys_cfg = load_json_config("config/system.json")
+    ipc = sys_cfg.get("system", {}).get("ipc", {})
+    eq_ipc = ipc.get("feed_equity_ipc", "ipc:///tmp/feed_equity.ipc").replace("ipc://", "")
+    opt_ipc = ipc.get("feed_options_ipc", "ipc:///tmp/feed_options.ipc").replace("ipc://", "")
+
+    print(f"\nZeroMQ IPC Sockets:")
+    print(f"  • Equity Feed (TICK.EQ)   : {eq_ipc} ({'ACTIVE' if os.path.exists(eq_ipc) else 'IDLE'})")
+    print(f"  • Options Feed (TICK.OPT) : {opt_ipc} ({'ACTIVE' if os.path.exists(opt_ipc) else 'IDLE'})")
 
     # Check data files (both today's dated documents and canonical references)
     today_tag = datetime.now().strftime("%Y%m%d")
@@ -463,7 +559,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Check Active Protected Option Subscriptions
     try:
-        from infrastructure.market_data.position_registry import ProtectedPositionRegistry
+        from core.feed.position_registry import ProtectedPositionRegistry
         prot_summary = ProtectedPositionRegistry.get_instance().get_protected_summary()
         print(f"\nProtected Option Contracts ({len(prot_summary)} contracts guarded from listener unsubscription):")
         if prot_summary:
@@ -615,8 +711,8 @@ def cmd_post_market(args: argparse.Namespace) -> int:
 
     # EOD Maintenance: Prune stale preparation files from older trading sessions and rotate debug logs
     try:
-        from infrastructure.instruments.cleanup import prune_old_preparation_files
-        from infrastructure.auth.upstox_auth import prune_debug_log
+        from core.instruments.cleanup import prune_old_preparation_files
+        from core.auth.upstox_auth import prune_debug_log
         prune_old_preparation_files(keep_session_date=session_date)
         prune_debug_log("logs/debug.log")
     except Exception as e:
@@ -627,116 +723,104 @@ def cmd_post_market(args: argparse.Namespace) -> int:
 
 def cmd_stop(args: argparse.Namespace) -> int:
     """Stop running processes."""
-    print("Stopping running trading services...")
+    print("=" * 80)
+    print("🛑 STOPPING DISTRIBUTED TRADING SERVICES")
+    print("=" * 80)
+    killed = kill_all_registered()
+    print(f"✓ Terminated {killed} registered background processes.")
+
     sys_cfg = load_json_config("config/system.json")
     ipc_addr = sys_cfg.get("system", {}).get("ipc", {}).get("address", "/tmp/upstox_market_feed.ipc")
-    if os.path.exists(ipc_addr):
-        try:
-            os.remove(ipc_addr)
-            print("Removed active IPC socket.")
-        except Exception as e:
-            print(f"Error removing IPC socket: {e}")
+    for path in [ipc_addr, "/tmp/feed_equity.ipc", "/tmp/feed_options.ipc", "/tmp/feed_ticks_pub.ipc", "/tmp/quotes_router.ipc", "/tmp/quotes_heartbeat.pub", "/tmp/scoring_alerts_pub.ipc", "/tmp/rms_strike_pub.ipc"]:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
     print("All processes stopped.")
     return 0
 
 
 def cmd_test(args: argparse.Namespace) -> int:
-    """Run test suites."""
+    """Run automated test suites."""
     print("=" * 80)
     print("🧪 RUNNING COMPREHENSIVE TEST SUITES")
     print("=" * 80)
 
     os.environ["TRADING_TEST_MODE"] = "1"
-    try:
-        # 1. Run legacy breakout & simulation tests
-        print("\n[1/2] Running Complete Breakout, Scoring & Simulation Matrix Tests...")
-        test_rel_path = "tests/test_breakout_features.py"
-        legacy_dir = os.path.abspath("legacy")
-
-        env_legacy = dict(os.environ)
-        env_legacy["TRADING_TEST_MODE"] = "1"
-        res1 = subprocess.run([sys.executable, test_rel_path], cwd=legacy_dir, env=env_legacy)
-        if res1.returncode != 0:
-            print("❌ Test suite 1 failed!", file=sys.stderr)
-            return res1.returncode
-
-        # 2. Run new modular unit tests
-        print("\n[2/2] Running Refactored Infrastructure & Strategy Unit Tests...")
-        test_dirs = ["tests/infrastructure", "tests/strategies", "tests/execution", "tests/replay"]
-        found_tests = []
-        for td in test_dirs:
-            if os.path.exists(td):
-                for f in sorted(os.listdir(td)):
-                    if f.startswith("test_") and f.endswith(".py"):
-                        found_tests.append(os.path.join(td, f))
-
-        if not found_tests:
-            print("  -> No new unit tests yet (will populate as modules are ported).")
-        else:
-            for t in found_tests:
-                print(f"  Running {t}...")
-                env = dict(os.environ)
-                env["PYTHONPATH"] = os.path.abspath(".")
-                env["TRADING_TEST_MODE"] = "1"
-                res = subprocess.run([sys.executable, t], env=env)
-                if res.returncode != 0:
-                    return res.returncode
-
+    res = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-p", "test_*.py"])
+    if res.returncode == 0:
         print("\n" + "=" * 80)
-        print("✅ ALL TEST SUITES COMPLETED WITH CODE 0!")
+        print("✅ ALL TEST SUITES PASSED (100% GREEN)!")
         print("=" * 80)
-        return 0
-    finally:
-        # Comprehensive post-test artifact cleanup
-        import glob
-        cleanup_patterns = [
-            "legacy/bear_flag_paper_trades.csv",
-            "bear_flag_paper_trades.csv",
-            "logs/.freeze_*",
-            "/tmp/test_paper_trades_*.csv",
-            "/tmp/test_paper_delayed_trades_*.csv",
-            "/tmp/test_port_trades_*.csv",
-            "logs/test_*.pdf",
-        ]
-        for pat in cleanup_patterns:
-            for p in glob.glob(pat):
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
+    return res.returncode
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    """Generate End-of-Day P&L analytics report, terminal line graph, and PDF report."""
-    from infrastructure.pnl.report_generator import DailyReportGenerator
-    session_date = getattr(args, "date", None)
-    mode_filter = getattr(args, "mode", None)
-    strategy_filter = getattr(args, "strategy", None)
-    start_time = getattr(args, "start_time", None)
-    end_time = getattr(args, "end_time", None)
-    track_filter = getattr(args, "tracks", None)
-    max_trades = getattr(args, "trades", None)
-    gen_pdf = getattr(args, "pdf", True)
-    pdf_path = getattr(args, "pdf_path", None)
+    """Generate End-of-Day P&L analytics report from modern trade journals."""
+    session_date = getattr(args, "date", None) or datetime.now().strftime("%Y%m%d")
+    rec_dir = os.path.join("recordings", session_date)
+    journal_files = []
+    if os.path.exists(rec_dir):
+        for f in os.listdir(rec_dir):
+            if f.endswith(".jsonl"):
+                journal_files.append(os.path.join(rec_dir, f))
 
-    generator = DailyReportGenerator(session_date=session_date)
-    terminal_report = generator.generate_report(
-        mode_filter=mode_filter,
-        strategy_filter=strategy_filter,
-        start_time=start_time,
-        end_time=end_time,
-        track_filter=track_filter,
-        max_trades=max_trades,
-    )
-    print(terminal_report)
+    for f in os.listdir("logs") if os.path.exists("logs") else []:
+        if session_date in f and f.endswith(".jsonl"):
+            journal_files.append(os.path.join("logs", f))
 
-    if gen_pdf:
-        try:
-            pdf_file = generator.generate_pdf(output_path=pdf_path)
-            print(f"  ✓ High-Resolution Vector PDF Report Generated: {pdf_file}\n")
-        except Exception as e:
-            print(f"  ⚠️  PDF Report Warning: {e}\n")
+    print("=" * 80)
+    print(f"📊 END-OF-DAY TRADE JOURNAL & P&L REPORT (Date: {session_date})")
+    print("=" * 80)
 
+    if not journal_files:
+        print(f"  ✓ No trade journals found for session {session_date}.")
+        print("=" * 80)
+        return 0
+
+    mode_track_pnl = {}
+    total_trades = 0
+    total_wins = 0
+    total_net = 0.0
+
+    for jf in set(journal_files):
+        with open(jf, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    t = json.loads(line)
+                    mode = t.get("mode", "unknown")
+                    track = t.get("track", "unknown")
+                    pnl = float(t.get("pnl", 0.0) or t.get("net_pnl", 0.0))
+                    key = (mode, track)
+                    if key not in mode_track_pnl:
+                        mode_track_pnl[key] = {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0}
+                    mode_track_pnl[key]["trades"] += 1
+                    total_trades += 1
+                    if pnl > 0:
+                        mode_track_pnl[key]["wins"] += 1
+                        total_wins += 1
+                    else:
+                        mode_track_pnl[key]["losses"] += 1
+                    mode_track_pnl[key]["net_pnl"] += pnl
+                    total_net += pnl
+                except Exception:
+                    pass
+
+    header = f"{'MODE':<16} | {'TRACK':<18} | {'TRADES':<8} | {'WINS':<6} | {'LOSSES':<6} | {'WIN %':<8} | {'NET PNL (INR)'}"
+    print(header)
+    print("-" * len(header))
+    for (m, tr), s in sorted(mode_track_pnl.items()):
+        win_pct = (s["wins"] / max(1, s["trades"])) * 100.0
+        pnl_str = f"₹{s['net_pnl']:+,.2f}"
+        print(f"{m:<16} | {tr:<18} | {s['trades']:<8} | {s['wins']:<6} | {s['losses']:<6} | {win_pct:>6.1f}% | {pnl_str}")
+
+    print("-" * len(header))
+    tot_win_pct = (total_wins / max(1, total_trades)) * 100.0
+    print(f"{'TOTAL':<16} | {'ALL TRACKS':<18} | {total_trades:<8} | {total_wins:<6} | {total_trades - total_wins:<6} | {tot_win_pct:>6.1f}% | ₹{total_net:+,.2f}")
+    print("=" * 80)
     return 0
 
 
@@ -869,15 +953,15 @@ def cmd_unfreeze(args: argparse.Namespace) -> int:
 
 def cmd_reconcile(args: argparse.Namespace) -> int:
     """Manually trigger broker position reconciliation against Groww."""
-    from execution.live.live_adapter import GrowwLiveAdapter
+    from execution.superstructures.live import LiveSuperstructure, GrowwLiveAdapter
     print("=" * 80)
     print("🔄 BROKER POSITION RECONCILIATION & CONFLATION ENGINE")
     print("=" * 80)
-    adapter = GrowwLiveAdapter(
+    adapter = LiveSuperstructure(
         live_confirmed=getattr(args, "confirm_live", True),
         enable_polling=False,
     )
-    res = adapter.reconcile_broker_positions(quarantine_sec=0.0)
+    res = adapter.reconcile_broker_positions()
     print(f"Status           : {res.get('status')}")
     print(f"Broker Positions : {res.get('broker_positions_count', 0)}")
     print(f"Local Positions  : {res.get('local_positions_count', 0)}")
@@ -948,6 +1032,31 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", help="Operational commands")
 
+    # Command: core
+    p_core = subparsers.add_parser("core", help="Launch Core Ingestion Tier (Feed, CandleManager, QuotesBroker, optional Recorder)")
+    p_core.add_argument("--feed", action="store_true", help="Launch live/mock feed handler")
+    p_core.add_argument("--candlemanager", action="store_true", help="Launch shared memory candle manager")
+    p_core.add_argument("--quotesbroker", action="store_true", help="Launch LVC quotes broker")
+    p_core.add_argument("--record", action="store_true", help="Launch market tick recorder")
+    p_core.add_argument("--debug", action="store_true", help="Dump raw incoming ticks to recorder debug log")
+    p_core.add_argument("--mode", default="ws", choices=["ws", "mock"], help="Feed ingestion mode (default: ws)")
+
+    # Command: feed
+    p_feed = subparsers.add_parser("feed", help="Start feed handler with optional forks")
+    p_feed.add_argument("--mode", default="ws", choices=["ws", "mock"], help="Feed mode (default: ws)")
+    p_feed.add_argument("--candles", action="store_true", help="Also fork and start candle manager")
+    p_feed.add_argument("--record", action="store_true", help="Also fork and start recorder")
+
+    # Command: candlemanager
+    subparsers.add_parser("candlemanager", help="Start SHM candle manager")
+
+    # Command: quotesbroker
+    subparsers.add_parser("quotesbroker", help="Start LVC quotes broker")
+
+    # Command: dashboard
+    p_dash = subparsers.add_parser("dashboard", help="Start universal terminal telemetry dashboard")
+    p_dash.add_argument("--refresh", type=float, default=1.0, help="Refresh interval seconds")
+
     # Command: prepare
     p_prep = subparsers.add_parser("prepare", help="Execute pre-market preparation pipeline")
     p_prep.add_argument("--reset", action="store_true", help="Force fresh retrieval and complete rebuild of all documents (ignores existing files)")
@@ -973,6 +1082,7 @@ def main():
     p_rec = subparsers.add_parser("record", help="Start independent Market Data Recorder service")
     p_rec.add_argument("--date", default=None, help="Session date YYYYMMDD (defaults to today)")
     p_rec.add_argument("--record-dir", default="recordings", help="Output directory for recordings (default: recordings)")
+    p_rec.add_argument("--debug", action="store_true", help="Dump raw incoming ticks to recorder debug log")
 
     # Command: strat
     p_strat = subparsers.add_parser("strat", help="Execute trading strategy against running listener")
@@ -996,6 +1106,8 @@ def main():
     p_strat.add_argument("--eod-freeze-time", default=None, help="EOD entry freeze cutoff time HH:MM IST (e.g. 15:15, default: strategies.json)")
     p_strat.add_argument("--config", "--strategy-config", dest="strategy_config", default="config/strategies.json", help="Path to strategy configuration file (default: config/strategies.json)")
     p_strat.add_argument("--execution-config", dest="execution_config", default="config/execution.json", help="Path to execution configuration file (default: config/execution.json)")
+    p_strat.add_argument("--record", action="store_true", help="Launch market tick recorder service")
+    p_strat.add_argument("--debug", action="store_true", help="Dump raw incoming ticks to recorder debug log")
 
     # Command: start (alias for strat)
     p_start = subparsers.add_parser("start", help="Execute trading strategy (alias for strat)")
@@ -1003,7 +1115,10 @@ def main():
     p_start.add_argument("--exchange", default="NSE", choices=["NSE", "MCX"], help="Target market exchange (default: NSE)")
     p_start.add_argument("--mcx", action="store_true", help="Shortcut for --exchange MCX")
     p_start.add_argument("--mode", default="paper", help="Execution mode(s): paper, paper_delayed, live, all, or comma-separated e.g. 'paper,live' (default: paper)")
-    p_start.add_argument("--track", default="ALL", help="Filter active strategy tracks: ALL, ATM, ITM, OTM, LOW_PREM, TRAIL_SL, FIXED_TGT, COMBO, DYNAMIC_TRIO")
+    p_start.add_argument("--tracks", "--track", dest="tracks", default=None, help="Filter active strategy tracks: fast_momentum, trend_pullback, fixed_target, composite, or ALL")
+    p_start.add_argument("--legacy", action="store_true", default=False, help="Run legacy strategy engine instead of 2.0 distributed architecture")
+    p_start.add_argument("--record", action="store_true", help="Launch market tick recorder service")
+    p_start.add_argument("--debug", action="store_true", help="Dump raw incoming ticks to recorder debug log")
     p_start.add_argument("--view", default="all", choices=["all", "matrix", "atm", "itm", "otm", "low_prem", "trail_sl", "fixed_tgt", "combo", "dynamic_trio", "positions", "alerts", "modes", "paper", "paper_delayed", "live"], help="Select dashboard table view")
     p_start.add_argument("--capital", type=float, default=None, help="Starting capital per simulation track (INR, defaults to execution.json)")
     p_start.add_argument("--min-score", type=int, default=None, help="Minimum setup score for dashboard display (defaults to strategies.json)")
@@ -1031,6 +1146,8 @@ def main():
     # Command: simulate (and alias sim)
     for s_name in ("simulate", "sim"):
         p_sim = subparsers.add_parser(s_name, help="Run deterministic high-speed historical market simulation")
+        p_sim.add_argument("--data-path", default=None, help="Path to recorded parquet file or directory")
+        p_sim.add_argument("--delay-sec", "--delay", dest="delay", type=float, default=60.0, help="Delay seconds for paper_delayed mode (default: 60)")
         p_sim.add_argument("--date", default=None, help="Session date YYYYMMDD (defaults to today)")
         p_sim.add_argument("--from-date", dest="from_date", default=None, help="Start date for simulation range YYYYMMDD")
         p_sim.add_argument("--to-date", dest="to_date", default=None, help="End date for simulation range YYYYMMDD")
@@ -1047,7 +1164,7 @@ def main():
         p_sim.add_argument("--pdf-path", default=None, help="Custom file path for generated PDF report")
         p_sim.add_argument("--exchange", default="NSE", choices=["NSE", "MCX"], help="Target market exchange (default: NSE)")
         p_sim.add_argument("--mcx", action="store_true", help="Shortcut for --exchange MCX")
-        p_sim.add_argument("--config", "--strategy-config", dest="strategy_config", default="config/strategies_sim.json", help="Path to strategy config (default: config/strategies_sim.json)")
+        p_sim.add_argument("--config", "--strategy-config", dest="strategy_config", default="config/strategies.json", help="Path to strategy config (default: config/strategies.json)")
         p_sim.add_argument("--execution-config", dest="execution_config", default="config/execution.json", help="Path to execution config")
 
     # Command: post-market (and alias archive)
@@ -1108,6 +1225,11 @@ def main():
         sys.exit(0)
 
     dispatch = {
+        "core": cmd_core,
+        "feed": cmd_feed,
+        "candlemanager": cmd_candlemanager,
+        "quotesbroker": cmd_quotesbroker,
+        "dashboard": cmd_dashboard,
         "prepare": cmd_prepare,
         "listen": cmd_listen,
         "record": cmd_record,

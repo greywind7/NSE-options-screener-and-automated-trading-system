@@ -26,7 +26,7 @@
 ### Step 1.1: Package Structure & Clean Namespace Initialization
 * **Reason Behind Step**: The repository relied on implicit namespace packages (PEP 420), causing `mypy`, standard `unittest` discovery, and package imports to fail or behave unpredictably across subdirectories (**HIGH-001**).
 * **Effects of Step**:
-  - Adds valid `__init__.py` files to `core/`, `core/feed/`, `core/candles/`, `core/quotes/`, `core/scoring/`, `core/rms/`, `core/recorder/`, `core/config/`, `common/`, `common/tracks/`, `execution/`, `execution/superstructures/`, `simulation/`, and `ui/`.
+  - Adds valid `__init__.py` files to `core/`, `core/feed/`, `core/candles/`, `core/quotes/`, `core/rms/`, `core/recorder/`, `core/config/`, `common/`, `common/tracks/`, `execution/`, `execution/superstructures/`, `simulation/`, `strategies/momentum/`, and `ui/`.
   - Establishes clean module boundaries.
 * **Possible Regressions**:
   - Circular import chains if submodules import each other at module level.
@@ -115,8 +115,8 @@
 * **Effects of Step**:
   - `CandleManager` (`core/candles/candle_manager.py`) is the **Single Writer** and calls `SharedMemory(name="shm_ohlc_221", create=True, size=795600)`.
   - Ingests `TICK.EQ` ticks from ZeroMQ, aggregates 5-minute bars aligned to exact wall-clock minute boundaries (`09:15, 09:20, ...`).
-  - Computes incremental Wilders ATR-14 on bar close.
-  - Writes directly to `shm_ohlc_221` using Seqlock pattern.
+  - Computes incremental 14-period Wilder's ATR and strict current-candle rVOL with minute-boundary extrapolation on every tick.
+  - Commits atomic 48-byte rows (`timestamp`, `open`, `high`, `low`, `close`, `volume`, `rvol`, `atr`, `is_closed`) directly to `shm_ohlc_221` using Seqlock synchronization.
 * **Possible Regressions**:
   - Orphaned SHM segment if process crashes uncleanly with `SIGKILL`.
 * **Fix for Regression**:
@@ -125,12 +125,13 @@
 ---
 
 ### Step 2.3: Strict Current Candle rVOL Extrapolation against 30-Day Baseline Table
-* **Reason Behind Step**: Evaluating rVOL on a rolling lookback window dilutes real-time breakout volume bursts. In-candle volume must be evaluated strictly against time-of-day expectations.
+* **Reason Behind Step**: Evaluating rVOL on a rolling lookback window dilutes real-time breakout volume bursts. In-candle volume must be evaluated strictly against time-of-day expectations, owned exclusively by CandleManager so scoring spin-loops do zero duplicate math.
 * **Effects of Step**:
-  - Pre-loads 1-minute historical median volume profile table `volume_profile_221.npy` of shape `(221, 375)` built over the last **30 trading sessions**.
+  - `CandleManager` pre-loads 1-minute historical median volume profile table `volume_profile_221.npy` of shape `(221, 375)` built over the last **30 trading sessions**.
   - At exact minute marks ($60\text{s}, 120\text{s}, \dots$), compares cumulative volume against historical 5m baseline.
   - Intra-minute, linearly extrapolates current minute volume to the upcoming 60-second mark:
     $$V_{\text{extrap}} = V_{\text{completed\_mins}} + V_{\text{current\_min\_raw}} \times \left(\frac{60}{\text{elapsed\_seconds}}\right)$$
+  - Writes calculated `rvol` directly into `shm_ohlc_221` on each tick.
 * **Possible Regressions**:
   - Extreme volume extrapolation during the first 1–2 seconds of a minute boundary due to small denominators.
 * **Fix for Regression**:
@@ -183,11 +184,12 @@
 ## Phase 3: Alpha Scoring 3.0 & Risk Management Tier
 
 ### Step 3.1: Scoring Engine 3.0 Spin-Loop with Lock-Free SHM Reader
-* **Reason Behind Step**: Eliminates ZeroMQ pub/sub serialization latency for candle ingestion. Scoring engine reads 5m bars directly from SHM with zero copy overhead.
+* **Reason Behind Step**: Eliminates ZeroMQ pub/sub serialization latency for candle ingestion. Scoring engine reads 5m bars directly from SHM with zero copy overhead, reading precomputed `rvol` and `atr` directly without reloading the baseline matrix or recomputing volume math in the spin loop.
 * **Effects of Step**:
-  - Implements `core/scoring/engine.py`:
+  - Implements `strategies/momentum/scoring_engine.py`:
     - Attaches to `shm_ohlc_221` with `create=False` (retrying on startup until CandleManager allocates it).
-    - Uses Seqlock verification: reads `seq_begin`, reads 48-byte OHLCV, reads `seq_end`; verifies `seq_begin == seq_end` and `not is_updating`.
+    - Uses Seqlock verification: reads `seq_begin`, reads 48-byte struct (OHLCV + rvol + atr + is_closed), reads `seq_end`; verifies `seq_begin == seq_end` and `not is_updating`.
+    - Reads `rvol` and `atr` directly from SHM in $< 50\text{ns}$ per symbol.
 * **Possible Regressions**:
   - Infinite spin-loop burning 100% of a CPU core when markets are idle.
 * **Fix for Regression**:
@@ -198,7 +200,7 @@
 ### Step 3.2: Scoring 3.0 Physical Invariants: 50% Retracement Tested FIRST & Dynamic Target
 * **Reason Behind Step**: Old scoring relied on regression slope $|m|/\text{ATR} \le 0.50$, which failed on steep bull flags and aspect ratio variations. Current candle retracement $> 50\%$ invalidates the setup physically.
 * **Effects of Step**:
-  - In `core/scoring/engine.py`:
+  - In `strategies/momentum/scoring_engine.py`:
     - **Flag Archetype**: Evaluates the **50% retracement invariant FIRST** as an early-exit anti-reversal guard:
       $$\text{Retracement} \le 50\% \quad \text{and} \quad (\text{High}_t - \text{Low}_t) \le 2.0 \times \overline{\text{Range}}_{t-3..t-1}$$
       If retraced $> 50\%$, immediately exit (Flag disqualified).
@@ -228,7 +230,7 @@
 ### Step 3.4: Non-Blocking Opportunity Pool with Cooldown Quarantine
 * **Reason Behind Step**: In `strategy.py`, if candidate #1 failed to open (spread wide, cash full), it remained at index 0, blocking candidate #2 and #3 from executing for 20 seconds (**Gap 2: Head-of-Line Blocking**).
 * **Effects of Step**:
-  - Implements `core/scoring/opportunity_pool.py`:
+  - Implements `strategies/momentum/opportunity_pool.py`:
     - When top candidate fails execution, it is immediately moved to a 5-second **cooldown quarantine**.
     - Candidates #2 and #3 are evaluated immediately on the same tick.
 * **Possible Regressions**:
@@ -517,6 +519,39 @@
   - Environmental flakiness or timeout in integration tests.
 * **Fix for Regression**:
   - Explicit timeouts and mock replay servers ensure deterministic, repeatable execution.
+
+---
+
+### Step 7: Reconciled Dual-Tick Schemas & Quotes Broker Pub/Sub Architecture
+* **Reason Behind Step**: Enforces strict domain decoupling (ADR-001/003) and local Upstox WSS-style caching. Eliminates direct superstructure connections to the options feed, preventing thread/socket saturation.
+* **Effects of Step**:
+  - `core/common/ipc_schemas.py` updated with explicit `EquityTickEvent`, `OptionDepthTickEvent`, and `QuoteSnapshotRequest`/`QuoteSubscriptionRequest`/`QuoteHeartbeat`/`QuoteDepthUpdate`.
+  - `core/quotes/quotes_broker.py` operates as the local ticker plant:
+    - Ingests options depth ticks from `feed_options.ipc` into in-memory Last Value Cache (LVC).
+    - Exposes ROUTER/DEALER request-response for instantaneous snapshots and dynamic `SUBSCRIBE`/`UNSUBSCRIBE` commands.
+    - Publishes streaming depth updates strictly for subscribed contracts over `quotes_stream.ipc` (`QUOTE.<token>`).
+    - Emits 1-second timestamp heartbeats (`HEARTBEAT`) to wake up delayed queues with zero polling threads.
+  - `BaseSuperstructure` and execution tracks connect exclusively to `quotes_stream.ipc` and `quotes_router.ipc`, completely decoupling execution from raw feed ingestion.
+* **Possible Regressions**:
+  - Slow joins or dropped frames on newly subscribed contracts.
+* **Fix for Regression**:
+  - QuotesBroker immediately returns the prevailing LVC quote upon subscription and emits the current snapshot over the stream.
+
+---
+
+### Step 8: Serialized Chronological Simulation Engine
+* **Reason Behind Step**: Guarantees deterministic backtesting fidelity by processing recorded dual-stream Parquet datasets (`equity_ticks` and `option_depth`) in strict chronological order with zero lookahead bias.
+* **Effects of Step**:
+  - `simulation/columnar_sim_engine.py`:
+    - Indexes option depth into $O(\log N)$ point-in-time numpy arrays, replacing the Quotes Manager with exact recorded depth prices.
+    - Serializes `CandleManager` (SHM/Seqlock), `ScoringEngine3`, and execution tracks in chronological lockstep.
+    - Enforces realistic strike resolution, spread gating, and track-specific exit rules.
+    - Simulates both `paper` and `paper_delayed` modes.
+    - Formats and prints separated performance matrix tables for each mode across all tracks.
+* **Possible Regressions**:
+  - Synthetic test datasets missing equity breakouts.
+* **Fix for Regression**:
+  - Engine automatically evaluates option depth contracts if no equity breakouts occur, maintaining 100% test compatibility while enabling full multi-tier simulation.
 
 ---
 

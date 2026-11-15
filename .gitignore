@@ -3,3 +3,7 @@ legacy/.env
 data/*
 logs/*
 recordings/*
+.venv/
+__pycache__/
+*.pyc
+

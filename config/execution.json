@@ -3,8 +3,9 @@
     "default_mode": "paper",
     "enforce_market_hours": true,
     "market_open_time": "09:15",
-    "eod_freeze_time": "15:15",
-    "eod_square_off_time": "15:20",
+    "live_entry_freeze_time": "15:10",
+    "live_eod_squareoff_time": "15:15",
+    "paper_eod_squareoff_time": "15:20",
     "market_close_time": "15:30",
     "freeze_flag_dir": "logs",
     "allowed_modes": [
@@ -18,7 +19,7 @@
       "max_lots_per_trade": 1,
       "max_capital_per_trade_pct": 0.50,
       "brokerage_per_order": 30.0,
-      "output_csv": "recordings/{date}/paper_trades.csv",
+      "journal_pattern": "recordings/{date}/journal_paper_{track}.jsonl",
       "fill_at_spread": true
     },
     "paper_delayed": {
@@ -26,34 +27,36 @@
       "max_lots_per_trade": 1,
       "max_capital_per_trade_pct": 0.50,
       "brokerage_per_order": 30.0,
-      "output_csv": "recordings/{date}/paper_delayed_trades.csv",
-      "fill_at_spread": true,
-      "min_delay_ms": 200,
-      "max_delay_ms": 500
+      "min_delay_ms": 10000,
+      "max_delay_ms": 60000,
+      "delay_sec": 60.0,
+      "journal_pattern": "recordings/{date}/journal_paper_delayed_{track}.jsonl",
+      "fill_at_spread": true
     },
     "sim": {
       "starting_capital_per_sim": 100000.0,
       "max_lots_per_trade": 1,
       "brokerage_per_order": 30.0,
-      "output_csv": "recordings/{date}/trades_sim.csv",
+      "min_delay_ms": 10000,
+      "max_delay_ms": 60000,
+      "default_delay_sec": 60.0,
       "fill_against_depth": true,
-      "slippage_bps": 5.0,
-      "default_speed": 1.0
+      "slippage_bps": 5.0
     },
     "live": {
-      "api_base_url": "https://api.upstox.com/v3",
-      "output_csv": "recordings/{date}/live_trades.csv",
+      "broker_type": "groww",
+      "journal_pattern": "recordings/{date}/journal_live_{track}.jsonl",
       "starting_capital_per_sim": 250000.0,
       "max_capital_limit_inr": 250000.0,
       "max_capital_per_trade_pct": 0.50,
       "brokerage_per_order": 30.0,
       "max_lots_limit": 2,
-      "kill_switch_loss_pct": 5.0,
-      "require_confirmation": true,
+      "daily_loss_limit_inr": 10000.0,
+      "require_confirmation": false,
       "settlement_quarantine_sec": 10.0,
       "reconciliation_interval_sec": 30.0,
-      "eod_freeze_time": "15:10",
-      "eod_square_off_time": "15:15"
+      "live_entry_freeze_time": "15:10",
+      "live_eod_squareoff_time": "15:15"
     }
   }
 }

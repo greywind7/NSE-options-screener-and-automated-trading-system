@@ -1,0 +1,27 @@
+# ==============================================================================
+# Algorithmic Trading Infrastructure & Distributed Strategy Platform
+# Requirements & Dependencies
+# ==============================================================================
+
+# Core Numerical & High-Speed Columnar Processing
+numpy>=2.0.0
+polars>=1.0.0
+pyarrow>=15.0.0
+
+# Inter-Process Communication & Binary Serialization
+pyzmq>=25.0.0
+msgpack>=1.0.0
+
+# Broker Feeds & Live Execution
+websockets>=13.0
+protobuf>=5.0.0
+requests>=2.28.0
+urllib3>=2.0.0
+growwapi>=1.5.0
+
+# Security & Authentication (TOTP MFA)
+pyotp>=2.8.0
+
+# Reporting & Analytics (Optional PDF generation)
+reportlab>=3.6.0
+
