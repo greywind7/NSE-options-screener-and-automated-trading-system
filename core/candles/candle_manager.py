@@ -137,6 +137,9 @@ class CandleManager:
 
     def _load_volume_baseline(self) -> None:
         """Load 30-day 1-minute historical median volume profile."""
+        # 1. Initialize default uniform baseline first (1,000 shares/min)
+        self.volume_baseline.fill(1000.0)
+
         npy_path = "data/volume_profile_221.npy"
         if os.path.exists(npy_path):
             arr = np.load(npy_path)
@@ -145,28 +148,42 @@ class CandleManager:
                 print(f"[CANDLE_MANAGER] Loaded 30-day volume baseline from {npy_path}")
                 return
 
-        # Fallback: parse data/index.json if present
+        # 2. Parse data/index.json if present
         if os.path.exists(self.baseline_file):
             try:
                 with open(self.baseline_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    for sym, idx in self.symbol_to_index.items():
-                        if ":" in sym:
+                    loaded_count = 0
+                    for inst_key, rec in data.items():
+                        if not isinstance(rec, dict):
                             continue
-                        p = data.get(sym, {}).get("profile", [])
-                        if len(p) >= 375:
-                            self.volume_baseline[idx, :] = np.array(p[:375], dtype=np.float64)
-                        elif len(p) > 0:
-                            # Replicate to 375 mins
-                            tile = np.resize(np.array(p, dtype=np.float64), 375)
-                            self.volume_baseline[idx, :] = tile
-                print(f"[CANDLE_MANAGER] Initialized baseline profile from {self.baseline_file}")
+                        sym = rec.get("symbol")
+                        idx = None
+                        if sym and sym in self.symbol_to_index:
+                            idx = self.symbol_to_index[sym]
+                        elif inst_key in self.symbol_to_index:
+                            idx = self.symbol_to_index[inst_key]
+                        elif normalize_instrument_token(inst_key) in self.symbol_to_index:
+                            idx = self.symbol_to_index[normalize_instrument_token(inst_key)]
+
+                        if idx is not None and 0 <= idx < NUM_SYMBOLS:
+                            slots = rec.get("time_slot_avg_volume", {})
+                            if len(slots) >= 375:
+                                vals = [float(v) for v in slots.values()]
+                                self.volume_baseline[idx, :] = np.array(vals[:375], dtype=np.float64)
+                                loaded_count += 1
+                            elif len(slots) > 0:
+                                vals = [float(v) for v in slots.values()]
+                                tile = np.resize(np.array(vals, dtype=np.float64), 375)
+                                self.volume_baseline[idx, :] = tile
+                                loaded_count += 1
+                            elif float(rec.get("avg_1m_volume", 0.0)) > 0.0:
+                                self.volume_baseline[idx, :].fill(float(rec["avg_1m_volume"]))
+                                loaded_count += 1
+                print(f"[CANDLE_MANAGER] Initialized baseline profile from {self.baseline_file} ({loaded_count} symbols mapped)")
                 return
             except Exception as e:
                 print(f"[CANDLE_MANAGER] Warning reading {self.baseline_file}: {e}")
-
-        # Default uniform baseline: 1,000 shares per minute
-        self.volume_baseline.fill(1000.0)
 
     def _get_bar_index(self, ts: float) -> Tuple[int, int, int]:
         """
@@ -207,6 +224,16 @@ class CandleManager:
         self.headers[idx]["sequence_id"] = seq + 1
         self.headers[idx]["last_update_ns"] = time.time_ns()
 
+        # Compute delta volume since last received tick
+        prev_v = self.prev_cum_vol[idx]
+        if prev_v > 0 and vol >= prev_v:
+            delta_vol = vol - prev_v
+        else:
+            delta_vol = 0
+
+        if vol > 0:
+            self.prev_cum_vol[idx] = vol
+
         # Bar transition check
         active_bar = self.candles[idx, bar_idx]
         is_new_bar = (bar_idx != self.current_bar_idx[idx])
@@ -238,16 +265,15 @@ class CandleManager:
             active_bar["high"] = ltp
             active_bar["low"] = ltp
             active_bar["close"] = ltp
-            active_bar["volume"] = 0
+            active_bar["volume"] = delta_vol
             active_bar["is_closed"] = False
         else:
             active_bar["high"] = max(active_bar["high"], ltp)
             active_bar["low"] = min(active_bar["low"], ltp) if active_bar["low"] > 0 else ltp
             active_bar["close"] = ltp
+            active_bar["volume"] += delta_vol
 
-        # Compute bar volume increment
-        bar_vol = max(0, vol - self.bar_start_vol[idx])
-        active_bar["volume"] = bar_vol
+        bar_vol = int(active_bar["volume"])
 
         # Minute edge tracking & linear extrapolation
         if min_offset != self.current_min_idx[idx]:
@@ -285,7 +311,7 @@ class CandleManager:
         if sec_in_min < 5:
             completed_mins = max(1, min_offset)
             expected_fraction = completed_mins / 5.0
-            return float(bar_vol) / (baseline_5m * expected_fraction)
+            return float(bar_vol) / max(1.0, baseline_5m * expected_fraction)
 
         # Intra-minute linear extrapolation
         vol_at_prev_edge = self.vol_at_min_edges[idx, min_offset - 1] if min_offset > 0 else 0
@@ -307,9 +333,9 @@ class CandleManager:
                 tick = unpack_message(payload)
                 self.on_tick(
                     token=tick.get("token", ""),
-                    ltp=tick.get("ltp", 0.0),
-                    vol=tick.get("ask_qty", 0) + tick.get("bid_qty", 0),  # Or cumulative vol
-                    ts=tick.get("received_timestamp", time.time()),
+                    ltp=float(tick.get("ltp", 0.0)),
+                    vol=int(tick.get("volume", 0)),
+                    ts=float(tick.get("received_timestamp", time.time())),
                 )
             except zmq.ZMQError:
                 break

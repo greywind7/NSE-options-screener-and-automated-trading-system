@@ -124,10 +124,16 @@ class CompositeTrack:
                 return tr
         return None
 
-    def on_tick(self, token: str, ltp: float, bid: float, ask: float, ts: float) -> None:
+    def on_tick(self, token: str, ltp: float, bid: float, ask: float, ts: float, **kwargs) -> None:
         """Route depth tick to all constituent sub-tracks."""
         for st in self.sub_tracks:
-            st.on_tick(token=token, ltp=ltp, bid=bid, ask=ask, ts=ts)
+            st.on_tick(token=token, ltp=ltp, bid=bid, ask=ask, ts=ts, **kwargs)
+
+    def on_heartbeat(self, ts: float) -> None:
+        """Route heartbeat to all constituent sub-tracks."""
+        for st in self.sub_tracks:
+            if hasattr(st, "on_heartbeat"):
+                st.on_heartbeat(ts)
 
     def on_order_result(self, result: OrderResult) -> None:
         """Route order result to all constituent sub-tracks."""

@@ -8,7 +8,20 @@ comparisons (e.g. cur_hm < market_open_time) behave deterministically against
 datetime.strftime('%H:%M').
 """
 
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def get_market_date_str(ts: Optional[float] = None) -> str:
+    """
+    Returns standard 'YYYY-MM-DD' date string for the Indian stock market session in IST.
+    If ts is provided, uses that timestamp in IST; otherwise uses current IST time.
+    """
+    if ts is not None and ts > 0:
+        return datetime.fromtimestamp(ts, tz=IST).strftime("%Y-%m-%d")
+    return datetime.now(IST).strftime("%Y-%m-%d")
 
 
 def normalize_time_str(t_str: Optional[str], default: str = "09:15") -> str:

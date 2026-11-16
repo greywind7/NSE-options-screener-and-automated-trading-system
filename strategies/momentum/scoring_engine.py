@@ -55,6 +55,7 @@ class ScoringEngine3:
         pool: Optional[OpportunityPool] = None,
         universe_csv: Optional[str] = None,
         baseline_file: Optional[str] = None,
+        min_pole_pct: Optional[float] = None,
     ):
         from core.config.config_loader import get_config_manager
         cfg = get_config_manager()
@@ -67,6 +68,18 @@ class ScoringEngine3:
         self.min_volume_thrust_mult = float(scoring_cfg.get("min_volume_thrust_mult", 2.0))
         self.min_clv = float(scoring_cfg.get("min_clv", 0.75))
         self.invalidation_retrace_pct = float(scoring_cfg.get("invalidation_retrace_pct", 0.50))
+        if min_pole_pct is not None:
+            pole_val = min_pole_pct
+        else:
+            fm_pole = cfg.strategy.get("strategies", {}).get("momentum", {}).get("tracks", {}).get("fast_momentum", {}).get("min_pole_pct")
+            sc_pole = scoring_cfg.get("min_pole_pct")
+            strat_pole = cfg.strategy.get("strategies", {}).get("momentum", {}).get("min_pole_pct")
+            pole_val = fm_pole if (fm_pole is not None and fm_pole != 0.005) else (sc_pole or strat_pole or fm_pole or 0.005)
+
+        self.min_pole_pct = float(pole_val) if pole_val is not None else 0.005
+        if self.min_pole_pct > 0.5:
+            self.min_pole_pct /= 100.0
+
         self.max_consolidation_candles = int(scoring_cfg.get("max_consolidation_candles", 5))
         self.quarantine_cooldown_sec = float(scoring_cfg.get("quarantine_cooldown_sec", 5.0))
 
@@ -151,9 +164,10 @@ class ScoringEngine3:
         if bar_idx < 3:
             return None
 
-        # Lookback up to 7 closed candles
+        # Lookback up to 7 closed candles (filtering for populated historical bars)
         lookback = min(7, bar_idx)
-        hist_candles = self.candles[idx, (bar_idx - lookback) : bar_idx]
+        raw_hist = self.candles[idx, (bar_idx - lookback) : bar_idx]
+        hist_candles = [b for b in raw_hist if b["open"] > 0]
         n_hist = len(hist_candles)
         if n_hist < 3:
             return None
@@ -181,7 +195,11 @@ class ScoringEngine3:
                 pole_low = float(min(b["low"] for b in pole))
                 pole_high = float(max(b["high"] for b in pole))
                 pole_height = pole_high - pole_low
-                if pole_height <= 0.01:
+                if pole_height <= 0.01 or pole_low <= 0.0:
+                    continue
+
+                pole_pct = pole_height / pole_low
+                if pole_pct < self.min_pole_pct:
                     continue
 
                 # --- Bull Flag ---
@@ -269,14 +287,14 @@ class ScoringEngine3:
             return None
 
         prev = self.candles[idx, (bar_idx - 3) : bar_idx]
-        if len(prev) < 3:
+        if len(prev) < 3 or any(b["open"] <= 0 for b in prev):
             return None
 
         # Bull Impulse
         combined_high = float(max(b["high"] for b in prev))
-        avg_thrust = float(sum(b["high"] - b["open"] for b in prev)) / 3.0
+        avg_thrust = float(sum(abs(float(b["close"]) - float(b["open"])) for b in prev)) / 3.0
         baseline_thrust = max(avg_thrust, 0.35 * atr)
-        curr_thrust = float(c["high"] - c["open"])
+        curr_thrust = float(c["close"] - c["open"])
 
         avg_rov = float(sum(b["volume"] / 300.0 for b in prev)) / 3.0
         curr_elapsed = max(1.0, now_ts - float(c["timestamp"]))
@@ -305,9 +323,9 @@ class ScoringEngine3:
 
         # Bear Impulse
         combined_low = float(min(b["low"] for b in prev))
-        avg_bear_thrust = float(sum(b["open"] - b["low"] for b in prev)) / 3.0
+        avg_bear_thrust = float(sum(abs(float(b["close"]) - float(b["open"])) for b in prev)) / 3.0
         baseline_bear_thrust = max(avg_bear_thrust, 0.35 * atr)
-        curr_bear_thrust = float(c["open"] - c["low"])
+        curr_bear_thrust = float(c["open"] - c["close"])
         clv_bear = float(c["high"] - c["close"]) / max(0.01, float(c["high"] - c["low"]))
 
         if (
@@ -387,15 +405,6 @@ class ScoringEngine3:
                 m.status_bar_idx = bar_idx
                 m.last_evaluated_ts = c_ts
                 m.record_breakout(bar_idx)
-
-        # Priority Dispatch: Sort actionable candidates by rVOL descending
-        if actionable:
-            actionable.sort(key=lambda a: a.rvol, reverse=True)
-            if self.pool:
-                for alert in actionable:
-                    self.pool.submit_alert(alert)
-
-        return actionable
 
         # Priority Dispatch: Sort actionable candidates by rVOL descending
         if actionable:

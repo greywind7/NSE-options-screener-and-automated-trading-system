@@ -12,6 +12,7 @@ import unittest
 import zmq
 
 from core.common.ipc_schemas import SetupAlert, ActionableOpportunity
+from core.common.time_utils import get_market_date_str
 from ui.dashboard import TerminalDashboard
 
 
@@ -78,7 +79,7 @@ class TestDashboard(unittest.TestCase):
 
     def test_journal_scan_and_mode_matrices(self):
         # Create today's session journal directory
-        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_str = get_market_date_str()
         session_dir = os.path.join(self.test_dir, today_str)
         os.makedirs(session_dir, exist_ok=True)
 
@@ -98,22 +99,22 @@ class TestDashboard(unittest.TestCase):
                 "data": {"track": "fast_momentum_ATM", "status": "CLOSED", "realized_pnl": -500.0}
             }) + "\n")
 
-        # Write sample journal for paper_delayed fixntrend
-        delayed_journal = os.path.join(session_dir, "journal_paper_delayed_fixntrend.jsonl")
+        # Write sample journal for paper_delayed composite_shared_ITM
+        delayed_journal = os.path.join(session_dir, "journal_paper_delayed_composite_shared_ITM.jsonl")
         with open(delayed_journal, "w", encoding="utf-8") as f:
             f.write(json.dumps({
                 "event": "TRADE_EXIT",
                 "mode": "paper_delayed",
-                "data": {"track": "fixntrend", "status": "CLOSED", "realized_pnl": 3000.0}
+                "data": {"track": "composite_shared_ITM", "status": "CLOSED", "realized_pnl": 3000.0}
             }) + "\n")
 
         # Write stale legacy journal that SHOULD be filtered out
-        stale_journal = os.path.join(session_dir, "journal_paper_trend_pullback.jsonl")
+        stale_journal = os.path.join(session_dir, "journal_paper_legacy_untracked.jsonl")
         with open(stale_journal, "w", encoding="utf-8") as f:
             f.write(json.dumps({
                 "event": "TRADE_EXIT",
                 "mode": "paper",
-                "data": {"track": "trend_pullback", "status": "CLOSED", "realized_pnl": 9999.0}
+                "data": {"track": "legacy_untracked", "status": "CLOSED", "realized_pnl": 9999.0}
             }) + "\n")
 
         self.dashboard.scan_journals()
@@ -123,12 +124,12 @@ class TestDashboard(unittest.TestCase):
         self.assertIn("fast_momentum_ATM", rendered)
         self.assertIn("₹+1,000.00" if "1,000" in rendered else "1000", rendered)
 
-        # Verify delayed matrix shows fixntrend metrics
-        self.assertIn("fixntrend", rendered)
+        # Verify delayed matrix shows composite_shared_ITM metrics
+        self.assertIn("composite_shared_ITM", rendered)
         self.assertTrue("3,000" in rendered or "3000" in rendered)
 
         # Verify stale track is completely ignored
-        self.assertNotIn("trend_pullback", rendered)
+        self.assertNotIn("legacy_untracked", rendered)
 
     def test_custom_track_filtering(self):
         dash = TerminalDashboard(

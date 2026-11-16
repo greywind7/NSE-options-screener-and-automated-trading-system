@@ -113,48 +113,82 @@ def _instantiate_base_track(
     preferred_mode: Optional[str] = None,
     parent_track: Optional[str] = None,
     track_params: Optional[Dict[str, Any]] = None,
+    entry_freeze_time: Optional[str] = None,
+    eod_squareoff_time: Optional[str] = None,
 ) -> BaseTrack:
     p = track_params or {}
     cls = TRACK_CLASS_MAP.get(base_type, FastMomentumTrack)
+    cap = float(p.get("capital", 250000.0))
+    be_val = p.get("breakeven_trigger_pct")
+    be_trigger = float(be_val) if be_val is not None else 0.025
+    if be_trigger > 1.0:
+        be_trigger /= 100.0
+
+    frz_time = entry_freeze_time or p.get("entry_freeze_time")
+    eod_time = eod_squareoff_time or p.get("eod_squareoff_time")
 
     if base_type == "fast_momentum":
+        stagnation = float(p.get("stagnation_timeout_sec") or p.get("timeout_sec") or 300.0)
         return cls(
             context=context,
             track_name=track_name,
             target_pct=float(p.get("target_pct", 0.12)),
             sl_pct=float(p.get("sl_pct", 0.08)),
+            breakeven_trigger_pct=be_trigger,
+            target_decay_sec=float(p.get("target_decay_sec", 180.0)),
+            decay_floor_pct=float(p.get("decay_floor_pct", 0.04)),
+            stagnation_timeout_sec=stagnation,
             max_trades=int(p.get("max_trades", 2)),
             preferred_mode=preferred_mode,
             parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
         )
     elif base_type == "trend_pullback":
+        timeout = float(p.get("timeout_sec") or p.get("stagnation_timeout_sec") or 1800.0)
         return cls(
             context=context,
             track_name=track_name,
             target_pct=float(p.get("target_pct", 0.25)),
             sl_pct=float(p.get("sl_pct", 0.12)),
+            breakeven_trigger_pct=be_trigger,
             max_trades=int(p.get("max_trades", 1)),
             trailing_step_pct=float(p.get("trailing_step_pct", 0.02)),
+            timeout_sec=timeout,
             preferred_mode=preferred_mode,
             parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
         )
     elif base_type == "fixed_target":
+        timeout = float(p.get("timeout_sec") or p.get("stagnation_timeout_sec") or 600.0)
         return cls(
             context=context,
             track_name=track_name,
             target_pct=float(p.get("target_pct", 0.15)),
             sl_pct=float(p.get("sl_pct", 0.10)),
+            breakeven_trigger_pct=be_trigger,
             fixed_target_inr=float(p.get("fixed_target_inr", 750.0)),
+            timeout_sec=timeout,
             max_trades=int(p.get("max_trades", 2)),
             preferred_mode=preferred_mode,
             parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
         )
     else:
         return cls(
             context=context,
             track_name=track_name,
+            breakeven_trigger_pct=be_trigger,
             preferred_mode=preferred_mode,
             parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
         )
 
 
@@ -162,6 +196,8 @@ def create_tracks(
     context: ExecutionContext,
     track_filter: Optional[List[str]] = None,
     strategy_cfg: Optional[Dict[str, Any]] = None,
+    entry_freeze_time: Optional[str] = None,
+    eod_squareoff_time: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Construct track instances based on configuration and optional track_filter.
@@ -170,6 +206,32 @@ def create_tracks(
     momentum_cfg = _get_momentum_config(strategy_cfg)
     spec = _get_enabled_tracks_spec(momentum_cfg)
     track_params_dict = momentum_cfg.get("tracks", {})
+
+    cfg_mgr = get_config_manager()
+    exec_cfg = cfg_mgr.execution.get("execution", {})
+
+    eff_freeze = (
+        entry_freeze_time
+        or momentum_cfg.get("entry_freeze_time")
+        or exec_cfg.get("entry_freeze_time")
+        or exec_cfg.get(f"{context.mode}_entry_freeze_time")
+        or "15:00"
+    )
+
+    eff_squareoff = (
+        eod_squareoff_time
+        or momentum_cfg.get("eod_squareoff_time")
+        or exec_cfg.get("eod_squareoff_time")
+        or exec_cfg.get(f"{context.mode}_eod_squareoff_time")
+        or "15:15"
+    )
+
+    eff_brokerage = (
+        momentum_cfg.get("brokerage_per_order")
+        or exec_cfg.get("brokerage_per_order")
+        or exec_cfg.get(f"{context.mode}", {}).get("brokerage_per_order")
+        or 30.0
+    )
 
     active_filter: Optional[set] = None
     if track_filter:
@@ -185,12 +247,15 @@ def create_tracks(
         for t_name in track_names:
             if active_filter and t_name not in active_filter:
                 continue
-            p = track_params_dict.get(t_name, {})
+            p = dict(track_params_dict.get(t_name, {}))
+            p.setdefault("brokerage_per_order", eff_brokerage)
             tracks[t_name] = _instantiate_base_track(
                 base_type=t_name,
                 track_name=t_name,
                 context=context,
                 track_params=p,
+                entry_freeze_time=eff_freeze,
+                eod_squareoff_time=eff_squareoff,
             )
         return tracks
 
@@ -205,7 +270,10 @@ def create_tracks(
 
         if t_type == "base":
             modes = entry.get("modes", [])
-            base_params = track_params_dict.get(t_name, {})
+            base_params = dict(track_params_dict.get(t_name, {}))
+            base_params.setdefault("brokerage_per_order", eff_brokerage)
+            if "capital" in entry:
+                base_params["capital"] = entry["capital"]
             # If the exact base name was explicitly requested in filter (e.g. track_filter=["fast_momentum"])
             if active_filter and t_name in active_filter:
                 tracks[t_name] = _instantiate_base_track(
@@ -214,6 +282,8 @@ def create_tracks(
                     context=context,
                     preferred_mode="ATM",
                     track_params=base_params,
+                    entry_freeze_time=eff_freeze,
+                    eod_squareoff_time=eff_squareoff,
                 )
             if modes:
                 for m in modes:
@@ -226,6 +296,8 @@ def create_tracks(
                         context=context,
                         preferred_mode=m,
                         track_params=base_params,
+                        entry_freeze_time=eff_freeze,
+                        eod_squareoff_time=eff_squareoff,
                     )
             elif not (active_filter and t_name in active_filter):
                 if not active_filter or t_name in active_filter:
@@ -234,6 +306,8 @@ def create_tracks(
                         track_name=t_name,
                         context=context,
                         track_params=base_params,
+                        entry_freeze_time=eff_freeze,
+                        eod_squareoff_time=eff_squareoff,
                     )
 
         elif t_type == "composite":
@@ -250,6 +324,8 @@ def create_tracks(
                             context=context,
                             preferred_mode=sub_m,
                             track_params=p,
+                            entry_freeze_time=eff_freeze,
+                            eod_squareoff_time=eff_squareoff,
                         )
                 continue
 
@@ -268,6 +344,8 @@ def create_tracks(
                     preferred_mode=sub_m,
                     parent_track=t_name,
                     track_params=p,
+                    entry_freeze_time=eff_freeze,
+                    eod_squareoff_time=eff_squareoff,
                 )
                 sub_instances.append(sub_inst)
 
@@ -282,5 +360,7 @@ def create_tracks(
                 total_capital=total_cap,
             )
             tracks[t_name] = composite_inst
+
+    return tracks
 
     return tracks

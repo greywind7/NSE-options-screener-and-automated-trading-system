@@ -9,6 +9,25 @@ import time
 
 from common.interfaces import ExecutionContext, TradeState
 from core.common.ipc_schemas import ActionableOpportunity, OrderRequest, OrderResult
+from core.common.symbol_utils import normalize_instrument_token
+
+
+def _parse_time_to_minutes(time_val: Any, default_minutes: int) -> int:
+    """Parse 'HH:MM' string or minutes int into minutes from midnight (0..1440)."""
+    if time_val is None:
+        return default_minutes
+    if isinstance(time_val, (int, float)):
+        return int(time_val)
+    s = str(time_val).strip()
+    if not s:
+        return default_minutes
+    try:
+        parts = s.split(":")
+        h = int(parts[0])
+        m = int(parts[1]) if len(parts) > 1 else 0
+        return h * 60 + m
+    except (ValueError, TypeError):
+        return default_minutes
 
 
 class BaseTrack(ABC):
@@ -18,19 +37,36 @@ class BaseTrack(ABC):
         context: ExecutionContext,
         target_pct: float,
         sl_pct: float,
+        breakeven_trigger_pct: Optional[float] = 0.025,
         max_trades: Optional[int] = None,
         preferred_mode: Optional[str] = None,
         parent_track: Optional[str] = None,
         allocated_capital: Optional[float] = None,
+        entry_freeze_time: Optional[str] = None,
+        eod_squareoff_time: Optional[str] = None,
         **kwargs,
     ):
         self.track_name = track_name
         self.context = context
         self.target_pct = target_pct
         self.sl_pct = sl_pct
+        be_pct = breakeven_trigger_pct if breakeven_trigger_pct is not None else kwargs.get("breakeven_trigger_pct", 0.025)
+        self.breakeven_trigger_pct: float = float(be_pct) if be_pct is not None else 0.025
+        if self.breakeven_trigger_pct > 1.0:
+            self.breakeven_trigger_pct /= 100.0
         self.max_trades = max_trades
         self.preferred_mode = preferred_mode.upper() if preferred_mode else None
         self.parent_track = parent_track
+
+        # Configurable entry freeze and EOD auto-squareoff times (IST)
+        self.entry_freeze_time = str(entry_freeze_time or kwargs.get("entry_freeze_time") or "15:00")
+        self.eod_squareoff_time = str(eod_squareoff_time or kwargs.get("eod_squareoff_time") or "15:15")
+        self.entry_freeze_minutes = _parse_time_to_minutes(self.entry_freeze_time, 15 * 60)
+        self.eod_squareoff_minutes = _parse_time_to_minutes(self.eod_squareoff_time, 15 * 60 + 15)
+
+        # Brokerage per order (BUY & SELL legs = 2x brokerage_per_order round trip)
+        brok = kwargs.get("brokerage_per_order")
+        self.brokerage_per_order: float = float(brok) if brok is not None else 30.0
 
         # Capital Availability Management (replaces arbitrary max_trades limits)
         self.allocated_capital: float = float(allocated_capital or kwargs.get("capital") or 250000.0)
@@ -91,8 +127,17 @@ class BaseTrack(ABC):
 
     def on_opportunity(self, opp: ActionableOpportunity) -> Optional[TradeState]:
         """Handle incoming setup opportunity and initiate entry order."""
-        # Risk Gate 1: Check in-memory freeze flag
+        # Risk Gate 1a: Check in-memory freeze flag
         if self.context.is_frozen():
+            return None
+
+        # Risk Gate 1b: Hard Entry Freeze Cutoff (e.g. 15:00 IST)
+        now_ts = opp.timestamp or time.time()
+        from datetime import datetime
+        from core.common.time_utils import IST
+        dt = datetime.fromtimestamp(now_ts, tz=IST)
+        curr_minutes = dt.hour * 60 + dt.minute
+        if curr_minutes >= self.entry_freeze_minutes:
             return None
 
         strike_info = self.select_strike(opp)
@@ -118,6 +163,11 @@ class BaseTrack(ABC):
         entry_ask = ask
         target_price = entry_ask * (1.0 + self.target_pct)
         stop_loss = entry_ask * (1.0 - self.sl_pct)
+
+        # Risk Gate 3: Stop-Loss Solvency Invariant
+        # Prevailing market bid must be strictly above the calculated stop loss
+        if bid <= stop_loss:
+            return None
 
         effective_track_name = self.parent_track or self.track_name
         trade_id = f"TRD_{effective_track_name}_{opp.symbol}_{int(time.time()*1000)}"
@@ -176,16 +226,83 @@ class BaseTrack(ABC):
         self.context.record_trade_event("TRADE_ENTRY_SUBMITTED", trade.to_dict())
         return trade
 
-    def on_tick(self, token: str, ltp: float, bid: float, ask: float, ts: float) -> None:
+    def on_tick(
+        self,
+        token: str,
+        ltp: float,
+        bid: float,
+        ask: float,
+        ts: float,
+        topic_token: str = "",
+        symbol: str = "",
+    ) -> None:
         """Process streaming market depth tick for active trades."""
-        trades_to_eval = [t for t in self.active_trades.values() if t.token == token and t.status == "OPEN"]
+        norm_token = normalize_instrument_token(token)
+        norm_topic = normalize_instrument_token(topic_token) if topic_token else ""
+        norm_sym = normalize_instrument_token(symbol) if symbol else ""
+
+        # Match trades by token, topic token, symbol, or normalized contract attributes
+        trades_to_eval = []
+        for t in self.active_trades.values():
+            if t.status != "OPEN":
+                continue
+            if self.context.mode == "paper_delayed" and t.trade_id in self._pending_orders.values():
+                continue
+            if t.token == token or normalize_instrument_token(t.token) == norm_token:
+                trades_to_eval.append(t)
+                continue
+            if norm_topic and normalize_instrument_token(t.token) == norm_topic:
+                trades_to_eval.append(t)
+                continue
+            if norm_sym and normalize_instrument_token(t.token) == norm_sym:
+                trades_to_eval.append(t)
+                continue
+            if symbol and t.symbol:
+                sc = symbol.upper().replace(" ", "").replace("NSE:", "")
+                suffix1 = f"{int(t.strike)}{t.option_type.upper()}"
+                suffix2 = f"{t.strike:.1f}{t.option_type.upper()}"
+                if sc.startswith(t.symbol.upper()) and (sc.endswith(suffix1) or sc.endswith(suffix2)):
+                    trades_to_eval.append(t)
+                    continue
         for trade in trades_to_eval:
             trade.current_bid = bid
             trade.highest_price = max(trade.highest_price, bid)
 
+            # Breakeven Ratchet: if price reaches breakeven_trigger_pct, ratchet SL to entry_price (0% loss)
+            if self.breakeven_trigger_pct and self.breakeven_trigger_pct > 0.0:
+                profit_pct = (trade.highest_price - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
+                if profit_pct >= self.breakeven_trigger_pct - 1e-6:
+                    if trade.stop_loss < trade.entry_price:
+                        trade.stop_loss = trade.entry_price
+                        trade.metadata["breakeven_triggered"] = True
+
             # Evaluate track-specific exit rules
             reason = self.evaluate_exit_rules(trade, ltp, bid, ask, ts)
             if reason:
+                self.exit_trade(trade, exit_price=bid, reason=reason, ts=ts)
+
+    def on_heartbeat(self, ts: float) -> None:
+        """Periodic heartbeat evaluation for active open trades (stagnation timeout, EOD square-off)."""
+        open_trades = [
+            t for t in list(self.active_trades.values())
+            if t.status == "OPEN" and not (self.context.mode == "paper_delayed" and t.trade_id in self._pending_orders.values())
+        ]
+        for trade in open_trades:
+            # 1. EOD Square-off Check (default 15:15 IST)
+            from datetime import datetime
+            from core.common.time_utils import IST
+            dt = datetime.fromtimestamp(ts, tz=IST)
+            curr_minutes = dt.hour * 60 + dt.minute
+            if curr_minutes >= self.eod_squareoff_minutes:
+                bid = trade.current_bid if trade.current_bid > 0 else trade.entry_price
+                self.exit_trade(trade, exit_price=bid, reason="EOD_SQUAREOFF", ts=ts)
+                continue
+
+            # 2. Evaluate timeout rules if elapsed exceeds threshold
+            bid = trade.current_bid if trade.current_bid > 0 else trade.entry_price
+            ask = trade.entry_ask
+            reason = self.evaluate_exit_rules(trade, bid, bid, ask, ts)
+            if reason in ("STAGNATION_TIMEOUT", "FIXED_STAGNATION_TIMEOUT", "PULLBACK_STAGNATION_TIMEOUT", "MAX_HOLD_TIMEOUT"):
                 self.exit_trade(trade, exit_price=bid, reason=reason, ts=ts)
 
     def exit_trade(self, trade: TradeState, exit_price: float, reason: str, ts: float) -> None:
@@ -195,6 +312,9 @@ class BaseTrack(ABC):
         trade.exit_time = ts
         trade.exit_reason = reason
         trade.realized_pnl = (exit_price - trade.entry_price) * trade.quantity
+        round_trip_brokerage = 2.0 * getattr(self, "brokerage_per_order", 30.0)
+        trade.metadata["brokerage"] = round_trip_brokerage
+        trade.metadata["net_pnl"] = trade.realized_pnl - round_trip_brokerage
 
         order_id = f"EXIT_{trade.trade_id}"
         req = OrderRequest(
@@ -226,7 +346,7 @@ class BaseTrack(ABC):
 
     def on_order_result(self, result: OrderResult) -> None:
         """Handle order execution confirmation."""
-        trade_id = self._pending_orders.get(result.order_id)
+        trade_id = self._pending_orders.pop(result.order_id, None)
         if trade_id and trade_id in self.active_trades:
             trade = self.active_trades[trade_id]
             if result.status == "FILLED":

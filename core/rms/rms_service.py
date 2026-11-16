@@ -6,6 +6,7 @@ over ZeroMQ PUB for mode-specific execution superstructures.
 """
 import argparse
 import csv
+import json
 import os
 import signal
 import sys
@@ -57,13 +58,16 @@ class RMSService:
         self.rms_pub_ipc = rms_pub_ipc or ipc.get("rms_strike_ipc", DEFAULT_RMS_PUB_IPC)
         self.quotes_router_ipc = quotes_router_ipc or ipc.get("quotes_router_ipc", DEFAULT_QUOTES_ROUTER_IPC)
         self.universe_csv = universe_csv or inst_paths.get("filtered_universe_csv", "data/filtered.csv")
+        self.manifest_path = kwargs.get("manifest_path") or inst_paths.get("subscription_manifest_json", "data/subscription_manifest.json")
         self.spread_gate = risk_cfg.get("spread_gate", {"max_spread_pct": 0.03, "min_spread_abs": 0.50})
         self.running = False
 
         # Load lot sizes and metadata from universe
         self.lot_sizes: Dict[str, int] = {}
         self.tick_sizes: Dict[str, float] = {}
+        self.options_map: Dict[str, Any] = {}
         self._load_universe()
+        self._load_options_map()
 
         # ZeroMQ context and sockets
         self._owns_ctx = ctx is None
@@ -103,39 +107,86 @@ class RMSService:
                         self.lot_sizes[s] = ls
                         self.tick_sizes[s] = ts
 
+    def _load_options_map(self) -> None:
+        if os.path.exists(self.manifest_path):
+            try:
+                with open(self.manifest_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.options_map = data.get("options_map", {})
+            except Exception as e:
+                print(f"[RMS_SERVICE] Warning loading options map: {e}")
+
     def resolve_strikes(self, symbol: str, direction: str, trigger_price: float) -> Dict[str, Any]:
         """
         Compute ATM, ITM1, OTM1 strikes and query QuotesBroker for depth.
         Enforces hybrid tick spread gate (Gap 1 / HIGH-004): (ask - bid) <= max(0.50, 0.03 * ask).
         """
         opt_type = "CE" if direction.upper() == "BULL" else "PE"
-        step = get_strike_step(trigger_price)
-        atm_strike = round(trigger_price / step) * step
-
-        if opt_type == "CE":
-            itm_strike = atm_strike - step
-            otm_strike = atm_strike + step
-        else:
-            itm_strike = atm_strike + step
-            otm_strike = atm_strike - step
-
         lot_size = self.lot_sizes.get(symbol.upper(), 1)
 
-        # Generate tokens
+        # Select real strikes from options_map if available and within range
+        opt_map = self.options_map.get(symbol.upper(), {}).get("strikes", {})
+        avail_strikes = sorted([float(s) for s in opt_map.keys()]) if opt_map else []
+
+        if avail_strikes and (min(avail_strikes) <= trigger_price <= max(avail_strikes)):
+            atm_idx = min(range(len(avail_strikes)), key=lambda i: abs(avail_strikes[i] - trigger_price))
+            atm_strike = avail_strikes[atm_idx]
+            step = get_strike_step(trigger_price)
+            if abs(atm_strike - trigger_price) > max(step * 1.5, trigger_price * 0.02):
+                return {}
+            if opt_type == "CE":
+                itm_idx = max(0, atm_idx - 1)
+                otm_idx = min(len(avail_strikes) - 1, atm_idx + 1)
+            else:
+                itm_idx = min(len(avail_strikes) - 1, atm_idx + 1)
+                otm_idx = max(0, atm_idx - 1)
+            itm_strike = avail_strikes[itm_idx]
+            otm_strike = avail_strikes[otm_idx]
+        else:
+            step = get_strike_step(trigger_price)
+            atm_strike = round(trigger_price / step) * step
+            if opt_type == "CE":
+                itm_strike = atm_strike - step
+                otm_strike = atm_strike + step
+            else:
+                itm_strike = atm_strike + step
+                otm_strike = atm_strike - step
+
         expiry_tag = "26NOV"
-        tokens = {
-            "ATM": (atm_strike, f"NSE:{symbol.upper()}{expiry_tag}{int(atm_strike)}{opt_type}"),
-            "ITM1": (itm_strike, f"NSE:{symbol.upper()}{expiry_tag}{int(itm_strike)}{opt_type}"),
-            "OTM1": (otm_strike, f"NSE:{symbol.upper()}{expiry_tag}{int(otm_strike)}{opt_type}"),
+
+        token_roles = {
+            "ATM": atm_strike,
+            "ITM1": itm_strike,
+            "OTM1": otm_strike,
         }
 
+        query_tokens = []
+        tokens_by_role = {}
+        for role, strike_val in token_roles.items():
+            mapped_key = None
+            st_key_float = f"{float(strike_val):.1f}"
+            st_key_int = f"{float(strike_val):.0f}"
+            if st_key_float in opt_map:
+                mapped_key = opt_map[st_key_float].get(opt_type)
+            elif st_key_int in opt_map:
+                mapped_key = opt_map[st_key_int].get(opt_type)
+            elif str(strike_val) in opt_map:
+                mapped_key = opt_map[str(strike_val)].get(opt_type)
+
+            fallback_sym = f"NSE:{symbol.upper()}{expiry_tag}{int(strike_val)}{opt_type}"
+            token_str = normalize_instrument_token(mapped_key) if mapped_key else fallback_sym
+            tokens_by_role[role] = (strike_val, token_str, fallback_sym)
+            query_tokens.append(token_str)
+            if fallback_sym != token_str:
+                query_tokens.append(fallback_sym)
+
         # Query QuotesBroker
-        raw_quotes = self.quotes_client.get_quotes([t[1] for t in tokens.values()])
+        raw_quotes = self.quotes_client.get_quotes(query_tokens)
 
         resolved: Dict[str, Any] = {}
-        for role, (strike_val, token_str) in tokens.items():
+        for role, (strike_val, token_str, fallback_sym) in tokens_by_role.items():
             norm_token = normalize_instrument_token(token_str)
-            q = raw_quotes.get(norm_token)
+            q = raw_quotes.get(norm_token) or raw_quotes.get(normalize_instrument_token(fallback_sym))
 
             # If no live quote in LVC (e.g. simulated or cold), synthesize a nominal quote
             if not q:
@@ -241,14 +292,14 @@ def main():
     parser.add_argument("--alerts-ipc", default=DEFAULT_ALERTS_SUB_IPC, help="Scoring alerts SUB endpoint")
     parser.add_argument("--rms-pub-ipc", default=DEFAULT_RMS_PUB_IPC, help="RMS opportunities PUB endpoint")
     parser.add_argument("--quotes-router-ipc", default=DEFAULT_QUOTES_ROUTER_IPC, help="Quotes ROUTER endpoint")
-    parser.add_argument("--max-daily-loss", type=float, default=DEFAULT_MAX_DAILY_LOSS, help="Daily loss limit")
+    parser.add_argument("--universe-csv", default=None, help="Path to filtered universe CSV")
     args = parser.parse_args()
 
     rms = RMSService(
         alerts_ipc=args.alerts_ipc,
         rms_pub_ipc=args.rms_pub_ipc,
         quotes_router_ipc=args.quotes_router_ipc,
-        max_daily_loss=args.max_daily_loss,
+        universe_csv=args.universe_csv,
     )
 
     def sig_handler(sig, frame):

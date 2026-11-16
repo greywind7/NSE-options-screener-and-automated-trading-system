@@ -371,6 +371,291 @@ class TestTracks(unittest.TestCase):
         self.assertEqual(len(comb.sub_tracks), 3)  # fixed_target_ITM, fixed_target_ATM, trend_pullback_OTM
         self.assertTrue(comb.shared_pool)
 
+    def test_breakeven_trigger_all_base_tracks(self):
+        """Verify configurable 2.5% breakeven trigger across all base tracks."""
+        base_classes = [
+            ("FM", FastMomentumTrack, {"target_pct": 0.15, "sl_pct": 0.05, "breakeven_trigger_pct": 0.025}),
+            ("TP", TrendPullbackTrack, {"target_pct": 0.25, "sl_pct": 0.05, "breakeven_trigger_pct": 0.025}),
+            ("FT", FixedTargetTrack, {"target_pct": 0.15, "sl_pct": 0.05, "fixed_target_inr": 2000.0, "breakeven_trigger_pct": 0.025}),
+        ]
+
+        for code, track_cls, kwargs in base_classes:
+            track = track_cls(context=self.context, **kwargs)
+            opp = ActionableOpportunity(
+                opp_id=f"OPP_{code}",
+                alert_id=f"ALT_{code}",
+                symbol="TESTSTOCK",
+                direction="BULL",
+                archetype="FLAG_BULL_BREAKOUT",
+                trigger_price=1000.0,
+                strikes={
+                    "ATM": {
+                        "token": f"NSE:TEST{code}",
+                        "strike": 1000.0,
+                        "option_type": "CE",
+                        "ltp": 100.0,
+                        "bid": 99.8,
+                        "ask": 100.0,
+                        "lot_size": 100,
+                    },
+                    "ITM1": {
+                        "token": f"NSE:TEST{code}",
+                        "strike": 980.0,
+                        "option_type": "CE",
+                        "ltp": 100.0,
+                        "bid": 99.8,
+                        "ask": 100.0,
+                        "lot_size": 100,
+                    },
+                },
+                timestamp=1000.0,
+            )
+            trade = track.on_opportunity(opp)
+            self.assertIsNotNone(trade, f"Failed to open trade for {code}")
+            trade.entry_time = 1000.0
+            # Entry Ask = 100.0, Initial SL = 95.0 (-5%)
+            self.assertEqual(trade.entry_price, 100.0)
+            self.assertAlmostEqual(trade.stop_loss, 95.0, places=2)
+
+            # Tick 1: Price rises to 102.0 (+2.0% < 2.5% trigger) -> SL remains 95.0
+            track.on_tick(f"NSE:TEST{code}", ltp=102.0, bid=102.0, ask=102.2, ts=1010.0)
+            self.assertAlmostEqual(trade.stop_loss, 95.0, places=2)
+            self.assertEqual(trade.status, "OPEN")
+
+            # Tick 2: Price reaches 102.6 (+2.6% >= 2.5% trigger) -> SL ratchets to breakeven (100.0)
+            track.on_tick(f"NSE:TEST{code}", ltp=102.6, bid=102.6, ask=102.8, ts=1020.0)
+            self.assertAlmostEqual(trade.stop_loss, 100.0, places=2, msg=f"{code} failed to ratchet SL to breakeven")
+            self.assertEqual(trade.status, "OPEN")
+
+            # Tick 3: Price pulls back to 101.0 -> SL remains locked at 100.0
+            track.on_tick(f"NSE:TEST{code}", ltp=101.0, bid=101.0, ask=101.2, ts=1030.0)
+            self.assertAlmostEqual(trade.stop_loss, 100.0, places=2)
+            self.assertEqual(trade.status, "OPEN")
+
+            # Tick 4: Price drops to 100.0 (breakeven hit) -> Exits with SL_HIT at entry price
+            track.on_tick(f"NSE:TEST{code}", ltp=100.0, bid=100.0, ask=100.2, ts=1040.0)
+            self.assertEqual(trade.status, "CLOSED", f"{code} failed to close on breakeven SL")
+            self.assertEqual(trade.exit_reason, "SL_HIT")
+            self.assertEqual(trade.exit_price, 100.0)
+            self.assertEqual(trade.realized_pnl, 0.0, f"{code} PnL should be 0.0 at breakeven")
+
+    def test_reject_opportunity_when_bid_below_stop_loss(self):
+        """Verify that track rejects opportunity if market bid is already below stop loss."""
+        # 5% SL on 1.35 Ask -> SL = 1.2825.
+        # If prevailing Bid is 1.25, Bid is already below SL!
+        opp = ActionableOpportunity(
+            opp_id="OPP_WIDE_SPREAD",
+            alert_id="ALT_WIDE_SPREAD",
+            symbol="ANGELONE",
+            direction="BEAR",
+            archetype="PURE_BEAR_BREAKDOWN",
+            trigger_price=320.0,
+            strikes={
+                "ATM": {
+                    "token": "NSE:77385",
+                    "strike": 325.0,
+                    "option_type": "PE",
+                    "ltp": 1.30,
+                    "bid": 1.25,
+                    "ask": 1.35,
+                    "lot_size": 2500,
+                }
+            },
+            timestamp=1000.0,
+        )
+        track = FastMomentumTrack(context=self.context, track_name="fast_momentum_ATM", preferred_mode="ATM", sl_pct=0.05)
+        trade = track.on_opportunity(opp)
+        self.assertIsNone(trade, "Track must reject opportunity when prevailing bid <= stop loss")
+
+    def test_configurable_track_parameters_fast_momentum(self):
+        """Verify FastMomentumTrack respects configured stagnation_timeout_sec and target decay."""
+        track = FastMomentumTrack(
+            context=self.context,
+            target_pct=0.15,
+            sl_pct=0.05,
+            target_decay_sec=900.0,
+            decay_floor_pct=0.025,
+            stagnation_timeout_sec=1800.0,
+        )
+        trade = TradeState(
+            trade_id="TRD_TEST",
+            mode="paper",
+            track="fast_momentum",
+            symbol="TEST",
+            token="TOK1",
+            option_type="CE",
+            strike=100.0,
+            lot_size=10,
+            quantity=10,
+            entry_ask=100.0,
+            entry_price=100.0,
+            entry_time=1000.0,
+            target_price=115.0,
+            stop_loss=95.0,
+            highest_price=100.0,
+            current_bid=101.0,
+            status="OPEN",
+        )
+        # At 300s (old default), should NOT exit with STAGNATION_TIMEOUT
+        reason_300 = track.evaluate_exit_rules(trade, ltp=101.0, bid=101.0, ask=102.0, ts=1300.0)
+        self.assertIsNone(reason_300, "Should not exit at 300s when stagnation_timeout_sec=1800")
+        self.assertEqual(trade.target_price, 115.0, "Target should not decay before 900s")
+
+        # At 960s (after 900s target decay), target decays by 1%
+        track.evaluate_exit_rules(trade, ltp=101.0, bid=101.0, ask=102.0, ts=1960.0)
+        self.assertAlmostEqual(trade.target_price, 114.0, places=2)
+
+        # At 1800s, triggers STAGNATION_TIMEOUT
+        reason_1800 = track.evaluate_exit_rules(trade, ltp=101.0, bid=101.0, ask=102.0, ts=2800.0)
+        self.assertEqual(reason_1800, "STAGNATION_TIMEOUT")
+
+    def test_hard_entry_freeze_time(self):
+        """Verify hard entry freeze at 15:00 IST blocks new opportunities while allowing prior trades."""
+        from datetime import datetime
+        from core.common.time_utils import IST
+
+        track = FastMomentumTrack(
+            context=self.context,
+            track_name="fast_momentum_ATM",
+            preferred_mode="ATM",
+            entry_freeze_time="15:00",
+            eod_squareoff_time="15:15",
+        )
+
+        # 14:55:00 IST timestamp
+        dt_before = datetime(2026, 11, 16, 14, 55, 0, tzinfo=IST)
+        ts_before = dt_before.timestamp()
+
+        opp_before = ActionableOpportunity(
+            opp_id="OPP_BEFORE",
+            alert_id="ALT_1",
+            symbol="SBIN",
+            direction="BULL",
+            archetype="FLAG_BULL_BREAKOUT",
+            trigger_price=800.0,
+            strikes={
+                "ATM": {
+                    "token": "TOK_SBIN",
+                    "strike": 800.0,
+                    "option_type": "CE",
+                    "ltp": 20.0,
+                    "bid": 20.0,
+                    "ask": 20.2,
+                    "lot_size": 750,
+                }
+            },
+            timestamp=ts_before,
+        )
+        trade = track.on_opportunity(opp_before)
+        self.assertIsNotNone(trade, "Opportunity before 15:00 IST must be accepted")
+        self.assertEqual(len(track.active_trades), 1)
+
+        # 15:01:00 IST timestamp (after 15:00 freeze cutoff)
+        dt_after = datetime(2026, 11, 16, 15, 1, 0, tzinfo=IST)
+        ts_after = dt_after.timestamp()
+
+        opp_after = ActionableOpportunity(
+            opp_id="OPP_AFTER",
+            alert_id="ALT_2",
+            symbol="INFY",
+            direction="BULL",
+            archetype="FLAG_BULL_BREAKOUT",
+            trigger_price=1800.0,
+            strikes={
+                "ATM": {
+                    "token": "TOK_INFY",
+                    "strike": 1800.0,
+                    "option_type": "CE",
+                    "ltp": 30.0,
+                    "bid": 30.0,
+                    "ask": 30.5,
+                    "lot_size": 400,
+                }
+            },
+            timestamp=ts_after,
+        )
+        trade_blocked = track.on_opportunity(opp_after)
+        self.assertIsNone(trade_blocked, "Opportunity after 15:00 IST must be rejected by entry freeze")
+
+    def test_configurable_eod_squareoff_time(self):
+        """Verify on_heartbeat at or after eod_squareoff_time squares off open positions."""
+        from datetime import datetime
+        from core.common.time_utils import IST
+
+        ts_1510 = datetime(2026, 11, 16, 15, 10, 0, tzinfo=IST).timestamp()
+        ts_1515 = datetime(2026, 11, 16, 15, 15, 0, tzinfo=IST).timestamp()
+
+        track = FastMomentumTrack(
+            context=self.context,
+            entry_freeze_time="15:00",
+            eod_squareoff_time="15:15",
+            stagnation_timeout_sec=1800.0,
+        )
+        trade = TradeState(
+            trade_id="TRD_EOD",
+            mode="paper",
+            track="fast_momentum",
+            symbol="TCS",
+            token="TOK_TCS",
+            option_type="CE",
+            strike=4000.0,
+            lot_size=175,
+            quantity=175,
+            entry_ask=50.0,
+            entry_price=50.0,
+            entry_time=ts_1510 - 60.0,  # Entered 1 min ago
+            target_price=57.5,
+            stop_loss=47.5,
+            highest_price=50.0,
+            current_bid=51.0,
+            status="OPEN",
+        )
+        track.active_trades[trade.trade_id] = trade
+
+        # 15:10 IST heartbeat - position should remain open
+        track.on_heartbeat(ts_1510)
+        self.assertEqual(trade.status, "OPEN")
+
+        # 15:15 IST heartbeat - position should auto square-off
+        track.on_heartbeat(ts_1515)
+        self.assertEqual(trade.status, "CLOSED")
+        self.assertEqual(trade.exit_reason, "EOD_SQUAREOFF")
+        self.assertEqual(len(track.active_trades), 0)
+        self.assertEqual(len(track.closed_trades), 1)
+
+    def test_factory_propagates_parameters_from_config(self):
+        """Verify factory propagates configured parameters to created track instances."""
+        from common.tracks.factory import create_tracks
+        sample_cfg = {
+            "strategies": {
+                "momentum": {
+                    "entry_freeze_time": "15:00",
+                    "eod_squareoff_time": "15:15",
+                    "enabled_tracks": [
+                        {"type": "base", "name": "fast_momentum", "modes": ["ATM"]}
+                    ],
+                    "tracks": {
+                        "fast_momentum": {
+                            "target_pct": 0.15,
+                            "sl_pct": 0.05,
+                            "target_decay_sec": 900,
+                            "decay_floor_pct": 0.025,
+                            "stagnation_timeout_sec": 1800,
+                            "breakeven_trigger_pct": 0.025,
+                        }
+                    }
+                }
+            }
+        }
+        tracks = create_tracks(context=self.context, strategy_cfg=sample_cfg)
+        self.assertIn("fast_momentum_ATM", tracks)
+        fm = tracks["fast_momentum_ATM"]
+        self.assertEqual(fm.stagnation_timeout_sec, 1800.0)
+        self.assertEqual(fm.target_decay_sec, 900.0)
+        self.assertEqual(fm.decay_floor_pct, 0.025)
+        self.assertEqual(fm.entry_freeze_minutes, 900)
+        self.assertEqual(fm.eod_squareoff_minutes, 915)
+
 
 if __name__ == "__main__":
     unittest.main()

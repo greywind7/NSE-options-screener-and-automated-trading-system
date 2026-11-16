@@ -150,10 +150,11 @@ def get_config_manager(
     execution_config_path: str = "config/execution.json",
     system_config_path: str = "config/system.json",
     instruments_config_path: str = "config/instruments.json",
+    reload: bool = False,
 ) -> ConfigManager:
     """Singleton getter for ConfigManager."""
     global _GLOBAL_CONFIG
-    if _GLOBAL_CONFIG is None:
+    if _GLOBAL_CONFIG is None or reload:
         _GLOBAL_CONFIG = ConfigManager(
             strategy_config_path=strategy_config_path,
             execution_config_path=execution_config_path,

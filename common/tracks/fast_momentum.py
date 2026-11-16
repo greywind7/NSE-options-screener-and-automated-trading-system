@@ -15,6 +15,10 @@ class FastMomentumTrack(BaseTrack):
         context: ExecutionContext,
         target_pct: float = 0.12,  # +12% on Ask
         sl_pct: float = 0.08,      # -8% on Ask
+        breakeven_trigger_pct: Optional[float] = 0.025,
+        target_decay_sec: float = 180.0,
+        decay_floor_pct: float = 0.04,
+        stagnation_timeout_sec: float = 300.0,
         max_trades: int = 2,
         track_name: Optional[str] = None,
         preferred_mode: Optional[str] = None,
@@ -27,11 +31,17 @@ class FastMomentumTrack(BaseTrack):
             context=context,
             target_pct=target_pct,
             sl_pct=sl_pct,
+            breakeven_trigger_pct=breakeven_trigger_pct,
             max_trades=max_trades,
             preferred_mode=preferred_mode,
             parent_track=parent_track,
             **kwargs,
         )
+        self.target_decay_sec = float(target_decay_sec if target_decay_sec is not None else kwargs.get("target_decay_sec", 180.0))
+        d_floor = decay_floor_pct if decay_floor_pct is not None else kwargs.get("decay_floor_pct", 0.04)
+        self.decay_floor_pct = float(d_floor) / 100.0 if float(d_floor) > 1.0 else float(d_floor)
+        stag = stagnation_timeout_sec if stagnation_timeout_sec is not None else (kwargs.get("stagnation_timeout_sec") or kwargs.get("timeout_sec") or 300.0)
+        self.stagnation_timeout_sec = float(stag)
 
     def select_strike(self, opp: ActionableOpportunity) -> Optional[Dict[str, Any]]:
         if self.preferred_mode:
@@ -44,10 +54,10 @@ class FastMomentumTrack(BaseTrack):
     ) -> Optional[str]:
         elapsed = ts - trade.entry_time
 
-        # 1. Target Decay: After 3 minutes (180s), decay target by 1% per minute down to floor of +4%
-        if elapsed >= 180.0:
-            extra_mins = int((elapsed - 180.0) // 60)
-            decayed_target_pct = max(0.04, self.target_pct - (extra_mins * 0.01))
+        # 1. Target Decay: After target_decay_sec, decay target by 1% per minute down to decay_floor_pct
+        if elapsed >= self.target_decay_sec:
+            extra_mins = int((elapsed - self.target_decay_sec) // 60)
+            decayed_target_pct = max(self.decay_floor_pct, self.target_pct - (extra_mins * 0.01))
             trade.target_price = min(trade.target_price, trade.entry_price * (1.0 + decayed_target_pct))
 
         # 2. Hard Target Check
@@ -71,8 +81,8 @@ class FastMomentumTrack(BaseTrack):
             trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * 1.04, 2))
             trade.ratchet_level = 2
 
-        # 5. Stagnation Timeout: 5 minutes (300s) and profit < +3%
-        if elapsed >= 300.0 and profit_pct < (0.03 - 1e-6):
+        # 5. Stagnation Timeout: stagnation_timeout_sec and profit < +3%
+        if elapsed >= self.stagnation_timeout_sec and profit_pct < (0.03 - 1e-6):
             return "STAGNATION_TIMEOUT"
 
         return None

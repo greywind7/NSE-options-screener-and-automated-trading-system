@@ -227,6 +227,13 @@ from scripts.run_distributed import (
 )
 
 
+def get_python_binary() -> str:
+    venv_py = os.path.abspath(".venv/bin/python")
+    if os.path.exists(venv_py) and os.access(venv_py, os.X_OK):
+        return venv_py
+    return sys.executable
+
+
 def cmd_core(args: argparse.Namespace) -> int:
     """Launch centralized Core Tier: Ingestion, Shared Memory Candle Manager, Quotes Broker, and optional Recorder."""
     feed_flag = getattr(args, "feed", False)
@@ -243,7 +250,7 @@ def cmd_core(args: argparse.Namespace) -> int:
     print("=" * 80)
     print("🚀 LAUNCHING TRADING SYSTEM SPEC 2.0 - CORE INFRASTRUCTURE TIER")
     print("=" * 80)
-    py_bin = sys.executable
+    py_bin = get_python_binary()
     procs = []
 
     # 1. Feed Handler
@@ -283,7 +290,7 @@ def cmd_core(args: argparse.Namespace) -> int:
 def cmd_feed(args: argparse.Namespace) -> int:
     """Launch Feed Handler independently, with optional --candles and --record forks."""
     feed_mode = getattr(args, "mode", "ws")
-    py_bin = sys.executable
+    py_bin = get_python_binary()
     procs = []
 
     if getattr(args, "candles", False):
@@ -305,7 +312,7 @@ def cmd_feed(args: argparse.Namespace) -> int:
 
 def cmd_candlemanager(args: argparse.Namespace) -> int:
     """Launch Candle Manager independently."""
-    py_bin = sys.executable
+    py_bin = get_python_binary()
     cmd = [py_bin, "-m", "core.candles.candle_manager"]
     p = spawn_process(cmd, "candle_manager")
     print(f"  • Candle Manager    : Spawned (PID: {p.pid})")
@@ -314,7 +321,7 @@ def cmd_candlemanager(args: argparse.Namespace) -> int:
 
 def cmd_quotesbroker(args: argparse.Namespace) -> int:
     """Launch Quotes Broker independently."""
-    py_bin = sys.executable
+    py_bin = get_python_binary()
     cmd = [py_bin, "-m", "core.quotes.quotes_broker"]
     p = spawn_process(cmd, "quotes_broker")
     print(f"  • Quotes Broker     : Spawned (PID: {p.pid})")
@@ -395,7 +402,7 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
     print(f"Tracks : {', '.join(tracks)}")
     print("=" * 80)
 
-    py_bin = sys.executable
+    py_bin = get_python_binary()
     procs = []
 
     # 1. Scoring Engine 3.0 (Momentum Strategy)
@@ -446,14 +453,56 @@ def cmd_start(args: argparse.Namespace) -> int:
     return cmd_start_v2(args)
 
 
+def has_market_recordings(p: str) -> bool:
+    """Check if path is or contains actual market recording data files."""
+    if not os.path.exists(p):
+        return False
+    if os.path.isfile(p):
+        b = os.path.basename(p)
+        return not (b.startswith("journal_") or b.startswith("trades_") or "trade" in b.lower())
+    if os.path.isdir(p):
+        for root, _, files in os.walk(p):
+            for f in files:
+                if f.endswith(".parquet"):
+                    return True
+                if f.endswith(".jsonl") and not (
+                    f.startswith("journal_") or f.startswith("trades_") or "trade" in f.lower()
+                ):
+                    return True
+    return False
+
+
+def resolve_recording_path(session_date: Optional[str] = None, data_path: Optional[str] = None) -> str:
+    """Resolve recording directory or file path across date formats (YYYYMMDD vs YYYY-MM-DD)."""
+    if data_path:
+        return data_path
+    if not session_date:
+        return "recordings"
+
+    cands = []
+    if len(session_date) == 8 and session_date.isdigit():
+        cands.append(f"recordings/{session_date[:4]}-{session_date[4:6]}-{session_date[6:8]}")
+        cands.append(f"recordings/{session_date}")
+    elif "-" in session_date:
+        cands.append(f"recordings/{session_date}")
+        cands.append(f"recordings/{session_date.replace('-', '')}")
+    else:
+        cands.append(f"recordings/{session_date}")
+
+    for c in cands:
+        if has_market_recordings(c):
+            return c
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    return cands[0]
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     """Replay recorded session via high-speed 2.0 Historical Replay Engine."""
     session_date = getattr(args, "date", None)
     data_path = getattr(args, "data_path", None)
-    if not data_path and session_date:
-        data_path = f"recordings/{session_date}"
-    if not data_path:
-        data_path = "recordings"
+    data_path = resolve_recording_path(session_date=session_date, data_path=data_path)
 
     speed = float(getattr(args, "speed", 1.0))
     print("=" * 80)
@@ -471,30 +520,60 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     from simulation.columnar_sim_engine import ColumnarSimEngine
     data_path = getattr(args, "data_path", None)
     session_date = getattr(args, "date", None)
-    if not data_path and session_date:
-        candidates = [
-            f"recordings/{session_date}",
-            f"recordings/{session_date[:4]}-{session_date[4:6]}-{session_date[6:8]}" if len(session_date) == 8 and session_date.isdigit() else None,
-            f"recordings/{session_date.replace('-', '')}" if "-" in session_date else None,
-        ]
-        for c in candidates:
-            if c and os.path.exists(c):
-                data_path = c
-                break
-        if not data_path:
-            data_path = f"recordings/{session_date}"
-    if not data_path:
-        data_path = "recordings"
+    data_path = resolve_recording_path(session_date=session_date, data_path=data_path)
 
-    delay_sec = float(getattr(args, "delay", 60.0))
+    delay_sec = getattr(args, "delay", None)
+    track_filter = getattr(args, "track", None)
+    tracks = None
+    if track_filter and track_filter.upper() not in ("ALL", "DYNAMIC_TRIO"):
+        tracks = [t.strip() for t in track_filter.split(",") if t.strip()]
+
+    mode_arg = getattr(args, "mode", None) or "paper,paper_delayed"
+    modes = [m.strip() for m in mode_arg.split(",") if m.strip()]
+    capital = getattr(args, "capital", None)
+
+    strat_cfg_path = getattr(args, "strategy_config", "config/strategies.json")
+    from core.config.config_loader import get_config_manager
+    cfg = get_config_manager(strategy_config_path=strat_cfg_path, reload=True)
+    sc_cfg = cfg.get_scoring_config()
+
+    cli_pole = getattr(args, "min_pole_pct", None)
+    if cli_pole is not None:
+        pole_pct = float(cli_pole) / 100.0 if float(cli_pole) > 0.5 else float(cli_pole)
+    else:
+        fm_pole = cfg.strategy.get("strategies", {}).get("momentum", {}).get("tracks", {}).get("fast_momentum", {}).get("min_pole_pct")
+        sc_pole = sc_cfg.get("min_pole_pct")
+        strat_pole = cfg.strategy.get("strategies", {}).get("momentum", {}).get("min_pole_pct")
+        pole_cfg_val = fm_pole if (fm_pole is not None and fm_pole != 0.005) else (sc_pole or strat_pole or fm_pole or 0.005)
+        pole_pct = float(pole_cfg_val) / 100.0 if float(pole_cfg_val) > 0.5 else float(pole_cfg_val)
+
+    entry_freeze_time = getattr(args, "entry_freeze_time", None)
+    eod_squareoff_time = getattr(args, "eod_squareoff_time", None)
+    brokerage_per_order = getattr(args, "brokerage_per_order", None)
+
     print("=" * 80)
     print(f"🚀 COLUMNAR MARKET SIMULATION ENGINE: Data Path '{data_path}'")
-    print(f"Delay Sec: {delay_sec}s")
+    print(f"Modes: {modes} | Tracks: {tracks or 'ALL_ENABLED'} | Delay: {f'{delay_sec}s' if delay_sec is not None else 'Config (200-500ms)'} | Min Pole: {pole_pct*100.0:.2f}%")
+    if capital:
+        print(f"Capital Override: ₹{capital:,.2f} per track")
     print("=" * 80)
 
-    engine = ColumnarSimEngine(data_path=data_path, delay_sec=delay_sec)
+    engine = ColumnarSimEngine(
+        data_path=data_path,
+        tracks=tracks,
+        modes=modes,
+        capital=capital,
+        delay_sec=delay_sec,
+        session_date=session_date,
+        min_pole_pct=pole_pct,
+        entry_freeze_time=entry_freeze_time,
+        eod_squareoff_time=eod_squareoff_time,
+        brokerage_per_order=brokerage_per_order,
+    )
     results = engine.run_simulation()
     engine.print_summary(results)
+    if getattr(args, "journal", False):
+        engine.print_journal()
     return 0
 
 
@@ -758,17 +837,37 @@ def cmd_test(args: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     """Generate End-of-Day P&L analytics report from modern trade journals."""
-    session_date = getattr(args, "date", None) or datetime.now().strftime("%Y%m%d")
-    rec_dir = os.path.join("recordings", session_date)
+    session_date = getattr(args, "date", None) or datetime.now().strftime("%Y-%m-%d")
+    cands = []
+    if session_date:
+        if len(session_date) == 8 and session_date.isdigit():
+            cands.append(f"recordings/{session_date[:4]}-{session_date[4:6]}-{session_date[6:8]}")
+            cands.append(f"recordings/{session_date}")
+        elif "-" in session_date:
+            cands.append(f"recordings/{session_date}")
+            cands.append(f"recordings/{session_date.replace('-', '')}")
+        else:
+            cands.append(f"recordings/{session_date}")
+    else:
+        cands.append("recordings")
+
     journal_files = []
-    if os.path.exists(rec_dir):
-        for f in os.listdir(rec_dir):
-            if f.endswith(".jsonl"):
-                journal_files.append(os.path.join(rec_dir, f))
+    seen = set()
+    for rec_dir in cands:
+        if os.path.exists(rec_dir) and os.path.isdir(rec_dir):
+            for f in os.listdir(rec_dir):
+                if f.endswith(".jsonl"):
+                    full_p = os.path.join(rec_dir, f)
+                    if full_p not in seen:
+                        seen.add(full_p)
+                        journal_files.append(full_p)
 
     for f in os.listdir("logs") if os.path.exists("logs") else []:
         if session_date in f and f.endswith(".jsonl"):
-            journal_files.append(os.path.join("logs", f))
+            full_p = os.path.join("logs", f)
+            if full_p not in seen:
+                seen.add(full_p)
+                journal_files.append(full_p)
 
     print("=" * 80)
     print(f"📊 END-OF-DAY TRADE JOURNAL & P&L REPORT (Date: {session_date})")
@@ -794,14 +893,20 @@ def cmd_report(args: argparse.Namespace) -> int:
                     mode = t.get("mode", "unknown")
                     track = t.get("track", "unknown")
                     pnl = float(t.get("pnl", 0.0) or t.get("net_pnl", 0.0))
+                    entry_p = float(t.get("entry_price", 0.0))
+                    exit_p = float(t.get("exit_price", 0.0))
+                    pnl_pct = (exit_p - entry_p) / entry_p if entry_p > 0 else 0.0
+
                     key = (mode, track)
                     if key not in mode_track_pnl:
-                        mode_track_pnl[key] = {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0}
+                        mode_track_pnl[key] = {"trades": 0, "wins": 0, "breakevens": 0, "losses": 0, "net_pnl": 0.0}
                     mode_track_pnl[key]["trades"] += 1
                     total_trades += 1
-                    if pnl > 0:
+                    if pnl_pct > 0.025:
                         mode_track_pnl[key]["wins"] += 1
                         total_wins += 1
+                    elif pnl_pct >= -1e-6:
+                        mode_track_pnl[key]["breakevens"] += 1
                     else:
                         mode_track_pnl[key]["losses"] += 1
                     mode_track_pnl[key]["net_pnl"] += pnl
@@ -809,17 +914,19 @@ def cmd_report(args: argparse.Namespace) -> int:
                 except Exception:
                     pass
 
-    header = f"{'MODE':<16} | {'TRACK':<18} | {'TRADES':<8} | {'WINS':<6} | {'LOSSES':<6} | {'WIN %':<8} | {'NET PNL (INR)'}"
+    header = f"{'MODE':<16} | {'TRACK':<18} | {'TRADES':<8} | {'WINS':<6} | {'B/E':<6} | {'LOSSES':<6} | {'WIN %':<8} | {'NET PNL (INR)'}"
     print(header)
     print("-" * len(header))
     for (m, tr), s in sorted(mode_track_pnl.items()):
         win_pct = (s["wins"] / max(1, s["trades"])) * 100.0
         pnl_str = f"₹{s['net_pnl']:+,.2f}"
-        print(f"{m:<16} | {tr:<18} | {s['trades']:<8} | {s['wins']:<6} | {s['losses']:<6} | {win_pct:>6.1f}% | {pnl_str}")
+        print(f"{m:<16} | {tr:<18} | {s['trades']:<8} | {s['wins']:<6} | {s.get('breakevens', 0):<6} | {s['losses']:<6} | {win_pct:>6.1f}% | {pnl_str}")
 
     print("-" * len(header))
     tot_win_pct = (total_wins / max(1, total_trades)) * 100.0
-    print(f"{'TOTAL':<16} | {'ALL TRACKS':<18} | {total_trades:<8} | {total_wins:<6} | {total_trades - total_wins:<6} | {tot_win_pct:>6.1f}% | ₹{total_net:+,.2f}")
+    tot_be = sum(s.get("breakevens", 0) for s in mode_track_pnl.values())
+    tot_losses = sum(s["losses"] for s in mode_track_pnl.values())
+    print(f"{'TOTAL':<16} | {'ALL TRACKS':<18} | {total_trades:<8} | {total_wins:<6} | {tot_be:<6} | {tot_losses:<6} | {tot_win_pct:>6.1f}% | ₹{total_net:+,.2f}")
     print("=" * 80)
     return 0
 
@@ -1026,6 +1133,11 @@ def cmd_rest_fallback(args: argparse.Namespace) -> int:
 
 
 def main():
+    venv_py = os.path.abspath(".venv/bin/python")
+    if os.path.exists(venv_py) and os.path.abspath(sys.executable) != venv_py and not os.environ.get("RUNNER_NO_REEXEC"):
+        os.environ["RUNNER_NO_REEXEC"] = "1"
+        os.execv(venv_py, [venv_py] + sys.argv)
+
     parser = argparse.ArgumentParser(
         description="Upstox Algorithmic Trading Infrastructure Runner",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -1147,7 +1259,7 @@ def main():
     for s_name in ("simulate", "sim"):
         p_sim = subparsers.add_parser(s_name, help="Run deterministic high-speed historical market simulation")
         p_sim.add_argument("--data-path", default=None, help="Path to recorded parquet file or directory")
-        p_sim.add_argument("--delay-sec", "--delay", dest="delay", type=float, default=60.0, help="Delay seconds for paper_delayed mode (default: 60)")
+        p_sim.add_argument("--delay-sec", "--delay", dest="delay", type=float, default=None, help="Explicit delay seconds for paper_delayed mode (defaults to execution.json 200-500ms)")
         p_sim.add_argument("--date", default=None, help="Session date YYYYMMDD (defaults to today)")
         p_sim.add_argument("--from-date", dest="from_date", default=None, help="Start date for simulation range YYYYMMDD")
         p_sim.add_argument("--to-date", dest="to_date", default=None, help="End date for simulation range YYYYMMDD")
@@ -1166,6 +1278,10 @@ def main():
         p_sim.add_argument("--mcx", action="store_true", help="Shortcut for --exchange MCX")
         p_sim.add_argument("--config", "--strategy-config", dest="strategy_config", default="config/strategies.json", help="Path to strategy config (default: config/strategies.json)")
         p_sim.add_argument("--execution-config", dest="execution_config", default="config/execution.json", help="Path to execution config")
+        p_sim.add_argument("--min-pole-pct", "--pole-pct", dest="min_pole_pct", type=float, default=None, help="Minimum pole height percentage for flag breakouts (e.g. 0.005, 0.01, 1.0)")
+        p_sim.add_argument("--entry-freeze-time", "--freeze-time", dest="entry_freeze_time", default=None, help="Hard entry freeze cutoff time HH:MM IST (default: 15:00)")
+        p_sim.add_argument("--eod-squareoff-time", "--eod-time", "--squareoff-time", dest="eod_squareoff_time", default=None, help="EOD auto squareoff cutoff time HH:MM IST (default: 15:15)")
+        p_sim.add_argument("--brokerage-per-order", dest="brokerage_per_order", type=float, default=None, help="Brokerage per order in INR (buy and sell side, default: 30.0)")
 
     # Command: post-market (and alias archive)
     for p_name in ("post-market", "archive"):

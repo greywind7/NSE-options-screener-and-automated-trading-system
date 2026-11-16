@@ -21,6 +21,7 @@ from core.common.ipc_schemas import (
     OrderResult,
     unpack_message,
 )
+from core.common.time_utils import get_market_date_str
 from core.quotes.quotes_broker import (
     QuotesBrokerClient,
     DEFAULT_QUOTES_ROUTER_IPC,
@@ -148,7 +149,7 @@ class BaseSuperstructure(ExecutionContext, ABC):
 
     def _init_journals(self) -> None:
         """Gap 3: Initialize dedicated single-owner JSONL files per track."""
-        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_str = get_market_date_str()
         session_dir = os.path.join(self.recordings_dir, today_str)
         os.makedirs(session_dir, exist_ok=True)
 
@@ -192,14 +193,29 @@ class BaseSuperstructure(ExecutionContext, ABC):
         for track in self.tracks.values():
             track.on_opportunity(opp)
 
-    def on_tick(self, token: str, ltp: float, bid: float, ask: float, ts: float) -> None:
+    def on_tick(
+        self,
+        token: str,
+        ltp: float,
+        bid: float,
+        ask: float,
+        ts: float,
+        topic_token: str = "",
+        symbol: str = "",
+    ) -> None:
         """Route market tick to all active tracks."""
         for track in self.tracks.values():
-            track.on_tick(token=token, ltp=ltp, bid=bid, ask=ask, ts=ts)
+            if hasattr(track, "on_tick"):
+                try:
+                    track.on_tick(token=token, ltp=ltp, bid=bid, ask=ask, ts=ts, topic_token=topic_token, symbol=symbol)
+                except TypeError:
+                    track.on_tick(token=token, ltp=ltp, bid=bid, ask=ask, ts=ts)
 
     def on_heartbeat(self, ts: float) -> None:
-        """Hook for timer/delayed queue progression."""
-        pass
+        """Hook for timer/delayed queue progression and periodic track state checks."""
+        for track in self.tracks.values():
+            if hasattr(track, "on_heartbeat"):
+                track.on_heartbeat(ts)
 
     @abstractmethod
     def submit_order(self, request: OrderRequest) -> None:
@@ -233,12 +249,20 @@ class BaseSuperstructure(ExecutionContext, ABC):
                     topic, payload = self.quotes_sub.recv_multipart()
                     data = unpack_message(payload)
                     if topic.startswith(b"QUOTE"):
-                        token = data.get("token", "")
+                        topic_token = ""
+                        try:
+                            topic_str = topic.decode("utf-8")
+                            if "." in topic_str:
+                                topic_token = topic_str.split(".", 1)[1]
+                        except Exception:
+                            pass
+                        token = data.get("token") or topic_token
+                        sym = data.get("symbol", "")
                         ltp = float(data.get("ltp", 0.0))
                         bid = float(data.get("bid", ltp))
                         ask = float(data.get("ask", ltp))
                         ts = float(data.get("timestamp") or time.time())
-                        self.on_tick(token=token, ltp=ltp, bid=bid, ask=ask, ts=ts)
+                        self.on_tick(token=token, ltp=ltp, bid=bid, ask=ask, ts=ts, topic_token=topic_token, symbol=sym)
                     elif topic == b"HEARTBEAT":
                         self.on_heartbeat(float(data.get("timestamp", time.time())))
 

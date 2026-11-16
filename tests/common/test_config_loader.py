@@ -66,15 +66,18 @@ class TestConfigAndSchedule(unittest.TestCase):
 
         # Track parameters from config
         fm_cfg = mgr.get_track_config("fast_momentum")
-        self.assertEqual(fm_cfg.get("target_pct"), 0.12)
-        self.assertEqual(fm_cfg.get("sl_pct"), 0.08)
+        self.assertEqual(fm_cfg.get("target_pct"), 0.15)
+        self.assertEqual(fm_cfg.get("sl_pct"), 0.05)
+        self.assertEqual(fm_cfg.get("breakeven_trigger_pct"), 0.025)
 
         tp_cfg = mgr.get_track_config("trend_pullback")
         self.assertEqual(tp_cfg.get("target_pct"), 0.25)
-        self.assertEqual(tp_cfg.get("sl_pct"), 0.12)
+        self.assertEqual(tp_cfg.get("sl_pct"), 0.05)
+        self.assertEqual(tp_cfg.get("breakeven_trigger_pct"), 0.025)
 
         ft_cfg = mgr.get_track_config("fixed_target")
         self.assertEqual(ft_cfg.get("fixed_target_inr"), 750.0)
+        self.assertEqual(ft_cfg.get("breakeven_trigger_pct"), 0.025)
 
         # Scoring 3.0 parameters from config
         sc_cfg = mgr.get_scoring_config()

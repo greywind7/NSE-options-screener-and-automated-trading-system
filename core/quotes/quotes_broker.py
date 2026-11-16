@@ -118,12 +118,25 @@ class QuotesBroker:
             "timestamp": ts,
         }
         self._lvc[token] = quote_data
+        sym = tick.get("symbol", "")
+        if sym:
+            norm_sym = normalize_instrument_token(sym)
+            self._lvc[norm_sym] = quote_data
+            if ":" not in sym:
+                self._lvc[f"NSE:{sym}"] = quote_data
 
         # If this contract is currently subscribed by superstructures/tracks, broadcast depth update
         if token in self.subscribed_tokens:
             payload = pack_message(quote_data)
             topic = f"QUOTE.{token}".encode("utf-8")
             self.stream_pub.send_multipart([topic, payload], flags=zmq.NOBLOCK)
+
+        if sym:
+            norm_sym = normalize_instrument_token(sym)
+            if norm_sym != token and norm_sym in self.subscribed_tokens:
+                payload = pack_message(quote_data)
+                topic = f"QUOTE.{norm_sym}".encode("utf-8")
+                self.stream_pub.send_multipart([topic, payload], flags=zmq.NOBLOCK)
 
     def _format_quote(self, q: Dict[str, Any], best_depth: bool) -> Dict[str, Any]:
         if best_depth:

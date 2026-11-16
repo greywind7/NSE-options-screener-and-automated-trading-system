@@ -182,6 +182,89 @@ class TestScoringEngine3(unittest.TestCase):
         self.assertEqual(alerts[0].flag_low, 5140.0)
         self.assertGreaterEqual(alerts[0].clv, 0.75)
 
+    def test_min_pole_pct_threshold_filtering(self):
+        """Verify that min_pole_pct correctly filters out poles smaller than threshold."""
+        # Test 1: Explicit min_pole_pct initialization & normalization
+        engine_high_pole = ScoringEngine3(
+            shm_name=self.shm_name,
+            min_pole_pct=0.08,  # 8.0% minimum pole
+        )
+        self.assertEqual(engine_high_pole.min_pole_pct, 0.08)
+
+        engine_pct_normalized = ScoringEngine3(
+            shm_name=self.shm_name,
+            min_pole_pct=5.0,  # 5.0% passed as percentage (normalized to 0.05)
+        )
+        self.assertEqual(engine_pct_normalized.min_pole_pct, 0.05)
+
+        # Set up a 3.9% pole on symbol 0
+        sym_idx = 0
+        symbol = self.engine.index_to_symbol[sym_idx]
+        bar_idx = 5
+        now_ts = self._make_sim_timestamp(bar_idx, sec_offset=60)
+        # Bar 1: Pole low=5000, high=5195 -> pole_pct = 195/5000 = 3.9%
+        self._set_bar(sym_idx, 1, now_ts - 1200, 5000.0, 5195.0, 5000.0, 5190.0, 10000, atr=50.0)
+        self._set_bar(sym_idx, 2, now_ts - 900, 5190.0, 5195.0, 5150.0, 5160.0, 1500, atr=50.0)
+        self._set_bar(sym_idx, 3, now_ts - 600, 5160.0, 5175.0, 5140.0, 5155.0, 1200, atr=50.0)
+        self._set_bar(sym_idx, 4, now_ts - 300, 5155.0, 5170.0, 5145.0, 5150.0, 1100, atr=50.0)
+        self._set_bar(sym_idx, 5, now_ts, 5150.0, 5210.0, 5150.0, 5205.0, 3000, rvol=3.0, atr=50.0, is_closed=False)
+
+        # Engine with 0.5% threshold accepts the 3.9% pole
+        engine_low = ScoringEngine3(shm_name=self.shm_name, min_pole_pct=0.005)
+        alert_low = engine_low._check_flag_breakout(
+            symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 3.0, 50.0, now_ts
+        )
+        self.assertIsNotNone(alert_low)
+        self.assertEqual(alert_low.archetype, "FLAG_BULL_BREAKOUT")
+
+        # Engine with 5.0% threshold rejects the 3.9% pole
+        engine_high = ScoringEngine3(shm_name=self.shm_name, min_pole_pct=0.05)
+        alert_high = engine_high._check_flag_breakout(
+            symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 3.0, 50.0, now_ts
+        )
+        self.assertIsNone(alert_high)
+
+    def test_pure_breakout_thrust_real_body_calculation(self):
+        """Verify that pure breakout thrust measures absolute real body abs(close - open)."""
+        sym_idx = 1
+        symbol = self.engine.index_to_symbol[sym_idx]
+        bar_idx = 4
+        now_ts = self._make_sim_timestamp(bar_idx, sec_offset=60)
+
+        # 3 Prior bars are RED candles with significant 10-point body drops:
+        # open=1000, high=1001, low=988, close=990 -> abs(close - open) = 10.0
+        # Under the old formula (high - open), thrust was only 1.0 (severely depressed).
+        for b in range(1, 4):
+            self._set_bar(sym_idx, b, now_ts - (4 - b) * 300, 1000.0, 1001.0, 988.0, 990.0, 1000, atr=10.0)
+
+        # Baseline thrust must be max(avg_body=10.0, 0.35 * 10 = 3.5) = 10.0.
+        # Required thrust for 2.0x is >= 20.0 points.
+
+        # Case 1: Weak green expansion (body = 12.0 points, close=1002 > combined_high=1001).
+        # Thrust 12.0 < 20.0 -> Must be REJECTED (under old code, high-open=14 >= 2.0 * 3.5 would falsely trigger).
+        self._set_bar(sym_idx, 4, now_ts, 990.0, 1004.0, 990.0, 1002.0, 3000, rvol=3.0, atr=10.0, is_closed=False)
+        alert_weak = self.engine._check_pure_breakout(
+            symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 3.0, 10.0, now_ts
+        )
+        self.assertIsNone(alert_weak)
+
+        # Case 2: Strong green expansion (body = 22.0 points, open=990, close=1012, high=1013).
+        # Thrust 22.0 >= 20.0 -> Must TRIGGER.
+        self._set_bar(sym_idx, 4, now_ts, 990.0, 1013.0, 990.0, 1012.0, 3000, rvol=3.0, atr=10.0, is_closed=False)
+        alert_strong = self.engine._check_pure_breakout(
+            symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 3.0, 10.0, now_ts
+        )
+        self.assertIsNotNone(alert_strong)
+        self.assertEqual(alert_strong.archetype, "PURE_BULL_BREAKOUT")
+
+        # Case 3: Red shooting star with big upper wick (open=990, high=1020, close=988).
+        # Net body is negative (close < open) -> Must NEVER trigger Bull Impulse.
+        self._set_bar(sym_idx, 4, now_ts, 990.0, 1020.0, 985.0, 988.0, 3000, rvol=3.0, atr=10.0, is_closed=False)
+        alert_red_wick = self.engine._check_pure_breakout(
+            symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 3.0, 10.0, now_ts
+        )
+        self.assertIsNone(alert_red_wick)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,7 @@ import zmq
 
 from core.common.ipc_schemas import unpack_message
 from core.common.symbol_utils import is_option_contract
+from core.common.time_utils import get_market_date_str
 
 DEFAULT_FEED_EQ_IPC = "ipc:///tmp/feed_equity.ipc"
 DEFAULT_FEED_OPT_IPC = "ipc:///tmp/feed_options.ipc"
@@ -148,7 +149,7 @@ class MarketRecorder:
         self._buffer_eq = []
 
         first_ts = batch[0].get("exchange_timestamp") or batch[0].get("received_timestamp") or time.time()
-        date_str = datetime.fromtimestamp(first_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        date_str = get_market_date_str(first_ts)
         partition_dir = os.path.join(self.output_dir, date_str)
         os.makedirs(partition_dir, exist_ok=True)
 
@@ -180,7 +181,7 @@ class MarketRecorder:
         self._buffer_opt = []
 
         first_ts = batch[0].get("exchange_timestamp") or batch[0].get("received_timestamp") or time.time()
-        date_str = datetime.fromtimestamp(first_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        date_str = get_market_date_str(first_ts)
         partition_dir = os.path.join(self.output_dir, date_str)
         os.makedirs(partition_dir, exist_ok=True)
 

@@ -15,7 +15,9 @@ class FixedTargetTrack(BaseTrack):
         context: ExecutionContext,
         target_pct: float = 0.15,            # +15% on Ask
         sl_pct: float = 0.10,                # -10% on Ask
+        breakeven_trigger_pct: Optional[float] = 0.025,
         fixed_target_inr: float = 2000.0,    # ₹2,000 INR target per lot
+        timeout_sec: float = 600.0,
         max_trades: int = 2,
         track_name: Optional[str] = None,
         preferred_mode: Optional[str] = None,
@@ -28,12 +30,15 @@ class FixedTargetTrack(BaseTrack):
             context=context,
             target_pct=target_pct,
             sl_pct=sl_pct,
+            breakeven_trigger_pct=breakeven_trigger_pct,
             max_trades=max_trades,
             preferred_mode=preferred_mode,
             parent_track=parent_track,
             **kwargs,
         )
         self.fixed_target_inr = fixed_target_inr
+        timeout = timeout_sec if timeout_sec is not None else (kwargs.get("timeout_sec") or kwargs.get("stagnation_timeout_sec") or 600.0)
+        self.timeout_sec = float(timeout)
 
     def select_strike(self, opp: ActionableOpportunity) -> Optional[Dict[str, Any]]:
         if self.preferred_mode:
@@ -64,8 +69,8 @@ class FixedTargetTrack(BaseTrack):
             trade.stop_loss = max(trade.stop_loss, trade.entry_price)
             trade.ratchet_level = 1
 
-        # 5. Stagnation Timeout: 10 minutes (600s) and negative PnL
-        if elapsed >= 600.0 and current_inr_pnl < 0:
+        # 5. Stagnation Timeout: timeout_sec and negative PnL
+        if elapsed >= self.timeout_sec and current_inr_pnl < 0:
             return "FIXED_STAGNATION_TIMEOUT"
 
         return None

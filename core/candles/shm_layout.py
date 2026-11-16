@@ -97,22 +97,25 @@ class MmapSharedMemoryAdapter:
 def create_or_attach_shm(name: str = SHM_NAME, create: bool = False) -> Union[SharedMemory, MmapSharedMemoryAdapter]:
     """
     Create or attach to the shared memory segment.
-    Attempts POSIX SharedMemory first; falls back to /tmp memory-mapped file if restricted by OS/sandbox.
+    Uses memory-mapped file adapter (/tmp/{clean_name}.shm) for cross-process stability
+    and sandbox immunity across independent CLI lifecycles on macOS/Linux.
+    Falls back to multiprocessing.shared_memory.SharedMemory if explicitly forced.
     """
-    try:
-        if create:
-            try:
-                s = SharedMemory(name=name, create=False)
-                s.close()
-                s.unlink()
-            except FileNotFoundError:
-                pass
-            return SharedMemory(name=name, create=True, size=TOTAL_SHM_SIZE)
-        else:
-            return SharedMemory(name=name, create=False)
-    except (PermissionError, OSError):
-        # Graceful fallback to memory-mapped buffer
-        return MmapSharedMemoryAdapter(name=name, size=TOTAL_SHM_SIZE, create=create)
+    if os.environ.get("FORCE_POSIX_SHM"):
+        try:
+            if create:
+                try:
+                    s = SharedMemory(name=name, create=False)
+                    s.close()
+                    s.unlink()
+                except FileNotFoundError:
+                    pass
+                return SharedMemory(name=name, create=True, size=TOTAL_SHM_SIZE)
+            else:
+                return SharedMemory(name=name, create=False)
+        except (PermissionError, OSError):
+            pass
+    return MmapSharedMemoryAdapter(name=name, size=TOTAL_SHM_SIZE, create=create)
 
 
 def get_shm_views(shm: Union[SharedMemory, MmapSharedMemoryAdapter]) -> Tuple[np.ndarray, np.ndarray]:

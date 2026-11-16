@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import zmq
 
 from core.common.ipc_schemas import unpack_message
+from core.common.time_utils import get_market_date_str
 
 DEFAULT_ALERTS_SUB_IPC = "ipc:///tmp/scoring_alerts_pub.ipc"
 DEFAULT_RMS_SUB_IPC = "ipc:///tmp/rms_strike_pub.ipc"
@@ -82,7 +83,7 @@ class TerminalDashboard:
 
     def scan_journals(self) -> None:
         """Scan today's journal files and aggregate trackwise metrics per mode."""
-        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_str = get_market_date_str()
         session_dir = os.path.join(self.recordings_dir, today_str)
         if not os.path.exists(session_dir):
             return

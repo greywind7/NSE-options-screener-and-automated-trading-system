@@ -24,9 +24,9 @@ class TestColumnarSimEngine(unittest.TestCase):
         ticks = []
         base_ts = 1700000000.0
 
-        for i in range(12):
-            ts = base_ts + i * 10.0  # 0s, 10s, 20s, ... 110s
-            ltp = 100.0 + (i * 2.0)  # Ascending: 100, 102, 104 ... 122 (Target is 112 -> reached at i=6)
+        for i in range(15):
+            ts = base_ts + i * 10.0  # 0s, 10s, 20s, ... 140s
+            ltp = 100.0 + (i * 2.0)  # Ascending: 100, 102, 104 ... 128 (Target reached)
             ticks.append({
                 "token": token,
                 "symbol": "NIFTY",
@@ -144,6 +144,129 @@ class TestColumnarSimEngine(unittest.TestCase):
         self.assertIsNotNone(q2)
         self.assertEqual(q2["ltp"], 116.0)
         self.assertEqual(q2["ask"], 116.20)
+
+    def test_atm_proximity_guard_rejects_distant_strikes(self):
+        """Verify resolve_sim_strikes rejects distant strikes (e.g. HAVELLS at 1162 with only 1110 recorded)."""
+        sim = ColumnarSimEngine(data_path=self.parquet_path)
+        # Catalog only has 1100 and 1110 strikes
+        sim.options_catalog["HAVELLS"] = {
+            "CE": [(1100.0, "TOK_1100"), (1110.0, "TOK_1110")],
+            "PE": [(1100.0, "TOK_1100P"), (1110.0, "TOK_1110P")],
+        }
+        # Spot / trigger is 1162.0 (nearest strike 1110 is 52 rupees away > 2%)
+        resolved = sim.resolve_sim_strikes("HAVELLS", "BULL", trigger_price=1162.0, timestamp=1000.0)
+        self.assertEqual(resolved, {}, "ATM proximity guard must reject distant strikes > 2% from spot")
+
+    def test_win_rate_and_breakeven_classification(self):
+        """Verify > 2.5% is counted as win, 0-2.5% as breakeven, and < 0% as loss."""
+        from common.interfaces import TradeState
+        sim = ColumnarSimEngine(data_path=self.parquet_path, modes=["paper"], tracks=["trend_pullback"])
+
+        # Trade 1: +10% gain (e.g. trailing SL locked in profit) -> WIN
+        t1 = TradeState(
+            trade_id="T1", mode="paper", track="trend_pullback", symbol="S1", token="TOK1",
+            option_type="CE", strike=100.0, lot_size=10, quantity=10,
+            entry_ask=100.0, entry_price=100.0, entry_time=1000.0,
+            exit_price=110.0, exit_time=1060.0, status="CLOSED", realized_pnl=100.0,
+            target_price=125.0, stop_loss=105.0, highest_price=115.0, current_bid=110.0,
+        )
+        # Trade 2: +1.5% gain (breakeven / minor win) -> BREAKEVEN
+        t2 = TradeState(
+            trade_id="T2", mode="paper", track="trend_pullback", symbol="S2", token="TOK2",
+            option_type="CE", strike=100.0, lot_size=10, quantity=10,
+            entry_ask=100.0, entry_price=100.0, entry_time=1000.0,
+            exit_price=101.5, exit_time=1060.0, status="CLOSED", realized_pnl=15.0,
+            target_price=125.0, stop_loss=100.0, highest_price=103.0, current_bid=101.5,
+        )
+        # Trade 3: -5.0% loss -> LOSS
+        t3 = TradeState(
+            trade_id="T3", mode="paper", track="trend_pullback", symbol="S3", token="TOK3",
+            option_type="CE", strike=100.0, lot_size=10, quantity=10,
+            entry_ask=100.0, entry_price=100.0, entry_time=1000.0,
+            exit_price=95.0, exit_time=1060.0, status="CLOSED", realized_pnl=-50.0,
+            target_price=125.0, stop_loss=95.0, highest_price=100.0, current_bid=95.0,
+        )
+
+        sim.closed_trades["paper"] = [t1, t2, t3]
+        results = sim._build_results()
+        tp_res = results["paper"]["trend_pullback"]
+
+        self.assertEqual(tp_res["trades"], 3)
+        self.assertEqual(tp_res["wins"], 1, "Only > 2.5% should be counted as win")
+        self.assertEqual(tp_res["breakevens"], 1, "0-2.5% should be counted as breakeven")
+        self.assertEqual(tp_res["losses"], 1, "< 0% should be counted as loss")
+        self.assertAlmostEqual(tp_res["win_rate"], 33.33, places=1)
+
+    def test_brokerage_deduction_and_journal_formatting(self):
+        """Verify brokerage deduction per order, net PnL, journal entry-time sorting, and trigger column."""
+        from common.interfaces import TradeState
+        sim = ColumnarSimEngine(
+            data_path=self.parquet_path,
+            modes=["paper"],
+            tracks=["trend_pullback"],
+            brokerage_per_order=30.0,
+        )
+
+        # Trade 1: entered at t=1050 (later), Bull Flag
+        t1 = TradeState(
+            trade_id="T1", mode="paper", track="trend_pullback", symbol="S1", token="TOK1",
+            option_type="CE", strike=100.0, lot_size=10, quantity=10,
+            entry_ask=100.0, entry_price=100.0, entry_time=1050.0,
+            exit_price=110.0, exit_time=1060.0, status="CLOSED", realized_pnl=100.0,
+            target_price=125.0, stop_loss=105.0, highest_price=115.0, current_bid=110.0,
+            metadata={"archetype": "FLAG_BULL_BREAKOUT"},
+        )
+        # Trade 2: entered at t=1010 (earliest), Pure Breakdown
+        t2 = TradeState(
+            trade_id="T2", mode="paper", track="trend_pullback", symbol="S2", token="TOK2",
+            option_type="PE", strike=100.0, lot_size=10, quantity=10,
+            entry_ask=100.0, entry_price=100.0, entry_time=1010.0,
+            exit_price=101.5, exit_time=1070.0, status="CLOSED", realized_pnl=15.0,
+            target_price=125.0, stop_loss=100.0, highest_price=103.0, current_bid=101.5,
+            metadata={"archetype": "PURE_BEAR_BREAKDOWN"},
+        )
+        # Trade 3: entered at t=1030 (middle), Bear Flag
+        t3 = TradeState(
+            trade_id="T3", mode="paper", track="trend_pullback", symbol="S3", token="TOK3",
+            option_type="PE", strike=100.0, lot_size=10, quantity=10,
+            entry_ask=100.0, entry_price=100.0, entry_time=1030.0,
+            exit_price=95.0, exit_time=1080.0, status="CLOSED", realized_pnl=-50.0,
+            target_price=125.0, stop_loss=95.0, highest_price=100.0, current_bid=95.0,
+            metadata={"archetype": "FLAG_BEAR_BREAKDOWN"},
+        )
+
+        # Append in non-chronological order of entry (T1 exit 1060, T2 exit 1070, T3 exit 1080)
+        sim.closed_trades["paper"] = [t1, t2, t3]
+        results = sim._build_results()
+        tp_res = results["paper"]["trend_pullback"]
+
+        # 3 trades * (2 * 30.0) = 180.0 total brokerage
+        self.assertEqual(tp_res["gross_pnl"], 65.0)
+        self.assertEqual(tp_res["total_brokerage"], 180.0)
+        self.assertEqual(tp_res["net_pnl"], -115.0)
+        self.assertEqual(tp_res["end_capital"], 250000.0 - 115.0)
+
+        # Verify summary output table has all required columns
+        summary_out = sim.print_summary(results)
+        self.assertIn("GROSS PNL", summary_out)
+        self.assertIn("BROKERAGE", summary_out)
+        self.assertIn("NET PNL (INR)", summary_out)
+        self.assertIn("₹180.00", summary_out)
+
+        # Verify journal output
+        journal_out = sim.print_journal()
+        self.assertIn("TRIGGER", journal_out)
+        self.assertIn("BULL_FLAG", journal_out)
+        self.assertIn("PURE_BREAKDOWN", journal_out)
+        self.assertIn("BEAR_FLAG", journal_out)
+
+        # Verify chronological sorting by entry_time:
+        # T2 (entry 1010, index 1 in table) must appear before T3 (entry 1030, index 2), which is before T1 (entry 1050, index 3)
+        pos_t2 = journal_out.find("S2")
+        pos_t3 = journal_out.find("S3")
+        pos_t1 = journal_out.find("S1")
+        self.assertGreater(pos_t3, pos_t2, "T2 (entry 1010) must appear before T3 (entry 1030)")
+        self.assertGreater(pos_t1, pos_t3, "T3 (entry 1030) must appear before T1 (entry 1050)")
 
 
 if __name__ == "__main__":

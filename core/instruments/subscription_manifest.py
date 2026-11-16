@@ -63,6 +63,7 @@ def run_manifest_generator(
 
     # 2. Scan Master CSV for FNO Options matching our filtered equities
     options_by_underlying: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    equity_last_prices: Dict[str, float] = {}
     today_str = date.today().strftime("%Y-%m-%d")
 
     with open(master_csv, "r", encoding="utf-8", errors="replace") as f:
@@ -70,15 +71,26 @@ def run_manifest_generator(
         for row in reader:
             exch = (row.get("exchange") or "").strip().upper()
             seg = (row.get("segment") or "").strip().upper()
+            itype = (row.get("option_type") or row.get("instrument_type") or "").strip().upper()
+            ts = (row.get("tradingsymbol") or row.get("trading_symbol") or "").strip().upper()
+            und_sym = (row.get("underlying_symbol") or row.get("name") or "").strip().upper()
+
+            # Record underlying equity last traded / closing price
+            if itype == "EQUITY" or seg in ("EQ", ""):
+                sym_cand = ts if ts in equities else (und_sym if und_sym in equities else None)
+                if sym_cand:
+                    try:
+                        lp = float(row.get("last_price") or 0.0)
+                        if lp > 0:
+                            equity_last_prices[sym_cand] = lp
+                    except Exception:
+                        pass
+
             if seg != "FNO" and not ("_FO" in exch or exch in ("MCX", "NSE")):
                 continue
 
-            itype = (row.get("option_type") or row.get("instrument_type") or "").strip().upper()
             if itype not in ("CE", "PE"):
                 continue
-
-            ts = (row.get("tradingsymbol") or row.get("trading_symbol") or "").strip().upper()
-            und_sym = (row.get("underlying_symbol") or row.get("name") or "").strip().upper()
             matched_sym = None
             if und_sym in equities:
                 matched_sym = und_sym
@@ -162,10 +174,15 @@ def run_manifest_generator(
 
         sorted_strikes = sorted(list(strikes_set))
 
-        # Determine middle strike as baseline (middle of strike chain)
-        mid_idx = len(sorted_strikes) // 2
-        start_idx = max(0, mid_idx - popular_strikes)
-        end_idx = min(len(sorted_strikes), mid_idx + popular_strikes + 1)
+        # Determine ATM strike using equity's last traded / close price if available
+        baseline_price = equity_last_prices.get(sym, 0.0)
+        if baseline_price > 0:
+            atm_idx = min(range(len(sorted_strikes)), key=lambda i: abs(sorted_strikes[i] - baseline_price))
+        else:
+            atm_idx = len(sorted_strikes) // 2
+
+        start_idx = max(0, atm_idx - popular_strikes)
+        end_idx = min(len(sorted_strikes), atm_idx + popular_strikes + 1)
         selected_strikes = set(sorted_strikes[start_idx:end_idx])
 
         # Segregate into popular (streamed on WS) and remaining (polled in background)

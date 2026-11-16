@@ -94,10 +94,20 @@ class DelayedSuperstructure(BaseSuperstructure):
                 track.on_order_result(result)
 
     def on_heartbeat(self, ts: float) -> None:
-        """CRIT-007: QuotesBroker 1s heartbeat drives delayed release queue progression."""
+        """CRIT-007: QuotesBroker 1s heartbeat drives delayed release queue progression and trade timers."""
         self._process_queue(ts)
+        super().on_heartbeat(ts)
 
-    def on_tick(self, token: str, ltp: float, bid: float, ask: float, ts: float) -> None:
+    def on_tick(
+        self,
+        token: str,
+        ltp: float,
+        bid: float,
+        ask: float,
+        ts: float,
+        topic_token: str = "",
+        symbol: str = "",
+    ) -> None:
         """Market tick progresses queue and evaluates active trades."""
         self._process_queue(ts)
-        super().on_tick(token=token, ltp=ltp, bid=bid, ask=ask, ts=ts)
+        super().on_tick(token=token, ltp=ltp, bid=bid, ask=ask, ts=ts, topic_token=topic_token, symbol=symbol)

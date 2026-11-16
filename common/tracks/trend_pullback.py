@@ -15,8 +15,10 @@ class TrendPullbackTrack(BaseTrack):
         context: ExecutionContext,
         target_pct: float = 0.25,  # +25% on Ask
         sl_pct: float = 0.12,      # -12% on Ask
+        breakeven_trigger_pct: Optional[float] = 0.025,
         max_trades: int = 2,
         trailing_step_pct: float = 0.02,
+        timeout_sec: float = 1800.0,
         track_name: Optional[str] = None,
         preferred_mode: Optional[str] = None,
         parent_track: Optional[str] = None,
@@ -28,12 +30,15 @@ class TrendPullbackTrack(BaseTrack):
             context=context,
             target_pct=target_pct,
             sl_pct=sl_pct,
+            breakeven_trigger_pct=breakeven_trigger_pct,
             max_trades=max_trades,
             preferred_mode=preferred_mode,
             parent_track=parent_track,
             **kwargs,
         )
         self.trailing_step_pct = trailing_step_pct
+        timeout = timeout_sec if timeout_sec is not None else (kwargs.get("timeout_sec") or kwargs.get("stagnation_timeout_sec") or 1800.0)
+        self.timeout_sec = float(timeout)
 
     def select_strike(self, opp: ActionableOpportunity) -> Optional[Dict[str, Any]]:
         if self.preferred_mode:
@@ -67,8 +72,8 @@ class TrendPullbackTrack(BaseTrack):
             trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * 1.12, 2))
             trade.ratchet_level = 2
 
-        # 4. Long-Horizon Stagnation Timeout: 30 minutes (1800s) and profit < +5%
-        if elapsed >= 1800.0 and profit_pct < (0.05 - 1e-6):
+        # 4. Long-Horizon Stagnation Timeout: timeout_sec and profit < +5%
+        if elapsed >= self.timeout_sec and profit_pct < (0.05 - 1e-6):
             return "PULLBACK_STAGNATION_TIMEOUT"
 
         return None

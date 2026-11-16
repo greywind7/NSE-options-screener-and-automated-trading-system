@@ -72,37 +72,117 @@ class SimExecutionContext(ExecutionContext):
         pass
 
 
+class SimDelayedExecutionContext(ExecutionContext):
+    """Simulation execution context that queues OrderRequests for delayed fills."""
+    def __init__(self, min_delay_ms: float = 10000.0, max_delay_ms: float = 60000.0):
+        self._mode = "paper_delayed"
+        self._frozen = False
+        self.min_delay_ms = min_delay_ms
+        self.max_delay_ms = max_delay_ms
+        self.pending_orders: List[Tuple[float, OrderRequest]] = []
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def is_frozen(self) -> bool:
+        return self._frozen
+
+    def submit_order(self, request: OrderRequest) -> None:
+        if request.transaction_type == "BUY":
+            delay_sec = (
+                random.uniform(self.min_delay_ms, self.max_delay_ms) / 1000.0
+                if self.max_delay_ms > self.min_delay_ms
+                else self.min_delay_ms / 1000.0
+            )
+            release_ts = (request.timestamp or 0.0) + delay_sec
+            self.pending_orders.append((release_ts, request))
+
+    def cancel_order(self, order_id: str) -> None:
+        self.pending_orders = [item for item in self.pending_orders if item[1].order_id != order_id]
+
+    def record_trade_event(self, event_type: str, data: Dict[str, Any]) -> None:
+        pass
+
+
 class ColumnarSimEngine:
     def __init__(
         self,
         data_path: str,
         tracks: Optional[List[str]] = None,
+        modes: Optional[List[str]] = None,
+        capital: Optional[float] = None,
         delay_sec: Optional[float] = None,
         min_delay_ms: Optional[float] = None,
         max_delay_ms: Optional[float] = None,
         shm_name: str = "shm_sim_ohlc",
+        session_date: Optional[str] = None,
+        min_pole_pct: Optional[float] = None,
+        entry_freeze_time: Optional[str] = None,
+        eod_squareoff_time: Optional[str] = None,
+        brokerage_per_order: Optional[float] = None,
     ):
+        from common.tracks.base_track import _parse_time_to_minutes
         from common.tracks.factory import get_enabled_track_names
         from core.config.config_loader import get_config_manager
         self.data_path = data_path
         self.tracks = tracks or get_enabled_track_names()
+        self.modes = [m.strip() for m in modes] if modes else ["paper", "paper_delayed"]
+        self.capital = capital
+        self.session_date = session_date
+        self.min_pole_pct = min_pole_pct
 
         cfg = get_config_manager()
         exec_cfg = cfg.execution.get("execution", {})
+        strat_momentum = cfg.strategy.get("strategies", {}).get("momentum", {})
         delayed_cfg = exec_cfg.get("paper_delayed", {})
+        paper_cfg = exec_cfg.get("paper", {})
         sim_cfg = exec_cfg.get("sim", {})
+
+        self.brokerage_per_order = (
+            float(brokerage_per_order)
+            if brokerage_per_order is not None
+            else float(
+                strat_momentum.get("brokerage_per_order")
+                or exec_cfg.get("brokerage_per_order")
+                or sim_cfg.get("brokerage_per_order")
+                or paper_cfg.get("brokerage_per_order")
+                or delayed_cfg.get("brokerage_per_order", 30.0)
+            )
+        )
+
+        self.entry_freeze_time = (
+            entry_freeze_time
+            or strat_momentum.get("entry_freeze_time")
+            or exec_cfg.get("entry_freeze_time")
+            or "15:00"
+        )
+        self.eod_squareoff_time = (
+            eod_squareoff_time
+            or strat_momentum.get("eod_squareoff_time")
+            or exec_cfg.get("eod_squareoff_time")
+            or "15:15"
+        )
+        self.entry_freeze_minutes = _parse_time_to_minutes(self.entry_freeze_time, 15 * 60)
+        self.eod_squareoff_minutes = _parse_time_to_minutes(self.eod_squareoff_time, 15 * 60 + 15)
 
         if delay_sec is not None:
             self.min_delay_ms = float(delay_sec) * 1000.0
             self.max_delay_ms = float(delay_sec) * 1000.0
+        elif min_delay_ms is not None or max_delay_ms is not None:
+            self.min_delay_ms = float(min_delay_ms or 200.0)
+            self.max_delay_ms = float(max_delay_ms or 500.0)
         else:
-            self.min_delay_ms = float(min_delay_ms or sim_cfg.get("min_delay_ms") or delayed_cfg.get("min_delay_ms", 10000.0))
-            self.max_delay_ms = float(max_delay_ms or sim_cfg.get("max_delay_ms") or delayed_cfg.get("max_delay_ms", 60000.0))
-        self.delay_sec = self.max_delay_ms / 1000.0
+            self.min_delay_ms = float(sim_cfg.get("min_delay_ms") or delayed_cfg.get("min_delay_ms", 200.0))
+            self.max_delay_ms = float(sim_cfg.get("max_delay_ms") or delayed_cfg.get("max_delay_ms", 500.0))
+        self.delay_sec = (self.min_delay_ms + self.max_delay_ms) / 2000.0
         self.shm_name = shm_name
 
         self.df_equity: Optional[pl.DataFrame] = None
         self.df_options: Optional[pl.DataFrame] = None
+
+        self.token_map: Dict[str, Tuple[str, float, str]] = {}
+        self.lot_sizes: Dict[str, int] = {}
 
         # Pre-indexed option depth data: token -> sorted numpy arrays for O(log N) lookup
         self.options_by_token: Dict[str, Dict[str, np.ndarray]] = {}
@@ -110,7 +190,80 @@ class ColumnarSimEngine:
         self.options_catalog: Dict[str, Dict[str, List[Tuple[float, str]]]] = {}
 
         # Trade tracking per mode: mode -> list of TradeState
-        self.closed_trades: Dict[str, List[TradeState]] = {"paper": [], "paper_delayed": []}
+        self.closed_trades: Dict[str, List[TradeState]] = {m: [] for m in self.modes}
+        self.tracks_by_mode: Dict[str, Dict[str, Any]] = {}
+
+    def _load_manifest_catalog(self) -> None:
+        """Load option contract metadata from subscription manifest or universe CSV."""
+        manifest_candidates = [
+            os.path.join(self.data_path, "subscription_manifest.json"),
+            "data/subscription_manifest.json",
+        ]
+        if self.session_date:
+            d_nodash = self.session_date.replace("-", "")
+            manifest_candidates.insert(0, f"data/subscription_manifest_{d_nodash}.json")
+
+        m_path = None
+        for p in manifest_candidates:
+            if p and os.path.exists(p):
+                m_path = p
+                break
+
+        token_map: Dict[str, Tuple[str, float, str]] = {}
+        if m_path:
+            try:
+                import json
+                with open(m_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                # 1. From options_map
+                for und, u_data in data.get("options_map", {}).items():
+                    for s_str, opt_pair in u_data.get("strikes", {}).items():
+                        try:
+                            s_val = float(s_str)
+                            for otype, ikey in opt_pair.items():
+                                norm = normalize_instrument_token(ikey)
+                                token_map[norm] = (und.upper(), s_val, otype.upper())
+                        except Exception:
+                            pass
+
+                # 2. From streamed_popular_options
+                for opt in data.get("streamed_popular_options", []):
+                    norm = normalize_instrument_token(opt.get("instrument_key", ""))
+                    if norm and norm not in token_map:
+                        d = parse_option_details(opt.get("trading_symbol") or opt.get("name"))
+                        if d:
+                            token_map[norm] = d
+            except Exception as e:
+                print(f"[SIMULATION_ENGINE] Warning loading manifest {m_path}: {e}", file=sys.stderr)
+
+        self.token_map = token_map
+
+    def _load_lot_sizes(self) -> None:
+        """Load lot sizes per underlying from filtered.csv."""
+        lot_candidates = [
+            os.path.join(self.data_path, "filtered.csv"),
+            "data/filtered.csv",
+        ]
+        if self.session_date:
+            d_nodash = self.session_date.replace("-", "")
+            lot_candidates.insert(0, f"data/filtered_{d_nodash}.csv")
+
+        self.lot_sizes = {}
+        for lp in lot_candidates:
+            if os.path.exists(lp):
+                try:
+                    import csv
+                    with open(lp, "r", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            sym = row.get("trading_symbol") or row.get("symbol") or row.get("name")
+                            ls = row.get("lot_size")
+                            if sym and ls:
+                                self.lot_sizes[sym.upper()] = int(ls)
+                    break
+                except Exception:
+                    pass
 
     def _collect_files(self) -> List[str]:
         all_files = []
@@ -122,6 +275,15 @@ class ColumnarSimEngine:
                 all_files = pq_files
             else:
                 jsonl_files = sorted(glob.glob(os.path.join(self.data_path, "**/*.jsonl"), recursive=True))
+                # Exclude trade journals, paper trade logs, and simulation exports
+                jsonl_files = [
+                    f for f in jsonl_files
+                    if not (
+                        os.path.basename(f).startswith("journal_")
+                        or os.path.basename(f).startswith("trades_")
+                        or "trade" in os.path.basename(f).lower()
+                    )
+                ]
                 if jsonl_files:
                     all_files = jsonl_files
         # Filter out 0-byte empty files
@@ -186,20 +348,23 @@ class ColumnarSimEngine:
 
     def _build_options_index(self) -> None:
         """Build lightning-fast O(log N) numpy lookup tables for option depth by token."""
-        if self.df_options is None:
+        if self.df_options is None or len(self.df_options) == 0:
             return
 
-        # Ensure canonical token column
+        self._load_manifest_catalog()
+        self._load_lot_sizes()
+
         df = self.df_options
-        tokens = df["token"].unique().to_list()
+        if "exchange_timestamp" in df.columns:
+            df = df.sort(["token", "exchange_timestamp"])
 
-        for t in tokens:
-            norm_token = normalize_instrument_token(t)
-            sub_df = df.filter(pl.col("token") == t)
-            if "exchange_timestamp" in sub_df.columns:
-                sub_df = sub_df.sort("exchange_timestamp")
+        partitions = df.partition_by("token", as_dict=True)
 
-            ts = sub_df["exchange_timestamp"].to_numpy().astype(np.float64)
+        for tok_tuple, sub_df in partitions.items():
+            tok = tok_tuple[0] if isinstance(tok_tuple, tuple) else tok_tuple
+            norm_token = normalize_instrument_token(tok)
+
+            ts = sub_df["exchange_timestamp"].to_numpy().astype(np.float64) if "exchange_timestamp" in sub_df.columns else np.zeros(len(sub_df))
             bids = sub_df["bid"].to_numpy().astype(np.float64) if "bid" in sub_df.columns else np.zeros(len(sub_df))
             asks = sub_df["ask"].to_numpy().astype(np.float64) if "ask" in sub_df.columns else np.zeros(len(sub_df))
             ltps = sub_df["ltp"].to_numpy().astype(np.float64) if "ltp" in sub_df.columns else bids
@@ -215,8 +380,8 @@ class ColumnarSimEngine:
                 "ask_qtys": ask_qtys,
             }
 
-            # Register in options catalog
-            opt_details = parse_option_details(norm_token)
+            # Register in options catalog: try contract string parsing first, then manifest token map
+            opt_details = parse_option_details(norm_token) or self.token_map.get(norm_token)
             if opt_details:
                 und, strike, otype = opt_details
                 und = und.upper()
@@ -288,16 +453,30 @@ class ColumnarSimEngine:
         idx_atm = int(np.argmin([abs(s - trigger_price) for s in strikes]))
         atm_strike, atm_token = available[idx_atm]
 
+        # Enforce ATM Proximity Invariant:
+        # True ATM strike must be within reasonable distance of trigger price (<= max(step * 1.5, trigger_price * 0.02)).
+        # Prevents selecting deep ITM/OTM strikes when true near-money contracts were not tracked/recorded.
+        from core.rms.rms_service import get_strike_step
+        step = get_strike_step(trigger_price)
+        max_atm_distance = max(step * 1.5, trigger_price * 0.02)
+        if abs(atm_strike - trigger_price) > max_atm_distance:
+            return {}
+
         # ITM and OTM strikes
-        itm_token = available[max(0, idx_atm - 1)][1] if otype == "CE" else available[min(len(available) - 1, idx_atm + 1)][1]
-        otm_token = available[min(len(available) - 1, idx_atm + 1)][1] if otype == "CE" else available[max(0, idx_atm - 1)][1]
+        itm_idx = max(0, idx_atm - 1) if otype == "CE" else min(len(available) - 1, idx_atm + 1)
+        otm_idx = min(len(available) - 1, idx_atm + 1) if otype == "CE" else max(0, idx_atm - 1)
+        itm_strike, itm_token = available[itm_idx]
+        otm_strike, otm_token = available[otm_idx]
 
         candidates = {
             "ATM": (atm_strike, atm_token),
-            "ITM1": (available[max(0, idx_atm - 1)][0] if otype == "CE" else available[min(len(available) - 1, idx_atm + 1)][0], itm_token),
-            "OTM1": (available[min(len(available) - 1, idx_atm + 1)][0] if otype == "CE" else available[max(0, idx_atm - 1)][0], otm_token),
+            "ITM": (itm_strike, itm_token),
+            "ITM1": (itm_strike, itm_token),
+            "OTM": (otm_strike, otm_token),
+            "OTM1": (otm_strike, otm_token),
         }
 
+        lot_size = self.lot_sizes.get(und, 250)
         resolved: Dict[str, Any] = {}
         for role, (strike_val, tok) in candidates.items():
             q = self.get_option_quote(tok, timestamp)
@@ -306,9 +485,13 @@ class ColumnarSimEngine:
 
             ask = q["ask"]
             bid = q["bid"]
+            if ask <= 0.0 or bid <= 0.0 or bid >= ask:
+                continue
+
             spread = ask - bid
-            max_allowed_spread = max(0.50, 0.03 * ask)
-            if spread > max_allowed_spread:
+            spread_pct = spread / ask
+            # Enforce max spread percentage (3% default) to avoid entering immediately into a stop loss
+            if spread_pct > 0.03:
                 continue
 
             resolved[role] = {
@@ -320,7 +503,7 @@ class ColumnarSimEngine:
                 "ask": ask,
                 "bid_qty": q["bid_qty"],
                 "ask_qty": q["ask_qty"],
-                "lot_size": 250,
+                "lot_size": lot_size,
             }
 
         return resolved
@@ -328,7 +511,16 @@ class ColumnarSimEngine:
     def _init_tracks_for_mode(self, mode: str, context: ExecutionContext) -> Dict[str, Any]:
         """Instantiate configured tracks for a given execution mode."""
         from common.tracks.factory import create_tracks
-        return create_tracks(context=context, track_filter=self.tracks)
+        tracks = create_tracks(
+            context=context,
+            track_filter=self.tracks,
+            entry_freeze_time=self.entry_freeze_time,
+            eod_squareoff_time=self.eod_squareoff_time,
+        )
+        if self.capital:
+            for t in tracks.values():
+                t.allocated_capital = float(self.capital)
+        return tracks
 
     def run_simulation(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -350,146 +542,168 @@ class ColumnarSimEngine:
             f"[SIMULATION_ENGINE] Running Serialized Chronological Simulation...\n"
             f"  • Equity Ticks : {len(self.df_equity):,} records\n"
             f"  • Option Depth : {len(self.df_options) if self.df_options is not None else 0:,} records\n"
-            f"  • Active Modes : paper, paper_delayed ({self.delay_sec}s delay)"
+            f"  • Active Modes : {', '.join(self.modes)} ({self.min_delay_ms:.0f}ms - {self.max_delay_ms:.0f}ms random delay)"
         )
 
         # 1. Initialize State Layer: CandleManager & ScoringEngine with isolated SHM
         unlink_shm(self.shm_name)
         candle_mgr = CandleManager(shm_name=self.shm_name)
-        scoring_eng = ScoringEngine3(shm_name=self.shm_name)
+        scoring_eng = ScoringEngine3(shm_name=self.shm_name, min_pole_pct=self.min_pole_pct)
+        print(f"  • Scoring Engine: min_pole_pct={scoring_eng.min_pole_pct*100.0:.2f}% | min_clv={scoring_eng.min_clv} | invalidation_retrace={scoring_eng.invalidation_retrace_pct*100.0:.0f}%")
 
-        # 2. Initialize Execution Superstructures & Tracks
-        ctx_paper = SimExecutionContext(mode="paper")
-        ctx_delayed = SimExecutionContext(mode="paper_delayed")
+        # 2. Initialize Execution Superstructures & Tracks for active modes only
+        tracks_by_mode: Dict[str, Dict[str, Any]] = {}
+        ctx_delayed: Optional[SimDelayedExecutionContext] = None
 
-        tracks_paper = self._init_tracks_for_mode("paper", ctx_paper)
-        tracks_delayed = self._init_tracks_for_mode("paper_delayed", ctx_delayed)
+        for m in self.modes:
+            if m == "paper_delayed":
+                ctx_delayed = SimDelayedExecutionContext(min_delay_ms=self.min_delay_ms, max_delay_ms=self.max_delay_ms)
+                tracks_by_mode[m] = self._init_tracks_for_mode(m, ctx_delayed)
+            else:
+                ctx = SimExecutionContext(mode=m)
+                tracks_by_mode[m] = self._init_tracks_for_mode(m, ctx)
 
-        delayed_queue: List[SimPendingOrder] = []
+        self.tracks_by_mode = tracks_by_mode
+
         last_scoring_eval_ts = 0.0
+        last_hb_ts = 0.0
 
-        # 3. Serialized Chronological Event Loop
+        # 3. Serialized Chronological Event Loop with Fast Columnar Indexing
         df_eq = self.df_equity
-        total_eq = len(df_eq)
+        if df_eq is None or len(df_eq) == 0:
+            raise ValueError(f"No equity ticks available in dataset '{self.data_path}' to simulate.")
+
+        # Determine timestamp column safely
+        ts_col = None
+        for col in ["exchange_timestamp", "received_timestamp", "timestamp", "ts"]:
+            if col in df_eq.columns:
+                ts_col = col
+                break
+        if not ts_col:
+            raise KeyError(
+                f"Could not find a valid timestamp column ('exchange_timestamp', 'received_timestamp', 'timestamp') "
+                f"in equity dataset '{self.data_path}'. Available columns: {df_eq.columns}"
+            )
+
+        ts_arr = df_eq[ts_col].to_numpy().astype(np.float64)
+        tokens = df_eq["token"].to_list() if "token" in df_eq.columns else ["UNKNOWN"] * len(ts_arr)
+        ltps = df_eq["ltp"].to_numpy().astype(np.float64) if "ltp" in df_eq.columns else np.zeros(len(ts_arr))
+        vols = df_eq["volume"].to_numpy().astype(np.int64) if "volume" in df_eq.columns else np.zeros(len(ts_arr), dtype=np.int64)
+        total_eq = len(ts_arr)
 
         for i in range(total_eq):
-            row = df_eq.row(i, named=True)
-            t_curr = float(row.get("exchange_timestamp") or row.get("received_timestamp") or 0.0)
-            token = str(row.get("token", ""))
-            symbol = str(row.get("symbol", ""))
-            ltp = float(row.get("ltp", 0.0))
-            vol = int(row.get("volume", 0))
+            t_curr = float(ts_arr[i])
+            token = tokens[i]
+            ltp = float(ltps[i])
+            vol = int(vols[i])
 
             # Step A: Feed equity tick to CandleManager
             candle_mgr.on_tick(token=token, ltp=ltp, vol=vol, ts=t_curr)
 
-            # Step B: Serialized Scoring Spin Evaluation
-            # Evaluates whenever 1.0 simulated second elapses
+            # Step B: Serialized Scoring Spin Evaluation (Evaluates whenever 1.0 simulated second elapses)
             if (t_curr - last_scoring_eval_ts) >= 1.0:
                 last_scoring_eval_ts = t_curr
-                alerts = scoring_eng.evaluate_universe(now_ts=t_curr)
+                from datetime import datetime
+                from core.common.time_utils import IST
+                dt_curr = datetime.fromtimestamp(t_curr, tz=IST)
+                curr_minutes = dt_curr.hour * 60 + dt_curr.minute
 
-                for alert in alerts:
-                    resolved_strikes = self.resolve_sim_strikes(
-                        symbol=alert.symbol,
-                        direction=alert.direction,
-                        trigger_price=alert.trigger_price,
-                        timestamp=t_curr,
-                    )
-                    if not resolved_strikes:
-                        continue
+                # Hard Entry Freeze Cutoff: no new trade setups generated after entry_freeze_time (default 15:00 IST)
+                if curr_minutes < self.entry_freeze_minutes:
+                    alerts = scoring_eng.evaluate_universe(now_ts=t_curr)
 
-                    opp = ActionableOpportunity(
-                        opp_id=f"OPP_SIM_{alert.symbol}_{int(t_curr*1000)}",
-                        alert_id=alert.alert_id,
-                        symbol=alert.symbol,
-                        direction=alert.direction,
-                        archetype=alert.archetype,
-                        trigger_price=alert.trigger_price,
-                        strikes=resolved_strikes,
-                        timestamp=t_curr,
-                    )
+                    for alert in alerts:
+                        resolved_strikes = self.resolve_sim_strikes(
+                            symbol=alert.symbol,
+                            direction=alert.direction,
+                            trigger_price=alert.trigger_price,
+                            timestamp=t_curr,
+                        )
+                        if not resolved_strikes:
+                            continue
 
-                    # Dispatch to Paper Tracks (Instant fill at current Ask)
-                    for tr_name, track in tracks_paper.items():
-                        track.on_opportunity(opp)
+                        opp = ActionableOpportunity(
+                            opp_id=f"OPP_SIM_{alert.symbol}_{int(t_curr*1000)}",
+                            alert_id=alert.alert_id,
+                            symbol=alert.symbol,
+                            direction=alert.direction,
+                            archetype=alert.archetype,
+                            trigger_price=alert.trigger_price,
+                            strikes=resolved_strikes,
+                            timestamp=t_curr,
+                        )
 
-                    # Dispatch to Delayed Queue (Fill after random delay between min_delay_ms and max_delay_ms)
-                    for tr_name, track in tracks_delayed.items():
-                        strike_info = track.select_strike(opp)
-                        if strike_info:
-                            opt_token = strike_info["token"]
-                            order_delay_sec = random.uniform(self.min_delay_ms, self.max_delay_ms) / 1000.0
-                            delayed_queue.append(
-                                SimPendingOrder(
-                                    release_ts=t_curr + order_delay_sec,
-                                    order_id=f"ORD_SIM_DEL_{int(t_curr*1000)}",
-                                    track=tr_name,
-                                    token=opt_token,
-                                    symbol=alert.symbol,
-                                    target_pct=track.target_pct,
-                                    sl_pct=track.sl_pct,
-                                    lot_size=strike_info.get("lot_size", 250),
-                                    opp=opp,
-                                )
-                            )
+                        # Dispatch to Active Mode Tracks
+                        for m_name, track_dict in tracks_by_mode.items():
+                            for tr_name, track in track_dict.items():
+                                track.on_opportunity(opp)
 
             # Step C: Progress Delayed Queue
-            unfilled_orders = []
-            for pending in delayed_queue:
-                if t_curr >= pending.release_ts:
-                    # Look up exact option quote at release_ts from ingested option depth
-                    opt_q = self.get_option_quote(pending.token, pending.release_ts)
-                    if opt_q and opt_q["ask"] > 0:
-                        fill_ask = opt_q["ask"]
-                        track = tracks_delayed.get(pending.track)
-                        req_cap = fill_ask * pending.lot_size
-                        if track and track.can_allocate(req_cap):
-                            track.commit_capital(req_cap)
-                            trade = TradeState(
-                                trade_id=f"TRD_DEL_{pending.track}_{pending.symbol}_{int(pending.release_ts*1000)}",
-                                mode="paper_delayed",
-                                track=pending.track,
-                                symbol=pending.symbol,
-                                token=pending.token,
-                                option_type=pending.opp.direction,
-                                strike=0.0,
-                                lot_size=pending.lot_size,
-                                quantity=pending.lot_size,
-                                entry_ask=fill_ask,
-                                entry_price=fill_ask,
-                                entry_time=pending.release_ts,
-                                target_price=fill_ask * (1.0 + pending.target_pct),
-                                stop_loss=fill_ask * (1.0 - pending.sl_pct),
-                                highest_price=fill_ask,
-                                current_bid=opt_q["bid"],
-                                status="OPEN",
-                                metadata={"archetype": pending.opp.archetype},
+            if ctx_delayed and ctx_delayed.pending_orders:
+                remaining_pending = []
+                for release_ts, req in ctx_delayed.pending_orders:
+                    if t_curr >= release_ts:
+                        opt_q = self.get_option_quote(req.instrument_token, release_ts)
+                        if opt_q and opt_q["ask"] > 0:
+                            res = OrderResult(
+                                order_id=req.order_id,
+                                status="FILLED",
+                                fill_price=opt_q["ask"],
+                                fill_quantity=req.quantity,
+                                fill_timestamp=release_ts,
                             )
-                            track.active_trades[trade.trade_id] = trade
-                else:
-                    unfilled_orders.append(pending)
-            delayed_queue = unfilled_orders
+                        else:
+                            res = OrderResult(
+                                order_id=req.order_id,
+                                status="REJECTED",
+                                fill_price=0.0,
+                                fill_quantity=0,
+                                fill_timestamp=release_ts,
+                            )
+                        track = tracks_by_mode.get("paper_delayed", {}).get(req.track)
+                        if track:
+                            track.on_order_result(res)
+                    else:
+                        remaining_pending.append((release_ts, req))
+                ctx_delayed.pending_orders = remaining_pending
 
-            # Step D: Advance active trades exit rule evaluation across both modes
-            for mode_name, track_dict in (("paper", tracks_paper), ("paper_delayed", tracks_delayed)):
-                for tr_name, track in track_dict.items():
-                    active_copy = list(track.active_trades.values())
-                    for trade in active_copy:
-                        if trade.status != "OPEN":
-                            continue
-                        opt_q = self.get_option_quote(trade.token, t_curr)
-                        if opt_q:
-                            bid = opt_q["bid"]
-                            ask = opt_q["ask"]
-                            trade_ltp = opt_q["ltp"]
-                            track.on_tick(token=trade.token, ltp=trade_ltp, bid=bid, ask=ask, ts=t_curr)
+            # Step D & E: Heartbeat & Active Trades Exit Evaluation (Sampled at 0.5s intervals)
+            if (t_curr - last_hb_ts) >= 0.5:
+                last_hb_ts = t_curr
+                for m_name, track_dict in tracks_by_mode.items():
+                    for tr_name, track in track_dict.items():
+                        # Process active trade depth quotes
+                        for trade in list(track.active_trades.values()):
+                            if trade.status != "OPEN":
+                                continue
+                            if trade.entry_time and t_curr <= trade.entry_time:
+                                continue
+                            opt_q = self.get_option_quote(trade.token, t_curr)
+                            if opt_q:
+                                track.on_tick(
+                                    token=trade.token,
+                                    ltp=opt_q["ltp"],
+                                    bid=opt_q["bid"],
+                                    ask=opt_q["ask"],
+                                    ts=t_curr,
+                                    symbol=trade.symbol,
+                                )
+                        # 1s Heartbeat check
+                        track.on_heartbeat(t_curr)
 
-        # Collect closed and active trades
-        for tr_name, track in tracks_paper.items():
-            self.closed_trades["paper"].extend(track.closed_trades)
-        for tr_name, track in tracks_delayed.items():
-            self.closed_trades["paper_delayed"].extend(track.closed_trades)
+        # Final EOD Auto Square-off for any remaining open positions
+        last_ts = float(ts_arr[-1]) if total_eq > 0 else 0.0
+        for m_name, track_dict in tracks_by_mode.items():
+            for tr_name, track in track_dict.items():
+                for trade in list(track.active_trades.values()):
+                    if trade.status == "OPEN":
+                        bid = trade.current_bid if trade.current_bid > 0 else trade.entry_price
+                        track.exit_trade(trade, exit_price=bid, reason="EOD_SQUAREOFF", ts=last_ts)
+
+        # Collect closed trades
+        for m_name, track_dict in tracks_by_mode.items():
+            for tr_name, track in track_dict.items():
+                self.closed_trades[m_name].extend(track.closed_trades)
 
         # Cleanup SHM & processes
         try:
@@ -499,10 +713,10 @@ class ColumnarSimEngine:
         except Exception:
             pass
 
-        # If no trades were triggered via scoring breakouts (e.g. mock/synthetic test dataset),
-        # also evaluate direct contract simulation over option depth dataset
+        # If no trades were triggered via scoring breakouts (e.g. synthetic test dataset with <= 10 ticks),
+        # fallback to direct option test
         total_trades = sum(len(t) for t in self.closed_trades.values())
-        if total_trades == 0 and self.df_options is not None and len(self.df_options) > 0:
+        if total_trades == 0 and (self.df_equity is None or len(self.df_equity) <= 10) and self.df_options is not None and len(self.df_options) > 0:
             return self._run_direct_option_simulation()
 
         return self._build_results()
@@ -514,9 +728,25 @@ class ColumnarSimEngine:
             return {"paper": {}, "paper_delayed": {}}
 
         tokens = df["token"].unique().to_list() if "token" in df.columns else []
+        round_trip_brokerage = 2.0 * self.brokerage_per_order
         results: Dict[str, Dict[str, Any]] = {
-            "paper": {tr: {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "win_rate": 0.0} for tr in self.tracks},
-            "paper_delayed": {tr: {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "win_rate": 0.0} for tr in self.tracks},
+            m: {
+                tr: {
+                    "trades": 0,
+                    "wins": 0,
+                    "breakevens": 0,
+                    "losses": 0,
+                    "gross_pnl": 0.0,
+                    "total_brokerage": 0.0,
+                    "net_pnl": 0.0,
+                    "win_rate": 0.0,
+                    "start_capital": 250000.0,
+                    "end_capital": 250000.0,
+                    "return_pct": 0.0,
+                }
+                for tr in self.tracks
+            }
+            for m in self.modes
         }
 
         cfg = get_config_manager()
@@ -548,120 +778,326 @@ class ColumnarSimEngine:
                 qty = conf["lot_size"]
 
                 # Paper mode
-                target_p = entry_ask * (1.0 + conf["target_pct"])
-                sl_p = entry_ask * (1.0 - conf["sl_pct"])
-                future_ticks = contract_ticks.filter(pl.col("exchange_timestamp") > entry_ts)
-                for row in future_ticks.iter_rows(named=True):
-                    bid = float(row.get("bid", 0.0) or row.get("ltp", 0.0))
-                    if bid >= target_p:
-                        pnl = (bid - entry_ask) * qty
-                        st = results["paper"][tr]
-                        st["trades"] += 1
-                        st["wins"] += 1
-                        st["net_pnl"] += pnl
-                        st["win_rate"] = (st["wins"] / st["trades"]) * 100.0
-                        break
-                    elif bid <= sl_p:
-                        pnl = (bid - entry_ask) * qty
-                        st = results["paper"][tr]
-                        st["trades"] += 1
-                        st["losses"] += 1
-                        st["net_pnl"] += pnl
-                        st["win_rate"] = (st["wins"] / st["trades"]) * 100.0
-                        break
+                if "paper" in results:
+                    target_p = entry_ask * (1.0 + conf["target_pct"])
+                    sl_p = entry_ask * (1.0 - conf["sl_pct"])
+                    future_ticks = contract_ticks.filter(pl.col("exchange_timestamp") > entry_ts)
+                    for row in future_ticks.iter_rows(named=True):
+                        bid = float(row.get("bid", 0.0) or row.get("ltp", 0.0))
+                        if bid >= target_p or bid <= sl_p:
+                            pnl = (bid - entry_ask) * qty
+                            st = results["paper"][tr]
+                            st["trades"] += 1
+                            st["gross_pnl"] += pnl
+                            st["total_brokerage"] += round_trip_brokerage
+                            st["net_pnl"] += (pnl - round_trip_brokerage)
+                            ret_p = (bid - entry_ask) / entry_ask if entry_ask > 0 else 0.0
+                            if ret_p > 0.025:
+                                st["wins"] += 1
+                            elif ret_p >= -1e-6:
+                                st["breakevens"] += 1
+                            else:
+                                st["losses"] += 1
+                            st["win_rate"] = (st["wins"] / st["trades"]) * 100.0
+                            break
 
                 # Delayed mode
-                if len(delayed_ticks) > 0:
+                if "paper_delayed" in results and len(delayed_ticks) > 0:
                     target_d = delayed_ask * (1.0 + conf["target_pct"])
                     sl_d = delayed_ask * (1.0 - conf["sl_pct"])
                     future_delayed = delayed_ticks.filter(pl.col("exchange_timestamp") > delayed_entry_ts)
                     for row in future_delayed.iter_rows(named=True):
                         bid = float(row.get("bid", 0.0) or row.get("ltp", 0.0))
-                        if bid >= target_d:
+                        if bid >= target_d or bid <= sl_d:
                             pnl = (bid - delayed_ask) * qty
                             dst = results["paper_delayed"][tr]
                             dst["trades"] += 1
-                            dst["wins"] += 1
-                            dst["net_pnl"] += pnl
+                            dst["gross_pnl"] += pnl
+                            dst["total_brokerage"] += round_trip_brokerage
+                            dst["net_pnl"] += (pnl - round_trip_brokerage)
+                            ret_d = (bid - delayed_ask) / delayed_ask if delayed_ask > 0 else 0.0
+                            if ret_d > 0.025:
+                                dst["wins"] += 1
+                            elif ret_d >= -1e-6:
+                                dst["breakevens"] += 1
+                            else:
+                                dst["losses"] += 1
                             dst["win_rate"] = (dst["wins"] / dst["trades"]) * 100.0
                             break
-                        elif bid <= sl_d:
-                            pnl = (bid - delayed_ask) * qty
-                            dst = results["paper_delayed"][tr]
-                            dst["trades"] += 1
-                            dst["losses"] += 1
-                            dst["net_pnl"] += pnl
-                            dst["win_rate"] = (dst["wins"] / dst["trades"]) * 100.0
-                            break
+
+        for m in self.modes:
+            for tr, st in results.get(m, {}).items():
+                st["end_capital"] = st["start_capital"] + st["net_pnl"]
+                st["return_pct"] = (st["net_pnl"] / st["start_capital"] * 100.0) if st["start_capital"] > 0 else 0.0
 
         return results
 
     def _build_results(self) -> Dict[str, Dict[str, Any]]:
         """Aggregate closed trades into performance metrics per mode and track."""
         results: Dict[str, Dict[str, Any]] = {
-            "paper": {tr: {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "win_rate": 0.0} for tr in self.tracks},
-            "paper_delayed": {tr: {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "win_rate": 0.0} for tr in self.tracks},
+            m: {
+                tr: {
+                    "trades": 0,
+                    "wins": 0,
+                    "breakevens": 0,
+                    "losses": 0,
+                    "gross_pnl": 0.0,
+                    "total_brokerage": 0.0,
+                    "net_pnl": 0.0,
+                    "win_rate": 0.0,
+                    "start_capital": 250000.0,
+                    "end_capital": 250000.0,
+                    "return_pct": 0.0,
+                }
+                for tr in self.tracks
+            }
+            for m in self.modes
         }
 
-        for mode in ("paper", "paper_delayed"):
-            for trade in self.closed_trades[mode]:
+        round_trip_brokerage = 2.0 * self.brokerage_per_order
+
+        for mode in self.modes:
+            track_instances = self.tracks_by_mode.get(mode, {})
+            for tr in self.tracks:
+                inst = track_instances.get(tr)
+                start_cap = float(getattr(inst, "allocated_capital", 250000.0)) if inst else 250000.0
+                results[mode][tr]["start_capital"] = start_cap
+
+            for trade in self.closed_trades.get(mode, []):
                 tr = trade.track
                 if tr not in results[mode]:
-                    results[mode][tr] = {"trades": 0, "wins": 0, "losses": 0, "net_pnl": 0.0, "win_rate": 0.0}
+                    results[mode][tr] = {
+                        "trades": 0,
+                        "wins": 0,
+                        "breakevens": 0,
+                        "losses": 0,
+                        "gross_pnl": 0.0,
+                        "total_brokerage": 0.0,
+                        "net_pnl": 0.0,
+                        "win_rate": 0.0,
+                        "start_capital": 250000.0,
+                        "end_capital": 250000.0,
+                        "return_pct": 0.0,
+                    }
                 st = results[mode][tr]
                 st["trades"] += 1
-                st["net_pnl"] += trade.realized_pnl
-                if trade.realized_pnl > 0:
+                trade_brokerage = float(trade.metadata.get("brokerage", round_trip_brokerage))
+                st["gross_pnl"] += trade.realized_pnl
+                st["total_brokerage"] += trade_brokerage
+                net_pnl = trade.realized_pnl - trade_brokerage
+                st["net_pnl"] += net_pnl
+
+                trade.metadata["brokerage"] = trade_brokerage
+                trade.metadata["net_pnl"] = net_pnl
+                trade.metadata["gross_pnl"] = trade.realized_pnl
+
+                # Win / Breakeven / Loss classification:
+                # Return > +2.5%: Win (including target hits and profitable trailing SL hits)
+                # 0.0% <= Return <= +2.5%: Minor Win / Breakeven
+                # Return < 0.0%: Miss / Loss
+                pnl_pct = (trade.exit_price - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
+                if pnl_pct > 0.025:
                     st["wins"] += 1
+                elif pnl_pct >= -1e-6:
+                    st.setdefault("breakevens", 0)
+                    st["breakevens"] += 1
                 else:
                     st["losses"] += 1
+
                 st["win_rate"] = (st["wins"] / st["trades"]) * 100.0
+
+            for tr, st in results[mode].items():
+                st.setdefault("breakevens", 0)
+                st["end_capital"] = st["start_capital"] + st["net_pnl"]
+                st["return_pct"] = (st["net_pnl"] / st["start_capital"] * 100.0) if st["start_capital"] > 0 else 0.0
 
         return results
 
     def print_summary(self, results: Dict[str, Dict[str, Any]]) -> str:
         """
-        Print separated simulation matrix tables for each execution mode,
-        with each mode showing the performance of all tracks.
+        Print separated simulation matrix tables for each execution mode with starting budget, ending budget, gross PnL, brokerage, and net return %.
         """
         lines = []
-        lines.append("=" * 87)
+        header_sample = f"  {'TRACK':<22} | {'TRADES':<7} | {'WINS (>2.5%)':<12} | {'B/E (0-2.5%)':<12} | {'LOSSES (<0%)':<12} | {'WIN %':<7} | {'START BUDGET':>14} | {'GROSS PNL':>13} | {'BROKERAGE':>11} | {'NET PNL (INR)':>15} | {'END BUDGET':>14} | {'RETURN %':>9}"
+        tbl_width = max(140, len(header_sample))
+        lines.append("=" * tbl_width)
         lines.append(" COLUMNAR SIMULATION ENGINE - MULTI-MODE SIMULATION RESULTS MATRIX (SPEC 2.0)")
-        lines.append("=" * 87)
+        lines.append("=" * tbl_width)
 
-        for mode in ("paper", "paper_delayed"):
-            mode_title = "PAPER TRADING EXECUTION MATRIX" if mode == "paper" else f"PAPER DELAYED EXECUTION MATRIX ({self.delay_sec}s DELAY)"
+        for mode in self.modes:
+            if mode not in results:
+                continue
+            if mode == "paper":
+                mode_title = "PAPER TRADING EXECUTION MATRIX"
+            else:
+                mode_title = f"PAPER DELAYED EXECUTION MATRIX ({self.min_delay_ms:.0f}ms - {self.max_delay_ms:.0f}ms RANDOM DELAY)"
             lines.append(f"\n[ {mode_title} ]")
-            header = f"  {'TRACK':<24} | {'TRADES':<8} | {'WINS':<6} | {'LOSSES':<8} | {'WIN %':<8} | {'NET PNL (INR)':>16}"
+            header = header_sample
             lines.append(header)
             lines.append("  " + "-" * (len(header) - 2))
 
             mode_trades = 0
             mode_wins = 0
+            mode_bes = 0
             mode_losses = 0
+            mode_start_cap = 0.0
+            mode_gross_pnl = 0.0
+            mode_brokerage = 0.0
             mode_net_pnl = 0.0
 
             for tr, st in results.get(mode, {}).items():
-                pnl_str = f"₹{st['net_pnl']:+,.2f}"
+                start_cap = st.get("start_capital", 250000.0)
+                gross_pnl = st.get("gross_pnl", st.get("net_pnl", 0.0))
+                brokerage = st.get("total_brokerage", 0.0)
+                net_pnl = st.get("net_pnl", gross_pnl - brokerage)
+                end_cap = st.get("end_capital", start_cap + net_pnl)
+                ret_pct = st.get("return_pct", ((net_pnl / start_cap * 100.0) if start_cap > 0 else 0.0))
+
+                start_str = f"₹{start_cap:,.2f}"
+                gross_str = f"₹{gross_pnl:+,.2f}"
+                brok_str = f"₹{brokerage:,.2f}"
+                net_str = f"₹{net_pnl:+,.2f}"
+                end_str = f"₹{end_cap:,.2f}"
+                ret_str = f"{ret_pct:+.1f}%"
+
                 mode_trades += st["trades"]
                 mode_wins += st["wins"]
+                mode_bes += st.get("breakevens", 0)
                 mode_losses += st["losses"]
-                mode_net_pnl += st["net_pnl"]
+                mode_start_cap += start_cap
+                mode_gross_pnl += gross_pnl
+                mode_brokerage += brokerage
+                mode_net_pnl += net_pnl
                 win_str = f"{st['win_rate']:.1f}%"
                 lines.append(
-                    f"  {tr:<24} | {st['trades']:<8} | {st['wins']:<6} | {st['losses']:<8} | {win_str:>8} | {pnl_str:>16}"
+                    f"  {tr:<22} | {st['trades']:<7} | {st['wins']:<12} | {st.get('breakevens', 0):<12} | {st['losses']:<12} | {win_str:>7} | {start_str:>14} | {gross_str:>13} | {brok_str:>11} | {net_str:>15} | {end_str:>14} | {ret_str:>9}"
                 )
 
             lines.append("  " + "-" * (len(header) - 2))
             mode_win_pct = (mode_wins / mode_trades * 100.0) if mode_trades > 0 else 0.0
-            total_pnl_str = f"₹{mode_net_pnl:+,.2f}"
+            mode_ret_pct = (mode_net_pnl / mode_start_cap * 100.0) if mode_start_cap > 0 else 0.0
+            total_start_str = f"₹{mode_start_cap:,.2f}"
+            total_gross_str = f"₹{mode_gross_pnl:+,.2f}"
+            total_brok_str = f"₹{mode_brokerage:,.2f}"
+            total_net_str = f"₹{mode_net_pnl:+,.2f}"
+            total_end_str = f"₹{mode_start_cap + mode_net_pnl:,.2f}"
             tot_win_str = f"{mode_win_pct:.1f}%"
+            tot_ret_str = f"{mode_ret_pct:+.1f}%"
             tot_label = f"TOTAL ({mode.upper()})"
             lines.append(
-                f"  {tot_label:<24} | {mode_trades:<8} | {mode_wins:<6} | {mode_losses:<8} | {tot_win_str:>8} | {total_pnl_str:>16}"
+                f"  {tot_label:<22} | {mode_trades:<7} | {mode_wins:<12} | {mode_bes:<12} | {mode_losses:<12} | {tot_win_str:>7} | {total_start_str:>14} | {total_gross_str:>13} | {total_brok_str:>11} | {total_net_str:>15} | {total_end_str:>14} | {tot_ret_str:>9}"
             )
 
-        lines.append("\n" + "=" * 87)
+        lines.append("\n" + "=" * tbl_width)
+        report = "\n".join(lines)
+        print(report)
+        return report
+
+    def print_journal(self, mode: Optional[str] = None) -> str:
+        """Print detailed trade-by-trade log for closed trades and persist to disk."""
+        ARCHETYPE_LABELS = {
+            "FLAG_BULL_BREAKOUT": "BULL_FLAG",
+            "FLAG_BEAR_BREAKDOWN": "BEAR_FLAG",
+            "PURE_BULL_BREAKOUT": "PURE_BREAKOUT",
+            "PURE_BEAR_BREAKDOWN": "PURE_BREAKDOWN",
+        }
+        lines = []
+        modes_to_show = [mode] if mode else self.modes
+        for m in modes_to_show:
+            raw_trades = self.closed_trades.get(m, [])
+            trades = sorted(raw_trades, key=lambda t: (t.entry_time or 0.0, t.exit_time or 0.0))
+            header = f"  {'#':<4} | {'ENTRY TIME':<19} | {'EXIT TIME':<19} | {'TRACK':<22} | {'SYMBOL':<10} | {'CONTRACT':<10} | {'TRIGGER':<14} | {'ENTRY':<7} | {'EXIT':<7} | {'BROKERAGE':>9} | {'NET PNL':>12} | {'RETURN':>8} | {'OUTCOME':<10} | {'REASON'}"
+            tbl_width = max(140, len(header))
+            lines.append("\n" + "=" * tbl_width)
+            lines.append(f" 📋 TRADE JOURNAL: {m.upper()} (Total Closed Trades: {len(trades)} | Sorted Chronologically by Entry Time)")
+            lines.append("=" * tbl_width)
+            lines.append(header)
+            lines.append("  " + "-" * (len(header) - 2))
+
+            outcome_counts = {"WIN": 0, "BREAKEVEN": 0, "MISS": 0}
+            reason_counts = {}
+            total_journal_gross = 0.0
+            total_journal_brokerage = 0.0
+            total_journal_net = 0.0
+
+            round_trip_brokerage = 2.0 * self.brokerage_per_order
+
+            for idx, t in enumerate(trades, 1):
+                from datetime import datetime
+                from core.common.time_utils import IST
+                entry_str = datetime.fromtimestamp(t.entry_time, tz=IST).strftime("%Y-%m-%d %H:%M:%S") if t.entry_time else "N/A"
+                exit_str = datetime.fromtimestamp(t.exit_time, tz=IST).strftime("%Y-%m-%d %H:%M:%S") if t.exit_time else "N/A"
+                contract_str = f"{int(t.strike)} {t.option_type}"
+                reason = t.exit_reason or "UNKNOWN"
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+                raw_arch = str(t.metadata.get("archetype") or "UNKNOWN")
+                trigger_str = ARCHETYPE_LABELS.get(raw_arch, raw_arch)
+
+                trade_brokerage = float(t.metadata.get("brokerage", round_trip_brokerage))
+                gross_pnl = t.realized_pnl
+                net_pnl = gross_pnl - trade_brokerage
+
+                total_journal_gross += gross_pnl
+                total_journal_brokerage += trade_brokerage
+                total_journal_net += net_pnl
+
+                brok_str = f"₹{trade_brokerage:,.2f}"
+                net_pnl_str = f"₹{net_pnl:+,.2f}"
+
+                pnl_pct = (t.exit_price - t.entry_price) / t.entry_price if t.entry_price > 0 else 0.0
+                if pnl_pct > 0.025:
+                    outcome = "WIN"
+                elif pnl_pct >= -1e-6:
+                    outcome = "BREAKEVEN"
+                else:
+                    outcome = "MISS"
+                outcome_counts[outcome] += 1
+                ret_str = f"{pnl_pct * 100.0:+.1f}%"
+
+                lines.append(
+                    f"  {idx:<4} | {entry_str:<19} | {exit_str:<19} | {t.track:<22} | {t.symbol:<10} | {contract_str:<10} | {trigger_str:<14} | {t.entry_price:<7.2f} | {t.exit_price:<7.2f} | {brok_str:>9} | {net_pnl_str:>12} | {ret_str:>8} | {outcome:<10} | {reason}"
+                )
+
+            lines.append("  " + "-" * (len(header) - 2))
+            lines.append(f"  Outcomes: WINS (>2.5%): {outcome_counts['WIN']} | BREAKEVEN (0-2.5%): {outcome_counts['BREAKEVEN']} | LOSSES (<0%): {outcome_counts['MISS']}")
+            lines.append(f"  Financials: GROSS PNL: ₹{total_journal_gross:+,.2f} | TOTAL BROKERAGE: ₹{total_journal_brokerage:,.2f} | NET PNL: ₹{total_journal_net:+,.2f}")
+            reason_summary = " | ".join(f"{r}: {c}" for r, c in sorted(reason_counts.items()))
+            lines.append(f"  Exit Breakdown: {reason_summary}")
+            lines.append("=" * tbl_width)
+
+            # Write to recordings journal file
+            rec_dir = None
+            if os.path.isdir(self.data_path):
+                rec_dir = self.data_path
+            elif os.path.isfile(self.data_path):
+                rec_dir = os.path.dirname(self.data_path) or "recordings"
+            elif self.session_date:
+                dashed = (
+                    f"{self.session_date[:4]}-{self.session_date[4:6]}-{self.session_date[6:8]}"
+                    if len(self.session_date) == 8 and self.session_date.isdigit()
+                    else self.session_date
+                )
+                rec_dir = f"recordings/{dashed}" if os.path.exists(f"recordings/{dashed}") else f"recordings/{self.session_date}"
+            else:
+                rec_dir = "recordings"
+
+            os.makedirs(rec_dir, exist_ok=True)
+            journal_path = os.path.join(rec_dir, f"journal_{m}_sim.jsonl")
+            try:
+                import json
+                with open(journal_path, "w", encoding="utf-8") as jf:
+                    for t in trades:
+                        t_dict = t.to_dict()
+                        t_dict["brokerage"] = t.metadata.get("brokerage", round_trip_brokerage)
+                        t_dict["net_pnl"] = t.realized_pnl - t_dict["brokerage"]
+                        t_dict["gross_pnl"] = t.realized_pnl
+                        t_dict["trigger"] = ARCHETYPE_LABELS.get(str(t.metadata.get("archetype") or "UNKNOWN"), str(t.metadata.get("archetype") or "UNKNOWN"))
+                        jf.write(json.dumps(t_dict) + "\n")
+                lines.append(f"  ✓ Exported journal to '{journal_path}'")
+            except Exception as e:
+                lines.append(f"  ⚠️ Warning saving journal to '{journal_path}': {e}")
+
         report = "\n".join(lines)
         print(report)
         return report

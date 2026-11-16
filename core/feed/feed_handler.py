@@ -462,6 +462,7 @@ class FeedHandler:
         token: str,
         symbol: str,
         ltp: float,
+        volume: int = 0,
         bid: float = 0.0,
         ask: float = 0.0,
         bid_qty: int = 0,
@@ -475,15 +476,19 @@ class FeedHandler:
         canonical_token = normalize_instrument_token(token)
         is_opt = is_option_contract(canonical_token) or is_option_contract(symbol)
 
+        b_qty = int(bid_qty or (bids[0][1] if bids else 0))
+        a_qty = int(ask_qty or (asks[0][1] if asks else 0))
+
         if is_opt:
             event = OptionDepthTickEvent(
                 token=canonical_token,
                 symbol=symbol,
                 ltp=float(ltp),
+                volume=int(volume),
                 bid=float(bid or ltp),
                 ask=float(ask or ltp),
-                bid_qty=int(bid_qty),
-                ask_qty=int(ask_qty),
+                bid_qty=b_qty,
+                ask_qty=a_qty,
                 exchange_timestamp=float(exchange_ts or time.time()),
                 received_timestamp=float(received_ts or time.time()),
                 bids=bids or [],
@@ -498,10 +503,11 @@ class FeedHandler:
                 token=canonical_token,
                 symbol=symbol,
                 ltp=float(ltp),
+                volume=int(volume),
                 bid=float(bid or ltp),
                 ask=float(ask or ltp),
-                bid_qty=int(bid_qty),
-                ask_qty=int(ask_qty),
+                bid_qty=b_qty,
+                ask_qty=a_qty,
                 exchange_timestamp=float(exchange_ts or time.time()),
                 received_timestamp=float(received_ts or time.time()),
             )
@@ -604,6 +610,7 @@ class FeedHandler:
                     token=k,
                     symbol=sym,
                     ltp=new_p,
+                    volume=curr_vol,
                     bid=bid,
                     ask=ask,
                     bid_qty=500,
@@ -668,6 +675,7 @@ class FeedHandler:
                                 sym = self.symbol_map.get(canonical_key) or canonical_key.split("|")[-1]
                                 ltp, bid, ask = 0.0, 0.0, 0.0
                                 bids, asks = [], []
+                                vol = 0
                                 feed_union = feed.WhichOneof("FeedUnion")
                                 if feed_union == "fullFeed":
                                     ff = feed.fullFeed
@@ -675,6 +683,7 @@ class FeedHandler:
                                     if which == "marketFF":
                                         m = ff.marketFF
                                         ltp = float(m.ltpc.ltp or 0.0)
+                                        vol = int(m.vtt or (m.marketOHLC.ohlc[0].vol if m.marketOHLC and m.marketOHLC.ohlc else 0))
                                         if m.marketLevel and m.marketLevel.bidAskQuote:
                                             for ba in m.marketLevel.bidAskQuote:
                                                 bp, bq = float(ba.bidP or 0.0), int(ba.bidQ or 0)
@@ -683,17 +692,34 @@ class FeedHandler:
                                                 if ap > 0: asks.append([ap, aq, 1])
                                             bid = bids[0][0] if bids else ltp
                                             ask = asks[0][0] if asks else ltp
+                                elif feed_union == "firstLevelWithGreeks":
+                                    fl = feed.firstLevelWithGreeks
+                                    ltp = float(fl.ltpc.ltp or 0.0)
+                                    vol = int(fl.vtt or 0)
+                                    if fl.firstDepth:
+                                        bid = float(fl.firstDepth.bidP or ltp)
+                                        ask = float(fl.firstDepth.askP or ltp)
                                 elif feed_union == "ltpc":
                                     ltp = float(feed.ltpc.ltp or 0.0)
                                     bid, ask = ltp, ltp
 
+                                if vol > 0:
+                                    self.last_seen_volume[canonical_key] = vol
+                                else:
+                                    vol = self.last_seen_volume.get(canonical_key, 0)
+
                                 if ltp > 0:
+                                    bid_q = int(bids[0][1]) if bids else 0
+                                    ask_q = int(asks[0][1]) if asks else 0
                                     self.publish_tick(
                                         token=canonical_key,
                                         symbol=sym,
                                         ltp=ltp,
+                                        volume=vol,
                                         bid=bid or ltp,
                                         ask=ask or ltp,
+                                        bid_qty=bid_q,
+                                        ask_qty=ask_q,
                                         exchange_ts=now_ts,
                                         received_ts=now_ts,
                                         bids=bids,
