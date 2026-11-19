@@ -175,6 +175,10 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     # -------------------------------------------------------------
     print(f"\n[Step 4/4] Generating Multi-Stream Subscription Manifest (Date: {session_date})...")
     pop_strikes = inst_cfg.get("instruments", {}).get("options_subscription", {}).get("popular_strikes_above_atm", 3)
+    max_opt_und = (
+        sys_cfg.get("system", {}).get("manifest", {}).get("max_stream_underlyings_with_options")
+        or sys_cfg.get("system", {}).get("feed", {}).get("max_stream_underlyings_with_options", 110)
+    )
     if not is_reset and os.path.exists(dated_manifest) and os.path.getsize(dated_manifest) > 10_000:
         print(f"  ✓ Found today's Subscription Manifest at '{dated_manifest}' ({os.path.getsize(dated_manifest) / 1024:.1f} KB). Skipping generation.")
         manifest_path = dated_manifest
@@ -189,6 +193,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             master_csv=master_path,
             output_json=dated_manifest,
             popular_strikes=pop_strikes,
+            max_stream_underlyings_with_options=int(max_opt_und),
             session_date=session_date,
         )
 

@@ -302,7 +302,7 @@ class BaseTrack(ABC):
             bid = trade.current_bid if trade.current_bid > 0 else trade.entry_price
             ask = trade.entry_ask
             reason = self.evaluate_exit_rules(trade, bid, bid, ask, ts)
-            if reason in ("STAGNATION_TIMEOUT", "FIXED_STAGNATION_TIMEOUT", "PULLBACK_STAGNATION_TIMEOUT", "MAX_HOLD_TIMEOUT"):
+            if reason in ("STAGNATION_TIMEOUT", "FIXED_STAGNATION_TIMEOUT", "PULLBACK_STAGNATION_TIMEOUT", "MAX_HOLD_TIMEOUT", "PULLBACK_TIMEOUT"):
                 self.exit_trade(trade, exit_price=bid, reason=reason, ts=ts)
 
     def exit_trade(self, trade: TradeState, exit_price: float, reason: str, ts: float) -> None:

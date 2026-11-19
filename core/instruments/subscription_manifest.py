@@ -30,12 +30,16 @@ def run_manifest_generator(
     master_csv: str = "data/instrument.csv",
     output_json: str = "data/subscription_manifest.json",
     popular_strikes: int = 3,
+    max_stream_underlyings_with_options: Optional[int] = None,
     skip_if_exists: bool = False,
     session_date: Optional[str] = None,
 ) -> Optional[str]:
     """
     Generate subscription_manifest.json containing underlying streaming keys,
     popular option streaming keys, and background polling batches.
+    Strategy B: Options are streamed only for the top N most liquid underlyings
+    (ranked by volume/turnover from data/index.json) to strictly stay below the
+    2,000 WebSocket full-depth key limit. Remaining options are background polled.
     """
     if skip_if_exists and os.path.exists(output_json) and os.path.getsize(output_json) > 10_000:
         print(f"  ✓ Valid Subscription Manifest found at '{output_json}'. (Skipping generation)")
@@ -49,8 +53,27 @@ def run_manifest_generator(
         print(f"❌ Master instruments file not found: {master_csv}", file=sys.stderr)
         return None
 
+    # Load configured max_stream_underlyings_with_options if not explicitly provided
+    if max_stream_underlyings_with_options is None:
+        try:
+            sys_cfg_path = "config/system.json"
+            if os.path.exists(sys_cfg_path):
+                with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                    cfg_obj = json.load(f)
+                    sys_dict = cfg_obj.get("system", {})
+                    max_stream_underlyings_with_options = (
+                        sys_dict.get("manifest", {}).get("max_stream_underlyings_with_options")
+                        or sys_dict.get("feed", {}).get("max_stream_underlyings_with_options")
+                    )
+        except Exception:
+            pass
+        if max_stream_underlyings_with_options is None:
+            max_stream_underlyings_with_options = 110
+    else:
+        max_stream_underlyings_with_options = int(max_stream_underlyings_with_options)
+
     os.makedirs(os.path.dirname(os.path.abspath(output_json)), exist_ok=True)
-    print(f"  📝 Generating Subscription Manifest from '{filtered_csv}' & '{master_csv}'...")
+    print(f"  📝 Generating Subscription Manifest from '{filtered_csv}' & '{master_csv}' (Max Option Underlyings: {max_stream_underlyings_with_options})...")
 
     # 1. Load Filtered Equities
     equities: Dict[str, Dict[str, Any]] = {}
@@ -123,6 +146,34 @@ def run_manifest_generator(
                 row["_opt_key"] = row.get("instrument_key") or f"{prefix}|{tok}"
                 options_by_underlying[matched_sym].append(row)
 
+    # 3. Strategy B: Rank underlyings by 30-day baseline turnover / volume from data/index.json
+    volume_scores: Dict[str, float] = {}
+    if volume_index_json and os.path.exists(volume_index_json):
+        try:
+            with open(volume_index_json, "r", encoding="utf-8") as f:
+                vdata = json.load(f)
+            for s_key, eq_i in equities.items():
+                u_key = eq_i.get("upstox_instrument_key", "")
+                v_entry = vdata.get(u_key) or vdata.get(s_key) or {}
+                d_vol = float(v_entry.get("daily_avg_volume", 0.0) or v_entry.get("total_volume", 0.0) or 0.0)
+                l_p = float(equity_last_prices.get(s_key, 0.0))
+                # Turnover in INR (daily volume * price) or pure volume fallback
+                score = (d_vol * l_p) if (d_vol > 0 and l_p > 0) else d_vol
+                volume_scores[s_key] = score
+        except Exception as e:
+            print(f"  ⚠️ Warning reading volume index: {e}")
+
+    # Underlyings that actually have options
+    underlyings_with_options = [s for s in equities if options_by_underlying.get(s)]
+    # Sort by turnover / volume descending (most liquid first)
+    ranked_underlyings = sorted(
+        underlyings_with_options,
+        key=lambda s: (volume_scores.get(s, 0.0), s),
+        reverse=True,
+    )
+    # The top N underlyings get their popular options streamed via WebSocket
+    stream_options_symbols: Set[str] = set(ranked_underlyings[:max_stream_underlyings_with_options])
+
     underlying_keys: List[str] = []
     popular_option_keys: List[str] = []
     background_poll_keys: List[str] = []
@@ -152,6 +203,8 @@ def run_manifest_generator(
                 "lot_size": int(eq_info.get("lot_size", 1)),
                 "tick_size": float(eq_info.get("tick_size", 0.05)),
                 "has_options": False,
+                "options_streamed": False,
+                "turnover_score": volume_scores.get(sym, 0.0),
             }
             continue
 
@@ -186,6 +239,9 @@ def run_manifest_generator(
         selected_strikes = set(sorted_strikes[start_idx:end_idx])
 
         # Segregate into popular (streamed on WS) and remaining (polled in background)
+        # Strategy B: Only stream options for Top N underlyings in stream_options_symbols
+        should_stream_options = (sym in stream_options_symbols)
+
         for o in opt_list:
             opt_key = o.get("_opt_key", "")
             if not opt_key:
@@ -196,7 +252,7 @@ def run_manifest_generator(
             opt_ts = (o.get("tradingsymbol") or o.get("trading_symbol") or "").strip()
             opt_name_disp = f"{eq_display} {s_price:.0f} {itype}"
 
-            if exp == nearest_expiry and s_price in selected_strikes:
+            if should_stream_options and exp == nearest_expiry and s_price in selected_strikes:
                 popular_option_keys.append(opt_key)
                 instrument_name_map[opt_key] = opt_name_disp
                 instrument_name_map[opt_key.replace(":", "|")] = opt_name_disp
@@ -223,6 +279,8 @@ def run_manifest_generator(
             "popular_strikes": sorted(list(selected_strikes)),
             "total_options": len(opt_list),
             "has_options": True,
+            "options_streamed": should_stream_options,
+            "turnover_score": volume_scores.get(sym, 0.0),
         }
 
         options_map_by_symbol[sym] = {
@@ -252,6 +310,9 @@ def run_manifest_generator(
             "total_background_options_polled": len(background_poll_keys),
             "total_background_batches": len(background_poll_batches),
             "total_tracked_instruments": len(underlying_keys) + len(popular_option_keys) + len(background_poll_keys),
+            "max_stream_underlyings_with_options": max_stream_underlyings_with_options,
+            "underlyings_with_streamed_options": len(stream_options_symbols),
+            "total_streamed_ws_keys": len(underlying_keys) + len(popular_option_keys),
         },
         "streamed_underlyings": streamed_underlyings,
         "streamed_popular_options": streamed_popular_options,
@@ -268,7 +329,8 @@ def run_manifest_generator(
 
     print(f"  ✓ Saved Subscription Manifest to '{output_json}'")
     print(f"    • Underlyings Streamed      : {len(underlying_keys):,}")
-    print(f"    • Popular Options Streamed  : {len(popular_option_keys):,} (3 above/below ATM)")
+    print(f"    • Popular Options Streamed  : {len(popular_option_keys):,} ({len(stream_options_symbols)} Top Liquid Underlyings @ 3 above/below ATM)")
+    print(f"    • Total Streamed Keys (WS)  : {len(underlying_keys) + len(popular_option_keys):,} (Upstox WS limit: 2,000)")
     print(f"    • Background Options Polled : {len(background_poll_keys):,} across {len(background_poll_batches)} batches")
     print(f"    • Total Contracts Tracked   : {manifest['summary']['total_tracked_instruments']:,}")
     return output_json
@@ -281,6 +343,7 @@ def main():
     parser.add_argument("--master", default="data/instrument.csv", help="Master instruments CSV")
     parser.add_argument("--output", default="data/subscription_manifest.json", help="Output manifest JSON")
     parser.add_argument("--strikes", type=int, default=3, help="Popular strikes above/below ATM (default: 3)")
+    parser.add_argument("--max-options-underlyings", type=int, default=None, help="Top N liquid underlyings to stream options for (default from system.json or 110)")
     args = parser.parse_args()
 
     res = run_manifest_generator(
@@ -289,6 +352,7 @@ def main():
         master_csv=args.master,
         output_json=args.output,
         popular_strikes=args.strikes,
+        max_stream_underlyings_with_options=args.max_options_underlyings,
     )
     if not res:
         sys.exit(1)

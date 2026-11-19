@@ -659,9 +659,15 @@ class FeedHandler:
                 self._active_ws = ws
                 keys = [inst["key"] for inst in self.instruments if inst.get("key")]
                 stream_keys = keys[:self.max_stream_contracts]
+                # Synchronize in-memory active option keys with the exact stream slice
+                subscribed_set = set(stream_keys)
+                self.active_option_keys = {k for k in self.active_option_keys if k in subscribed_set}
+                for sym in list(self.active_options_by_symbol.keys()):
+                    self.active_options_by_symbol[sym] = {k for k in self.active_options_by_symbol[sym] if k in subscribed_set}
+
                 sub_payload = {"guid": "feed_v2", "method": "sub", "data": {"mode": "full", "instrumentKeys": stream_keys}}
                 await ws.send(json.dumps(sub_payload).encode("utf-8"))
-                print(f"✓ Upstox V3 WebSocket connected. Subscribed to {len(stream_keys):,} contracts.")
+                print(f"✓ Upstox V3 WebSocket connected. Subscribed to {len(stream_keys):,} contracts (Underlyings: {len(self.underlying_keys):,}, Options: {len(self.active_option_keys):,}).")
 
                 while self._running:
                     msg = await ws.recv()

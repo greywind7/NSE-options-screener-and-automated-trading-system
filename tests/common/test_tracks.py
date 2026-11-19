@@ -123,7 +123,14 @@ class TestTracks(unittest.TestCase):
         self.assertEqual(trade.exit_price, 112.5)
 
     def test_trend_pullback_stepped_ratchet(self):
-        track = TrendPullbackTrack(context=self.context, target_pct=0.25, sl_pct=0.12)
+        track = TrendPullbackTrack(
+            context=self.context,
+            target_pct=0.25,
+            sl_pct=0.12,
+            breakeven_trigger_pct=0.025,
+            trailing_step_pct=0.01,
+            timeout_sec=3600.0,
+        )
         opp = ActionableOpportunity(
             opp_id="OPP_TP",
             alert_id="ALT_TP",
@@ -146,17 +153,76 @@ class TestTracks(unittest.TestCase):
         )
         trade = track.on_opportunity(opp)
         trade.entry_time = 1000.0
-        # Entry = 50.0, Target = 62.50, SL = 44.0
+        # Entry = 50.0, Target = 62.50, Initial SL = 44.0 (-12%)
 
-        # Step 1: At +15% profit (Bid = 57.50), SL moves to +5% (52.50)
-        track.on_tick("NSE:INFY26NOV1750CE", ltp=57.5, bid=57.5, ask=57.8, ts=1300.0)
+        # Below Breakeven (+2.0%, Bid = 51.0): SL remains 44.0
+        track.on_tick("NSE:INFY26NOV1750CE", ltp=51.0, bid=51.0, ask=51.2, ts=1100.0)
+        self.assertEqual(trade.stop_loss, 44.0)
+
+        # Breakeven Trigger Hit (+2.5%, Bid = 51.25): SL ratchets to entry (50.00)
+        track.on_tick("NSE:INFY26NOV1750CE", ltp=51.25, bid=51.25, ask=51.4, ts=1200.0)
+        self.assertEqual(trade.stop_loss, 50.00)
+
+        # Step 1 (+3.5% = +1% excess, Bid = 51.75): SL trails up by 1% to 50.50
+        track.on_tick("NSE:INFY26NOV1750CE", ltp=51.75, bid=51.75, ask=51.9, ts=1250.0)
         self.assertEqual(trade.ratchet_level, 1)
-        self.assertEqual(trade.stop_loss, 52.50)
+        self.assertEqual(trade.stop_loss, 50.50)
 
-        # Step 2: At +20% profit (Bid = 60.0), SL moves to +12% (56.00)
+        # At +15% profit (Bid = 57.50, excess = 12.5% -> 12 steps): SL moves to 56.00 (+12%)
+        track.on_tick("NSE:INFY26NOV1750CE", ltp=57.5, bid=57.5, ask=57.8, ts=1300.0)
+        self.assertEqual(trade.ratchet_level, 12)
+        self.assertEqual(trade.stop_loss, 56.00)
+
+        # At +20% profit (Bid = 60.0, excess = 17.5% -> 17 steps): SL moves to 58.50 (+17%)
         track.on_tick("NSE:INFY26NOV1750CE", ltp=60.0, bid=60.0, ask=60.3, ts=1500.0)
-        self.assertEqual(trade.ratchet_level, 2)
-        self.assertAlmostEqual(trade.stop_loss, 56.00, places=2)
+        self.assertEqual(trade.ratchet_level, 17)
+        self.assertAlmostEqual(trade.stop_loss, 58.50, places=2)
+
+        # Pullback test: Bid drops to 57.0 (below trailed SL of 58.50) -> Exits with SL_HIT
+        track.on_tick("NSE:INFY26NOV1750CE", ltp=57.0, bid=57.0, ask=57.2, ts=1600.0)
+        self.assertEqual(trade.status, "CLOSED")
+        self.assertEqual(trade.exit_reason, "SL_HIT")
+        self.assertEqual(trade.exit_price, 57.0)
+
+    def test_trend_pullback_timeout_exit(self):
+        """Verify that when holding duration exceeds timeout_sec, the trade closes with PULLBACK_TIMEOUT."""
+        track = TrendPullbackTrack(
+            context=self.context,
+            target_pct=0.25,
+            sl_pct=0.12,
+            timeout_sec=3600.0,
+        )
+        opp = ActionableOpportunity(
+            opp_id="OPP_TP_TO",
+            alert_id="ALT_TP_TO",
+            symbol="INFY",
+            direction="BULL",
+            archetype="FLAG_BULL_BREAKOUT",
+            trigger_price=1800.0,
+            strikes={
+                "ITM1": {
+                    "token": "NSE:INFY26NOV1750CE",
+                    "strike": 1750.0,
+                    "option_type": "CE",
+                    "ltp": 50.0,
+                    "bid": 49.8,
+                    "ask": 50.0,
+                    "lot_size": 400,
+                }
+            },
+            timestamp=1000.0,
+        )
+        trade = track.on_opportunity(opp)
+        trade.entry_time = 1000.0
+
+        # At 3590s (elapsed = 2590s < 3600s), still open
+        track.on_tick("NSE:INFY26NOV1750CE", ltp=51.0, bid=51.0, ask=51.2, ts=3590.0)
+        self.assertEqual(trade.status, "OPEN")
+
+        # At 4601s (elapsed = 3601s > 3600s), exits with PULLBACK_TIMEOUT
+        track.on_tick("NSE:INFY26NOV1750CE", ltp=51.0, bid=51.0, ask=51.2, ts=4601.0)
+        self.assertEqual(trade.status, "CLOSED")
+        self.assertEqual(trade.exit_reason, "PULLBACK_TIMEOUT")
 
     def test_fixed_target_inr_gate(self):
         track = FixedTargetTrack(

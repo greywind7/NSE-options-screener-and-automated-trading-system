@@ -93,7 +93,10 @@ class TestPreMarketPipeline(unittest.TestCase):
 
         summary = manifest.get("summary", {})
         self.assertGreater(summary.get("total_underlying_equities", 0), 200)
-        self.assertGreater(summary.get("total_popular_options_streamed", 0), 2000)
+        # Strategy B: popular options stream for Top N liquid underlyings (~1,540 keys) to stay under 2,000 total keys
+        self.assertGreater(summary.get("total_popular_options_streamed", 0), 1000)
+        total_ws_keys = summary.get("total_underlying_equities", 0) + summary.get("total_popular_options_streamed", 0)
+        self.assertLessEqual(total_ws_keys, 2000, "Total WebSocket streamed keys must not exceed Upstox 2,000 key limit")
         self.assertGreater(summary.get("total_background_options_polled", 0), 10000)
 
         # Verify underlying keys format
