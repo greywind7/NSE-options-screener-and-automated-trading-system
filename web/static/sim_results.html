@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Antigravity // Simulation Report</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <style>
+    body {
+      background: var(--bg-body);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .report-header {
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .report-container {
+      max-width: 1400px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      flex: 1;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Standalone Header -->
+  <header class="report-header">
+    <div style="display:flex; align-items:center; gap:16px;">
+      <div class="brand-section">
+        <div class="brand-logo">AG</div>
+        <div>
+          <span class="brand-title">ANTIGRAVITY</span>
+          <span class="brand-tag">Simulation Report</span>
+        </div>
+      </div>
+      <div style="height:24px; width:1px; background:var(--border-subtle);"></div>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span id="srp-title" style="font-size:15px; font-weight:700; color:#fff;">Simulation Run</span>
+        <span id="srp-status-badge" class="badge badge-win">COMPLETED</span>
+        <span id="srp-net-badge" class="badge">₹0.00</span>
+        <span id="srp-runtime-badge" class="chart-subtext">Elapsed: -</span>
+      </div>
+    </div>
+
+    <div style="display:flex; align-items:center; gap:8px;">
+      <button type="button" id="srp-refresh-btn" class="btn btn-secondary btn-sm">
+        <span>🔄 Refresh</span>
+      </button>
+      <a href="/" class="btn btn-primary btn-sm" style="text-decoration:none;">
+        <span>🏠 Main Dashboard</span>
+      </a>
+    </div>
+  </header>
+
+  <!-- Report Body -->
+  <main class="report-container">
+
+    <!-- Parameters Hero Drawer -->
+    <div class="form-card srm-params-card">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span style="font-size:11px; font-weight:700; text-transform:uppercase; color:var(--accent-cyan); letter-spacing:0.5px;">
+          ⚙️ Strategy Parameters Used in This Run
+        </span>
+        <button type="button" id="srp-params-toggle" class="btn btn-secondary btn-sm" style="font-size:10px; padding:2px 8px;">
+          Collapse Parameters ▲
+        </button>
+      </div>
+      <div id="srp-params-body" class="srm-params-body"></div>
+    </div>
+
+    <!-- Executive Stat Cards -->
+    <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 0;">
+      <div class="stat-card">
+        <div class="stat-label">Net P&L (Avg / Track)</div>
+        <div id="srp-stat-net-pnl" class="stat-value">₹0.00</div>
+        <div class="stat-subtext">After Brokerage</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Gross P&L (Avg / Track)</div>
+        <div id="srp-stat-gross-pnl" class="stat-value">₹0.00</div>
+        <div class="stat-subtext">Before Brokerage</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Win Rate</div>
+        <div id="srp-stat-win-rate" class="stat-value">0.0%</div>
+        <div class="stat-subtext">Return &gt; +2.5%</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Trades</div>
+        <div id="srp-stat-trades" class="stat-value">0 Trades</div>
+        <div class="stat-subtext">Session Total</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Brokerage</div>
+        <div id="srp-stat-brokerage" class="stat-value">₹0.00</div>
+        <div class="stat-subtext">Round-Trip Total</div>
+      </div>
+    </div>
+
+    <!-- Mode Filter Bar -->
+    <div class="controls-bar" style="margin: 4px 0;">
+      <div class="filter-group">
+        <span class="filter-label">Filter Results by Mode:</span>
+        <div class="pill-group">
+          <button class="pill-btn srp-mode-pill active" data-mode="all">All Modes</button>
+          <button class="pill-btn srp-mode-pill" data-mode="paper">Paper</button>
+          <button class="pill-btn srp-mode-pill" data-mode="paper_delayed">Paper Delayed</button>
+        </div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim);">
+        Click any track row below to inspect its simulated intraday performance curve and executed trades.
+      </div>
+    </div>
+
+    <!-- Matrix Table (Unclipped, Full Native Browser Width & Scrolling) -->
+    <div class="table-panel">
+      <div class="panel-header">
+        <div class="panel-title"><span>📊 Simulation Results Matrix</span></div>
+      </div>
+      <div class="table-wrapper">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Mode</th>
+              <th>Track</th>
+              <th class="text-center">Trades</th>
+              <th class="text-center">Wins</th>
+              <th class="text-center">B/E</th>
+              <th class="text-center">Losses</th>
+              <th class="text-center">Win Rate</th>
+              <th class="text-right">Start Budget</th>
+              <th class="text-right">End Budget</th>
+              <th class="text-right">Gross P&L</th>
+              <th class="text-right">Brokerage</th>
+              <th class="text-right">Net P&L</th>
+              <th class="text-right">Return %</th>
+            </tr>
+          </thead>
+          <tbody id="srp-matrix-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Drilldown Detail Panel -->
+    <div id="srp-detail-panel" class="detail-panel" style="display:none;">
+      <div class="detail-header">
+        <div class="detail-title-group">
+          <span id="srp-detail-mode-badge" class="badge">MODE</span>
+          <span id="srp-detail-title" class="detail-title">Track Name</span>
+        </div>
+        <div>
+          <span class="stat-label">Net Performance:</span>
+          <span id="srp-detail-net" class="stat-value" style="font-size:18px; margin-left:8px;">₹0.00</span>
+        </div>
+      </div>
+
+      <!-- Canvas Curve -->
+      <div class="chart-box">
+        <div class="chart-header">
+          <span class="chart-title">Simulated Intraday Cumulative P&L Curve</span>
+          <label class="chart-checkbox-label">
+            <input type="checkbox" id="srp-brokerage-toggle" checked />
+            <span>Include Brokerage</span>
+          </label>
+        </div>
+        <canvas id="srp-chart-canvas" class="chart-canvas" style="height:260px;"></canvas>
+      </div>
+
+      <!-- Simulated Trade Log Table -->
+      <div class="table-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <span>📋 Simulated Trades Executed (Click any trade to inspect 5m Candle Charts)</span>
+          </div>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Trade ID</th>
+                <th>Symbol</th>
+                <th>Contract</th>
+                <th class="text-center">Qty</th>
+                <th class="text-right">Entry Price</th>
+                <th class="text-center">Entry Time</th>
+                <th class="text-right">Exit Price</th>
+                <th class="text-center">Exit Time</th>
+                <th class="text-center">Exit Reason</th>
+                <th class="text-right">Return %</th>
+                <th class="text-right">Brokerage</th>
+                <th class="text-right">Net P&L</th>
+              </tr>
+            </thead>
+            <tbody id="srp-trades-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- =========================================================================
+       MODAL: DUAL INTRADAY TRADE ANALYSIS (UNDERLYING & OPTION)
+       ========================================================================= -->
+  <div id="trade-analysis-modal" class="modal-overlay">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span id="tam-title" class="modal-title">Trade Analytics</span>
+          <span id="tam-status-badge" class="badge">STATUS</span>
+          <span id="tam-pnl-badge" class="badge">₹0.00</span>
+        </div>
+        <div class="modal-header-actions">
+          <div class="pill-group" style="margin-right:8px;">
+            <button id="tam-range-local" class="pill-btn active">Localized (±10 Bars)</button>
+            <button id="tam-range-fullday" class="pill-btn">Full Day</button>
+            <button id="tam-range-both" class="pill-btn">Both Views</button>
+          </div>
+          <div class="pill-group" style="margin-right:12px;">
+            <button id="tam-mode-candle" class="pill-btn active">Candlestick</button>
+            <button id="tam-mode-line" class="pill-btn">Line</button>
+          </div>
+          <button id="tam-close" class="close-btn">&times;</button>
+        </div>
+      </div>
+
+      <!-- Trade Metadata Summary Bar -->
+      <div id="tam-meta-bar" class="meta-bar"></div>
+
+      <!-- SECTION 1: Localized Trade Execution Window (±10 Candles @ 5m) -->
+      <div id="tam-section-local" class="tam-chart-section">
+        <div class="chart-box" style="margin-bottom:12px;">
+          <div class="chart-header">
+            <span id="tam-underlying-local-title" class="chart-title">Underlying Equity — Localized Trade Setup (±10 Bars @ 5m)</span>
+            <span class="chart-subtext">Source: equity_ticks.parquet (NSE Cash)</span>
+          </div>
+          <canvas id="tam-underlying-local-canvas" class="chart-canvas" style="height:250px;"></canvas>
+        </div>
+
+        <div class="chart-box" style="margin-bottom:12px;">
+          <div class="chart-header">
+            <span id="tam-option-local-title" class="chart-title">Option Contract — Localized Trade Execution (±10 Bars @ 5m)</span>
+            <span class="chart-subtext">Source: option_depth.parquet (NSE FO Depth)</span>
+          </div>
+          <canvas id="tam-option-local-canvas" class="chart-canvas" style="height:250px;"></canvas>
+        </div>
+      </div>
+
+      <!-- SECTION 2: Full Day Macro Session (5m) -->
+      <div id="tam-section-fullday" class="tam-chart-section" style="display:none;">
+        <div class="chart-box" style="margin-bottom:12px;">
+          <div class="chart-header">
+            <span id="tam-underlying-title" class="chart-title">Underlying Equity — Full Day Macro Session (5m)</span>
+            <span class="chart-subtext">Source: equity_ticks.parquet (NSE Cash)</span>
+          </div>
+          <canvas id="tam-underlying-canvas" class="chart-canvas" style="height:250px;"></canvas>
+        </div>
+
+        <div class="chart-box">
+          <div class="chart-header">
+            <span id="tam-option-title" class="chart-title">Option Contract — Full Day Intraday (5m)</span>
+            <span class="chart-subtext">Source: option_depth.parquet (NSE FO Depth)</span>
+          </div>
+          <canvas id="tam-option-canvas" class="chart-canvas" style="height:250px;"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Scripts -->
+  <script src="/static/js/chart_engine.js"></script>
+  <script src="/static/js/sim_results_page.js"></script>
+</body>
+</html>

@@ -56,6 +56,8 @@ class ScoringEngine3:
         universe_csv: Optional[str] = None,
         baseline_file: Optional[str] = None,
         min_pole_pct: Optional[float] = None,
+        enable_zmq: bool = True,
+        persist_alerts: Optional[bool] = None,
     ):
         from core.config.config_loader import get_config_manager
         cfg = get_config_manager()
@@ -64,6 +66,8 @@ class ScoringEngine3:
         inst_paths = cfg.instruments.get("instruments", {}).get("paths", {})
         scoring_cfg = cfg.get_scoring_config()
 
+        self.enable_zmq = enable_zmq
+        self.persist_alerts = persist_alerts
         self.shm_name = shm_name or shm_cfg.get("shm_name", SHM_NAME)
         self.min_volume_thrust_mult = float(scoring_cfg.get("min_volume_thrust_mult", 2.0))
         self.min_clv = float(scoring_cfg.get("min_clv", 0.75))
@@ -84,7 +88,11 @@ class ScoringEngine3:
         self.quarantine_cooldown_sec = float(scoring_cfg.get("quarantine_cooldown_sec", 5.0))
 
         self._owns_pool = pool is None
-        self.pool = pool or OpportunityPool(cooldown_seconds=self.quarantine_cooldown_sec)
+        self.pool = pool or OpportunityPool(
+            cooldown_seconds=self.quarantine_cooldown_sec,
+            enable_zmq=enable_zmq,
+            persist_alerts=persist_alerts,
+        )
         self.universe_csv = universe_csv or inst_paths.get("filtered_universe_csv", "data/filtered.csv")
         self.running = False
 

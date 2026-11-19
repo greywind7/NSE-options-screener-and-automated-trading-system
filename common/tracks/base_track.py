@@ -4,6 +4,7 @@ Enforces Invariant #2 (Strict Ask-based target and SL computations)
 and provides isolated, track-specific exit rules dispatching.
 """
 from abc import ABC, abstractmethod
+import os
 from typing import Any, Dict, List, Optional
 import time
 
@@ -174,6 +175,9 @@ class BaseTrack(ABC):
         order_id = f"ORD_{trade_id}"
 
         now_ts = opp.timestamp or time.time()
+        entry_reason = getattr(opp, "archetype", None) or "MOMENTUM_BREAKOUT"
+        origin_track = self.track_name
+
         trade = TradeState(
             trade_id=trade_id,
             mode=self.context.mode,
@@ -192,10 +196,14 @@ class BaseTrack(ABC):
             highest_price=entry_ask,
             current_bid=bid,
             status="OPEN",
+            entry_reason=entry_reason,
+            origin_track=origin_track,
             metadata={
                 "opp_id": opp.opp_id,
                 "archetype": opp.archetype,
                 "sub_track": self.track_name,
+                "origin_track": origin_track,
+                "entry_reason": entry_reason,
                 "preferred_mode": self.preferred_mode,
                 "required_capital": required_capital,
             },

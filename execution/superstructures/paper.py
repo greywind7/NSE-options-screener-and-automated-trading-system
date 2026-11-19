@@ -27,6 +27,7 @@ class PaperSuperstructure(BaseSuperstructure):
         quotes_router_ipc: Optional[str] = None,
         recordings_dir: Optional[str] = None,
         ctx: Optional[zmq.Context] = None,
+        continue_state: bool = False,
     ):
         super().__init__(
             mode="paper",
@@ -38,6 +39,7 @@ class PaperSuperstructure(BaseSuperstructure):
             quotes_router_ipc=quotes_router_ipc,
             recordings_dir=recordings_dir,
             ctx=ctx,
+            continue_state=continue_state,
         )
 
     def submit_order(self, request: OrderRequest) -> None:

@@ -44,6 +44,7 @@ class BaseSuperstructure(ExecutionContext, ABC):
         quotes_router_ipc: Optional[str] = None,
         recordings_dir: Optional[str] = None,
         ctx: Optional[zmq.Context] = None,
+        continue_state: bool = False,
     ):
         from core.config.config_loader import get_config_manager
         from common.tracks.factory import get_enabled_track_names, create_tracks
@@ -57,6 +58,7 @@ class BaseSuperstructure(ExecutionContext, ABC):
         self.quotes_stream_ipc = quotes_stream_ipc or feed_ipc or ipc.get("quotes_stream_ipc", DEFAULT_QUOTES_STREAM_IPC)
         self.quotes_router_ipc = quotes_router_ipc or ipc.get("quotes_router_ipc", DEFAULT_QUOTES_ROUTER_IPC)
         self.recordings_dir = recordings_dir or rec_cfg.get("output_dir", "recordings")
+        self.continue_state = continue_state
         self.running = False
 
         # Gap 5: In-memory atomic freeze flag (0-latency check)
@@ -105,6 +107,107 @@ class BaseSuperstructure(ExecutionContext, ABC):
         # 3. QuotesBroker Client for snapshots and dynamic sub/unsub
         client_timeout = 50 if "dummy" in str(self.quotes_router_ipc) else 1000
         self.quotes_client = QuotesBrokerClient(router_ipc=self.quotes_router_ipc, timeout_ms=client_timeout, ctx=self.ctx)
+
+        if self.continue_state:
+            self._recover_state_from_journals()
+
+    def _recover_state_from_journals(self) -> None:
+        """
+        Recover active positions, closed trades, and cumulative PnL from journal files on disk.
+        Prevents orphaned/inflated trades and avoids double entries upon process restart.
+        """
+        from datetime import datetime
+        from common.interfaces import TradeState
+
+        today_str = get_market_date_str()
+        session_dir = os.path.join(self.recordings_dir, today_str)
+        if not os.path.exists(session_dir):
+            alt_dir = os.path.join(self.recordings_dir, today_str.replace("-", ""))
+            if os.path.exists(alt_dir):
+                session_dir = alt_dir
+            else:
+                return
+
+        total_open_recovered = 0
+        total_closed_recovered = 0
+        tokens_to_sub = set()
+
+        for tr_name, track in self.tracks.items():
+            filename = f"journal_{self.mode}_{tr_name}.jsonl"
+            filepath = os.path.join(session_dir, filename)
+            if not os.path.exists(filepath):
+                continue
+
+            trades_map: Dict[str, Dict[str, Any]] = {}
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                        event = record.get("event")
+                        data = record.get("data", {})
+                        trade_id = data.get("trade_id")
+                        if not trade_id:
+                            continue
+
+                        if trade_id not in trades_map:
+                            trades_map[trade_id] = dict(data)
+                        else:
+                            trades_map[trade_id].update(data)
+
+                        if event == "TRADE_EXIT" or data.get("status") == "CLOSED":
+                            trades_map[trade_id]["status"] = "CLOSED"
+                    except Exception:
+                        pass
+
+            for tid, tdict in trades_map.items():
+                try:
+                    trade = TradeState(
+                        trade_id=tid,
+                        mode=self.mode,
+                        track=tr_name,
+                        symbol=tdict.get("symbol", ""),
+                        token=tdict.get("token", ""),
+                        option_type=tdict.get("option_type", ""),
+                        strike=float(tdict.get("strike", 0.0)),
+                        lot_size=int(tdict.get("lot_size", 0)),
+                        quantity=int(tdict.get("quantity", 0)),
+                        entry_ask=float(tdict.get("entry_ask", 0.0) or tdict.get("entry_price", 0.0)),
+                        entry_price=float(tdict.get("entry_price", 0.0)),
+                        entry_time=float(tdict.get("entry_time", 0.0)),
+                        target_price=float(tdict.get("target_price", 0.0)),
+                        stop_loss=float(tdict.get("stop_loss", 0.0)),
+                        highest_price=float(tdict.get("highest_price", 0.0)),
+                        current_bid=float(tdict.get("current_bid", 0.0)),
+                        status=tdict.get("status", "OPEN"),
+                        exit_price=float(tdict["exit_price"]) if tdict.get("exit_price") is not None else None,
+                        exit_time=float(tdict["exit_time"]) if tdict.get("exit_time") is not None else None,
+                        exit_reason=tdict.get("exit_reason"),
+                        realized_pnl=float(tdict.get("realized_pnl", 0.0)),
+                        ratchet_level=int(tdict.get("ratchet_level", 0)),
+                        metadata=tdict.get("metadata", {}),
+                    )
+
+                    if trade.status == "OPEN":
+                        track.active_trades[tid] = trade
+                        tokens_to_sub.add(trade.token)
+                        total_open_recovered += 1
+                    else:
+                        track.closed_trades.append(trade)
+                        self.risk_mgr.update_pnl(trade.realized_pnl)
+                        total_closed_recovered += 1
+                except Exception as e:
+                    print(f"[{self.mode.upper()}_SUPERSTRUCTURE] ⚠️ Error recovering trade {tid}: {e}", file=sys.stderr)
+
+        if tokens_to_sub:
+            self.subscribe_option_quotes(list(tokens_to_sub))
+
+        ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(
+            f"[{ts_str}] [{self.mode.upper()}_SUPERSTRUCTURE] ✓ State recovered (--continue): "
+            f"{total_open_recovered} open trades re-activated, {total_closed_recovered} closed trades restored."
+        )
 
     @property
     def mode(self) -> str:

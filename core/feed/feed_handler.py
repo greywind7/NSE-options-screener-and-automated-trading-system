@@ -734,10 +734,28 @@ class FeedHandler:
                         except Exception as parse_err:
                             log_debug(f"Protobuf parse error: {parse_err}", self.debug_log)
 
-        try:
-            asyncio.run(ws_consumer())
-        except Exception as e:
-            print(f"WebSocket closed: {e}")
+        backoff = 1.0
+        while self._running:
+            try:
+                if not ws_url:
+                    ws_url = get_authorized_ws_url()
+                    if not ws_url:
+                        ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print(f"[{ts_str}] [FEED] ⚠️ Cannot obtain WebSocket authorization URL (possible network outage). Retrying in {backoff:.1f}s...", file=sys.stderr)
+                        time.sleep(backoff)
+                        backoff = min(15.0, backoff * 1.5)
+                        continue
+
+                asyncio.run(ws_consumer())
+                backoff = 1.0
+            except Exception as e:
+                if not self._running:
+                    break
+                ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"[{ts_str}] [FEED] ⚠️ WebSocket disconnected/error: {e}. Retrying connection in {backoff:.1f}s...", file=sys.stderr)
+                time.sleep(backoff)
+                backoff = min(15.0, backoff * 1.5)
+                ws_url = None
 
     def _run_poll_stream(self) -> None:
         """Fallback REST poller in batches of 500 contracts."""

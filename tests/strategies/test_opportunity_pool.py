@@ -1,6 +1,7 @@
 """
 Unit Tests for Opportunity Pool & Quarantine Gatekeeper.
 """
+import os
 import time
 import unittest
 import zmq
@@ -17,6 +18,7 @@ class TestOpportunityPool(unittest.TestCase):
             pub_ipc=self.endpoint,
             cooldown_sec=1.0,  # 1 second for fast test
             ctx=self.ctx,
+            persist_alerts=False,
         )
 
         self.sub = self.ctx.socket(zmq.SUB)
@@ -29,6 +31,12 @@ class TestOpportunityPool(unittest.TestCase):
         self.sub.close(linger=0)
         self.pool.stop()
         self.ctx.destroy(linger=0)
+        for p in ["logs/alerts_1970-01-01.jsonl"]:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
     def test_non_blocking_cooldown_and_dispatch(self):
         alert_reliance = SetupAlert(

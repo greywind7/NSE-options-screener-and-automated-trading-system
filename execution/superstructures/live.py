@@ -91,6 +91,7 @@ class LiveSuperstructure(BaseSuperstructure):
         quotes_router_ipc: Optional[str] = None,
         recordings_dir: Optional[str] = None,
         ctx: Optional[zmq.Context] = None,
+        continue_state: bool = False,
     ):
         tracks = track_names or ["fast_momentum", "trend_pullback", "fixed_target"]
         super().__init__(
@@ -103,6 +104,7 @@ class LiveSuperstructure(BaseSuperstructure):
             quotes_router_ipc=quotes_router_ipc,
             recordings_dir=recordings_dir,
             ctx=ctx,
+            continue_state=continue_state,
         )
 
         self.access_token = access_token or os.environ.get("GROWW_ACCESS_TOKEN") or os.environ.get("GROWW_API_KEY") or self._cfg.get_groww_api_key()

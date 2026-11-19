@@ -25,11 +25,17 @@
       <button class="tab-btn active" data-tab="live">
         <span style="color:var(--accent-red); font-size:14px;">●</span> Live Telemetry
       </button>
+      <button class="tab-btn" data-tab="alerts">
+        <span>🚨</span> Live Alerts
+      </button>
       <button class="tab-btn" data-tab="historical">
         <span>📜</span> Historical Review
       </button>
       <button class="tab-btn" data-tab="simulation">
         <span style="color:var(--accent-cyan); font-size:14px;">⚡</span> Simulation Lab
+      </button>
+      <button class="tab-btn" data-tab="sim-results" id="nav-tab-sim-results" style="display:none;">
+        <span style="color:var(--accent-green); font-size:14px;">📊</span> Simulation Results
       </button>
     </nav>
 
@@ -55,7 +61,7 @@
       <!-- Live Overview Stat Cards -->
       <div class="stats-grid">
         <div class="stat-card">
-          <div class="stat-label">Net P&L (Total)</div>
+          <div class="stat-label">Net P&L (Avg / Track)</div>
           <div id="live-stat-net-pnl" class="stat-value">₹0.00</div>
           <div id="live-stat-mtm" class="stat-subtext">MTM: ₹0.00</div>
         </div>
@@ -116,6 +122,8 @@
                 <th class="text-center">B/E</th>
                 <th class="text-center">Losses</th>
                 <th class="text-center">Win Rate</th>
+                <th class="text-right">Start Budget</th>
+                <th class="text-right">Current Budget</th>
                 <th class="text-right">Gross Realized</th>
                 <th class="text-right">Brokerage</th>
                 <th class="text-right">MTM (Unrealized)</th>
@@ -123,7 +131,7 @@
               </tr>
             </thead>
             <tbody id="live-track-tbody">
-              <tr><td colspan="12" class="text-center" style="padding:24px; color:var(--text-dim);">Loading active sessions...</td></tr>
+              <tr><td colspan="14" class="text-center" style="padding:24px; color:var(--text-dim);">Loading active sessions...</td></tr>
             </tbody>
           </table>
         </div>
@@ -146,6 +154,10 @@
         <div class="chart-box">
           <div class="chart-header">
             <span class="chart-title">Intraday Performance Curve (Realized + MTM across the Day)</span>
+            <label class="chart-checkbox-label">
+              <input type="checkbox" id="live-brokerage-toggle" checked />
+              <span>Include Brokerage</span>
+            </label>
           </div>
           <canvas id="live-chart-canvas" class="chart-canvas"></canvas>
         </div>
@@ -182,6 +194,82 @@
     </section>
 
     <!-- =======================================================================
+         TAB: LIVE ALERTS & SETUP MONITOR
+         ======================================================================= -->
+    <section id="view-alerts" class="tab-view">
+      <div class="controls-bar">
+        <div class="filter-group">
+          <span class="filter-label">Session Date:</span>
+          <select id="alerts-date-select" class="custom-select"></select>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">Direction:</span>
+          <div class="pill-group">
+            <button id="alert-dir-all" class="pill-btn alert-dir-pill active" data-dir="all">All</button>
+            <button id="alert-dir-bull" class="pill-btn alert-dir-pill" data-dir="BULL">Bullish 📈</button>
+            <button id="alert-dir-bear" class="pill-btn alert-dir-pill" data-dir="BEAR">Bearish 📉</button>
+          </div>
+        </div>
+        <div class="filter-group" style="flex:1; max-width:300px;">
+          <input type="text" id="alerts-search-input" class="form-input" placeholder="Search symbol or archetype..." style="width:100%;" />
+        </div>
+        <button id="alerts-refresh-btn" class="btn btn-secondary btn-sm" style="margin-left:auto;">
+          <span>🔄 Refresh</span>
+        </button>
+      </div>
+
+      <div class="alerts-container">
+        <!-- Top Section: 5 Latest Alerts -->
+        <div>
+          <div class="panel-header" style="background:transparent; padding:0 0 8px 0; border:none;">
+            <div class="panel-title">
+              <span style="color:var(--accent-red);">🚨 Top 5 Latest Alerts</span>
+              <span class="chart-subtext" style="margin-left:8px;">(Click any card to inspect 5m candlestick chart with trigger point)</span>
+            </div>
+            <span id="alerts-live-status" class="badge">Scanner Active</span>
+          </div>
+          <div id="alerts-latest-cards" class="alerts-top-grid">
+            <div class="text-dim" style="font-size:12px; grid-column:1/-1; padding:20px; text-align:center;">
+              Waiting for incoming setup alerts...
+            </div>
+          </div>
+        </div>
+
+        <!-- Bottom Section: Complete Alerts Journal Table -->
+        <div class="table-panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <span>📋 All Generated Alerts For Session</span>
+            </div>
+            <span id="alerts-total-badge" class="badge">0 Alerts</span>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th class="text-center">Time</th>
+                  <th>Symbol</th>
+                  <th class="text-center">Direction</th>
+                  <th>Archetype</th>
+                  <th class="text-right">Trigger Price</th>
+                  <th class="text-right">rVOL</th>
+                  <th class="text-right">CLV</th>
+                  <th class="text-right">ATR</th>
+                  <th class="text-center">Action</th>
+                </tr>
+              </thead>
+              <tbody id="alerts-table-tbody">
+                <tr>
+                  <td colspan="9" class="text-center text-dim" style="padding:24px;">No alerts logged for this date.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =======================================================================
          TAB 2: HISTORICAL REVIEW
          ======================================================================= -->
     <section id="view-historical" class="tab-view">
@@ -206,7 +294,7 @@
       <!-- Historical Overview Stat Cards -->
       <div class="stats-grid">
         <div class="stat-card">
-          <div class="stat-label">Historical Net P&L</div>
+          <div class="stat-label">Net P&L (Avg / Track)</div>
           <div id="hist-stat-net-pnl" class="stat-value">₹0.00</div>
           <div class="stat-subtext">Net after Brokerage</div>
         </div>
@@ -245,13 +333,15 @@
                 <th class="text-center">B/E</th>
                 <th class="text-center">Losses</th>
                 <th class="text-center">Win Rate</th>
+                <th class="text-right">Start Budget</th>
+                <th class="text-right">End Budget</th>
                 <th class="text-right">Gross P&L</th>
                 <th class="text-right">Brokerage</th>
                 <th class="text-right">Net P&L</th>
               </tr>
             </thead>
             <tbody id="hist-track-tbody">
-              <tr><td colspan="10" class="text-center" style="padding:24px; color:var(--text-dim);">Select a date above to inspect historical performance.</td></tr>
+              <tr><td colspan="12" class="text-center" style="padding:24px; color:var(--text-dim);">Select a date above to inspect historical performance.</td></tr>
             </tbody>
           </table>
         </div>
@@ -274,6 +364,10 @@
         <div class="chart-box">
           <div class="chart-header">
             <span class="chart-title">Intraday Performance Curve Across Historical Session</span>
+            <label class="chart-checkbox-label">
+              <input type="checkbox" id="hist-brokerage-toggle" checked />
+              <span>Include Brokerage</span>
+            </label>
           </div>
           <canvas id="historical-chart-canvas" class="chart-canvas"></canvas>
         </div>
@@ -316,14 +410,34 @@
         <!-- Sidebar: Global Parameters & Execution Controls -->
         <aside class="sim-sidebar">
           <div class="form-card">
-            <div class="panel-title" style="margin-bottom:4px;">
+            <div class="panel-title" style="margin-bottom:8px;">
               <span>⚡ Simulation Target & Budget</span>
             </div>
 
-            <!-- Date Select -->
-            <div class="form-group">
+            <!-- Mode Toggle: Single Day vs Batch Range -->
+            <div class="sim-mode-toggle">
+              <button type="button" id="sim-type-single-btn" class="sim-mode-btn active">Single Day</button>
+              <button type="button" id="sim-type-batch-btn" class="sim-mode-btn">Batch Range</button>
+            </div>
+
+            <!-- Single Date Select -->
+            <div id="sim-single-date-box" class="form-group">
               <label class="form-label">Simulation Recording Date</label>
               <select id="sim-date-select" class="custom-select" style="width:100%;"></select>
+            </div>
+
+            <!-- Batch Date Range Select -->
+            <div id="sim-batch-date-box" class="form-group" style="display:none;">
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">From Date</label>
+                  <select id="sim-from-date-select" class="custom-select" style="width:100%;"></select>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">To Date</label>
+                  <select id="sim-to-date-select" class="custom-select" style="width:100%;"></select>
+                </div>
+              </div>
             </div>
 
             <!-- Execution Modes -->
@@ -397,14 +511,39 @@
               <button type="button" id="sim-reset-btn" class="btn btn-secondary btn-sm">
                 <span>🔄 Reset to Config Defaults</span>
               </button>
+              <div id="sim-batch-progress" class="batch-progress-container">
+                <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-dim);">
+                  <span id="sim-batch-status-label">Batch Progress</span>
+                  <span id="sim-batch-pct-label">0%</span>
+                </div>
+                <div class="batch-progress-bar-bg">
+                  <div id="sim-batch-bar-fill" class="batch-progress-bar-fill"></div>
+                </div>
+              </div>
               <div id="sim-status-text" style="font-size:11px; color:var(--text-dim); text-align:center;">
                 Parquet dataset will be cached in memory for instant re-runs.
               </div>
             </div>
           </div>
+
+          <!-- Simulation Runs History List -->
+          <div class="form-card" style="margin-top:2px;">
+            <div class="panel-title" style="display:flex; justify-content:space-between; align-items:center;">
+              <span>📋 Simulation Runs</span>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span id="sim-runs-count" class="badge">0 Runs</span>
+                <button type="button" id="sim-clear-runs-btn" class="btn btn-secondary btn-xs" style="padding:2px 8px; font-size:10px; cursor:pointer;" title="Clear simulation runs and temporary files">Clear Queue</button>
+              </div>
+            </div>
+            <div id="sim-runs-list" class="sim-runs-list">
+              <div class="text-dim" style="font-size:11px; padding:12px 0; text-align:center;">
+                No simulations launched in this session yet.<br/>Configure parameters and click "Run Historical Simulation" above.
+              </div>
+            </div>
+          </div>
         </aside>
 
-        <!-- Main Area: Configurable Base Tracks & Results Matrix -->
+        <!-- Main Area: Configurable Base Tracks -->
         <main class="sim-main">
           <!-- Configurable Base Tracks Cards -->
           <div class="table-panel">
@@ -545,100 +684,177 @@
 
             </div>
           </div>
-
-          <!-- Simulation Results Panel (Displayed after running) -->
-          <div id="sim-results-panel" style="display:none;">
-            <div class="controls-bar" style="margin-bottom:14px;">
-              <div class="filter-group">
-                <span class="filter-label">Filter Results by Mode:</span>
-                <div class="pill-group">
-                  <button class="pill-btn sim-mode-pill active" data-mode="all">All Modes</button>
-                  <button class="pill-btn sim-mode-pill" data-mode="paper">Paper</button>
-                  <button class="pill-btn sim-mode-pill" data-mode="paper_delayed">Paper Delayed</button>
-                </div>
-              </div>
-              <div style="font-size:11px; color:var(--text-dim);">
-                Click any track row below to view its simulated performance curve and trades.
-              </div>
-            </div>
-
-            <!-- Matrix Table -->
-            <div class="table-panel">
-              <div class="panel-header">
-                <div class="panel-title"><span>📊 Simulation Results Matrix</span></div>
-              </div>
-              <div class="table-wrapper">
-                <table class="data-table">
-                  <thead>
-                    <tr>
-                      <th>Mode</th>
-                      <th>Track</th>
-                      <th class="text-center">Trades</th>
-                      <th class="text-center">Wins</th>
-                      <th class="text-center">B/E</th>
-                      <th class="text-center">Losses</th>
-                      <th class="text-center">Win Rate</th>
-                      <th class="text-right">Gross P&L</th>
-                      <th class="text-right">Brokerage</th>
-                      <th class="text-right">Net P&L</th>
-                      <th class="text-right">End Budget</th>
-                      <th class="text-right">Return %</th>
-                    </tr>
-                  </thead>
-                  <tbody id="sim-matrix-tbody"></tbody>
-                </table>
-              </div>
-            </div>
-
-            <!-- Drilldown Detail Panel -->
-            <div id="sim-detail-panel" class="detail-panel" style="display:none;">
-              <div class="detail-header">
-                <div class="detail-title-group">
-                  <span id="sim-detail-mode-badge" class="badge">MODE</span>
-                  <span id="sim-detail-title" class="detail-title">Track Name</span>
-                </div>
-              </div>
-
-              <!-- Canvas Curve -->
-              <div class="chart-box">
-                <div class="chart-header">
-                  <span class="chart-title">Simulated Intraday Cumulative Net P&L Curve</span>
-                </div>
-                <canvas id="sim-chart-canvas" class="chart-canvas"></canvas>
-              </div>
-
-              <!-- Simulated Trade Log Table -->
-              <div class="table-panel">
-                <div class="panel-header">
-                  <div class="panel-title"><span>📋 Simulated Trades Executed</span></div>
-                </div>
-                <div class="table-wrapper">
-                  <table class="data-table">
-                    <thead>
-                      <tr>
-                        <th>Trade ID</th>
-                        <th>Symbol</th>
-                        <th>Contract</th>
-                        <th class="text-center">Qty</th>
-                        <th class="text-right">Entry Price</th>
-                        <th class="text-center">Entry Time</th>
-                        <th class="text-right">Exit Price</th>
-                        <th class="text-center">Exit Time</th>
-                        <th class="text-center">Exit Reason</th>
-                        <th class="text-right">Return %</th>
-                        <th class="text-right">Brokerage</th>
-                        <th class="text-right">Net P&L</th>
-                      </tr>
-                    </thead>
-                    <tbody id="sim-trades-tbody"></tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-
-          </div>
         </main>
       </div>
+    </section>
+
+    <!-- =======================================================================
+         TAB 4: DEDICATED SIMULATION RESULTS VIEW (CLEAN FULL-PAGE TAB)
+         ======================================================================= -->
+    <section id="view-sim-results" class="tab-view">
+      <!-- Top Run Bar & Action Controls -->
+      <div class="controls-bar" style="margin-bottom:14px; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+          <div class="filter-group">
+            <span class="filter-label">Select Simulation Run:</span>
+            <select id="sr-run-select" class="custom-select" style="min-width:240px;"></select>
+          </div>
+          <span id="sr-status-badge" class="badge badge-win">COMPLETED</span>
+          <span id="sr-net-badge" class="badge">₹0.00</span>
+          <span id="sr-runtime-badge" class="chart-subtext">Elapsed: -</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <button type="button" id="sr-open-new-tab-btn" class="btn btn-primary btn-sm" title="Open this report in a new clean browser tab">
+            <span>↗ Open in New Browser Tab</span>
+          </button>
+          <button type="button" id="sr-back-to-sim-btn" class="btn btn-secondary btn-sm">
+            <span>⚡ Back to Simulation Lab</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Parameters Used Hero Drawer -->
+      <div class="form-card srm-params-card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:11px; font-weight:700; text-transform:uppercase; color:var(--accent-cyan); letter-spacing:0.5px;">
+            ⚙️ Strategy Parameters Used in This Run
+          </span>
+          <button type="button" id="sr-params-toggle" class="btn btn-secondary btn-sm" style="font-size:10px; padding:2px 8px;">
+            Collapse Parameters ▲
+          </button>
+        </div>
+        <div id="sr-params-body" class="srm-params-body"></div>
+      </div>
+
+      <!-- Executive Stat Cards -->
+      <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 14px;">
+        <div class="stat-card">
+          <div class="stat-label">Net P&L (Avg / Track)</div>
+          <div id="sr-stat-net-pnl" class="stat-value">₹0.00</div>
+          <div class="stat-subtext">After Brokerage</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Gross P&L (Avg / Track)</div>
+          <div id="sr-stat-gross-pnl" class="stat-value">₹0.00</div>
+          <div class="stat-subtext">Before Brokerage</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Win Rate</div>
+          <div id="sr-stat-win-rate" class="stat-value">0.0%</div>
+          <div class="stat-subtext">Return &gt; +2.5%</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Total Trades</div>
+          <div id="sr-stat-trades" class="stat-value">0 Trades</div>
+          <div class="stat-subtext">Session Total</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Total Brokerage</div>
+          <div id="sr-stat-brokerage" class="stat-value">₹0.00</div>
+          <div class="stat-subtext">Round-Trip Total</div>
+        </div>
+      </div>
+
+      <!-- Mode Filter Bar -->
+      <div class="controls-bar" style="margin-bottom:14px;">
+        <div class="filter-group">
+          <span class="filter-label">Filter Results by Mode:</span>
+          <div class="pill-group">
+            <button class="pill-btn sr-mode-pill active" data-mode="all">All Modes</button>
+            <button class="pill-btn sr-mode-pill" data-mode="paper">Paper</button>
+            <button class="pill-btn sr-mode-pill" data-mode="paper_delayed">Paper Delayed</button>
+          </div>
+        </div>
+        <div style="font-size:11px; color:var(--text-dim);">
+          Click any track row below to view its simulated performance curve and trades.
+        </div>
+      </div>
+
+      <!-- Results Matrix Table (Full-Width, Unconstrained Scroll) -->
+      <div class="table-panel">
+        <div class="panel-header">
+          <div class="panel-title"><span>📊 Simulation Results Matrix</span></div>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Mode</th>
+                <th>Track</th>
+                <th class="text-center">Trades</th>
+                <th class="text-center">Wins</th>
+                <th class="text-center">B/E</th>
+                <th class="text-center">Losses</th>
+                <th class="text-center">Win Rate</th>
+                <th class="text-right">Start Budget</th>
+                <th class="text-right">End Budget</th>
+                <th class="text-right">Gross P&L</th>
+                <th class="text-right">Brokerage</th>
+                <th class="text-right">Net P&L</th>
+                <th class="text-right">Return %</th>
+              </tr>
+            </thead>
+            <tbody id="sr-matrix-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Drilldown Detail Panel (Performance Curve & Trades) -->
+      <div id="sr-detail-panel" class="detail-panel" style="display:none; margin-top:14px;">
+        <div class="detail-header">
+          <div class="detail-title-group">
+            <span id="sr-detail-mode-badge" class="badge">MODE</span>
+            <span id="sr-detail-title" class="detail-title">Track Name</span>
+          </div>
+          <div>
+            <span class="stat-label">Net Performance:</span>
+            <span id="sr-detail-net" class="stat-value" style="font-size:18px; margin-left:8px;">₹0.00</span>
+          </div>
+        </div>
+
+        <!-- Canvas Curve -->
+        <div class="chart-box">
+          <div class="chart-header">
+            <span class="chart-title">Simulated Intraday Cumulative P&L Curve</span>
+            <label class="chart-checkbox-label">
+              <input type="checkbox" id="sr-brokerage-toggle" checked />
+              <span>Include Brokerage</span>
+            </label>
+          </div>
+          <canvas id="sr-chart-canvas" class="chart-canvas" style="height:250px;"></canvas>
+        </div>
+
+        <!-- Simulated Trade Log Table -->
+        <div class="table-panel">
+          <div class="panel-header">
+            <div class="panel-title">
+              <span>📋 Simulated Trades Executed (Click any trade to inspect 5m Candle Charts)</span>
+            </div>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Trade ID</th>
+                  <th>Symbol</th>
+                  <th>Contract</th>
+                  <th class="text-center">Qty</th>
+                  <th class="text-right">Entry Price</th>
+                  <th class="text-center">Entry Time</th>
+                  <th class="text-right">Exit Price</th>
+                  <th class="text-center">Exit Time</th>
+                  <th class="text-center">Exit Reason</th>
+                  <th class="text-right">Return %</th>
+                  <th class="text-right">Brokerage</th>
+                  <th class="text-right">Net P&L</th>
+                </tr>
+              </thead>
+              <tbody id="sr-trades-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
     </section>
 
   </main>
@@ -695,12 +911,115 @@
     </div>
   </div>
 
+  <!-- =========================================================================
+       MODAL: DUAL INTRADAY TRADE ANALYSIS (UNDERLYING & OPTION)
+       ========================================================================= -->
+  <div id="trade-analysis-modal" class="modal-overlay">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span id="tam-title" class="modal-title">Trade Analytics</span>
+          <span id="tam-status-badge" class="badge">STATUS</span>
+          <span id="tam-pnl-badge" class="badge">₹0.00</span>
+        </div>
+        <div class="modal-header-actions">
+          <div class="pill-group" style="margin-right:8px;">
+            <button id="tam-range-local" class="pill-btn active">Localized (±10 Bars)</button>
+            <button id="tam-range-fullday" class="pill-btn">Full Day</button>
+            <button id="tam-range-both" class="pill-btn">Both Views</button>
+          </div>
+          <div class="pill-group" style="margin-right:12px;">
+            <button id="tam-mode-candle" class="pill-btn active">Candlestick</button>
+            <button id="tam-mode-line" class="pill-btn">Line</button>
+          </div>
+          <button id="tam-close" class="close-btn">&times;</button>
+        </div>
+      </div>
+
+      <!-- Trade Metadata Summary Bar -->
+      <div id="tam-meta-bar" class="meta-bar"></div>
+
+      <!-- SECTION 1: Localized Trade Execution Window (±10 Candles @ 5m) -->
+      <div id="tam-section-local" class="tam-chart-section">
+        <div class="chart-box" style="margin-bottom:12px;">
+          <div class="chart-header">
+            <span id="tam-underlying-local-title" class="chart-title">Underlying Equity — Localized Trade Setup (±10 Bars @ 5m)</span>
+            <span class="chart-subtext">Source: equity_ticks.parquet (NSE Cash)</span>
+          </div>
+          <canvas id="tam-underlying-local-canvas" class="chart-canvas" style="height:250px;"></canvas>
+        </div>
+
+        <div class="chart-box" style="margin-bottom:12px;">
+          <div class="chart-header">
+            <span id="tam-option-local-title" class="chart-title">Option Contract — Localized Trade Execution (±10 Bars @ 5m)</span>
+            <span class="chart-subtext">Source: option_depth.parquet (NSE FO Depth)</span>
+          </div>
+          <canvas id="tam-option-local-canvas" class="chart-canvas" style="height:250px;"></canvas>
+        </div>
+      </div>
+
+      <!-- SECTION 2: Full Day Macro Session (5m) -->
+      <div id="tam-section-fullday" class="tam-chart-section" style="display:none;">
+        <div class="chart-box" style="margin-bottom:12px;">
+          <div class="chart-header">
+            <span id="tam-underlying-title" class="chart-title">Underlying Equity — Full Day Macro Session (5m)</span>
+            <span class="chart-subtext">Source: equity_ticks.parquet (NSE Cash)</span>
+          </div>
+          <canvas id="tam-underlying-canvas" class="chart-canvas" style="height:250px;"></canvas>
+        </div>
+
+        <div class="chart-box">
+          <div class="chart-header">
+            <span id="tam-option-title" class="chart-title">Option Contract — Full Day Intraday (5m)</span>
+            <span class="chart-subtext">Source: option_depth.parquet (NSE FO Depth)</span>
+          </div>
+          <canvas id="tam-option-canvas" class="chart-canvas" style="height:250px;"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =========================================================================
+       MODAL: SETUP ALERT 5M CANDLESTICK CHART
+       ========================================================================= -->
+  <div id="alert-chart-modal" class="modal-overlay">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span id="acm-title" class="modal-title">Setup Alert Chart</span>
+          <span id="acm-dir-badge" class="badge">BULL</span>
+          <span id="acm-arch-badge" class="badge" style="background:rgba(0,229,255,0.15); color:var(--accent-cyan); border-color:var(--accent-cyan);">FLAG_BREAKOUT</span>
+        </div>
+        <div class="modal-header-actions">
+          <div class="pill-group" style="margin-right:12px;">
+            <button id="acm-mode-candle" class="pill-btn active">Candlestick</button>
+            <button id="acm-mode-line" class="pill-btn">Line</button>
+          </div>
+          <button id="acm-close" class="close-btn">&times;</button>
+        </div>
+      </div>
+
+      <!-- Alert Metadata Bar -->
+      <div id="acm-meta-bar" class="meta-bar"></div>
+
+      <!-- Chart Box -->
+      <div class="chart-box" style="margin-top:10px;">
+        <div class="chart-header">
+          <span id="acm-chart-title" class="chart-title">5-Minute Candlestick Chart (Trigger Point Marked)</span>
+          <span id="acm-chart-subtext" class="chart-subtext">SHM Live / Local Cache</span>
+        </div>
+        <canvas id="acm-canvas" class="chart-canvas" style="height:380px;"></canvas>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast Notification Container -->
   <div id="toast-container" class="toast-container"></div>
 
   <!-- Scripts -->
   <script src="/static/js/chart_engine.js"></script>
   <script src="/static/js/live_tab.js"></script>
+  <script src="/static/js/alerts_tab.js"></script>
   <script src="/static/js/historical_tab.js"></script>
   <script src="/static/js/simulation_tab.js"></script>
   <script src="/static/js/app.js"></script>

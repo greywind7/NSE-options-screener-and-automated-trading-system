@@ -19,6 +19,8 @@ class HistoricalService:
         self.recordings_dir = recordings_dir
         self.logs_dir = logs_dir
         self._date_cache: Dict[str, Dict[Tuple[str, str], List[Dict[str, Any]]]] = {}
+        self._overview_cache: Dict[str, Dict[str, Any]] = {}
+        self._track_cache: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
 
     def get_available_dates(self) -> List[Dict[str, Any]]:
         """
@@ -51,9 +53,10 @@ class HistoricalService:
                 try:
                     files = os.listdir(entry_path)
                     for f in files:
-                        if f.endswith(".parquet"):
+                        fp = os.path.join(entry_path, f)
+                        if f.endswith(".parquet") and os.path.getsize(fp) > 0:
                             date_map[canonical_date]["has_parquet"] = True
-                        if f.startswith("journal_") or "trade" in f.lower():
+                        if (f.startswith("journal_") or "trade" in f.lower()) and os.path.getsize(fp) > 0:
                             date_map[canonical_date]["has_journals"] = True
                 except Exception:
                     pass
@@ -66,7 +69,7 @@ class HistoricalService:
                         if d in f or d.replace("-", "") in f:
                             date_map[d]["has_journals"] = True
 
-        dates_sorted = sorted(date_map.values(), key=lambda x: x["date"], reverse=True)
+        dates_sorted = sorted(date_map.values(), key=lambda x: x["date"], reverse=False)
         return dates_sorted
 
     def _normalize_date(self, s: str) -> Optional[str]:
@@ -82,6 +85,9 @@ class HistoricalService:
         Load and compute mode and track performance for the requested historical date.
         """
         canonical_date = self._normalize_date(target_date) or target_date
+        if canonical_date in self._overview_cache:
+            return self._overview_cache[canonical_date]
+
         trades_by_mode_track = self._load_trades_for_date(canonical_date)
 
         modes_dict: Dict[str, Dict[str, Any]] = {}
@@ -118,28 +124,39 @@ class HistoricalService:
             tot_brokerage += stats["brokerage"]
             tot_net += stats["net_pnl"]
 
+        active_track_names = set(track for (mode, track) in trades_by_mode_track.keys())
+        n_active = len(active_track_names) if active_track_names else 1
+
         overall = {
             "trades": tot_trades,
             "wins": tot_wins,
             "breakevens": tot_be,
             "losses": tot_losses,
             "win_rate": round((tot_wins / tot_trades * 100.0) if tot_trades > 0 else 0.0, 1),
-            "gross_pnl": round(tot_gross, 2),
+            "gross_pnl": round(tot_gross / n_active, 2),
             "brokerage": round(tot_brokerage, 2),
-            "net_pnl": round(tot_net, 2),
+            "net_pnl": round(tot_net / n_active, 2),
+            "raw_total_net": round(tot_net, 2),
+            "active_tracks_count": n_active,
         }
 
-        return {
+        res = {
             "date": canonical_date,
             "modes": modes_dict,
             "overall": overall,
         }
+        self._overview_cache[canonical_date] = res
+        return res
 
     def get_historical_track_detail(self, target_date: str, mode: str, track: str) -> Dict[str, Any]:
         """
         Return full trade list and cumulative intraday curve for a specific historical track.
         """
         canonical_date = self._normalize_date(target_date) or target_date
+        cache_key = (canonical_date, mode, track)
+        if cache_key in self._track_cache:
+            return self._track_cache[cache_key]
+
         trades_by_mode_track = self._load_trades_for_date(canonical_date)
         key = (mode, track)
         trades = trades_by_mode_track.get(key, [])
@@ -164,12 +181,13 @@ class HistoricalService:
             tr_copy["return_pct"] = round(ret_pct * 100.0, 2)
             tr_copy["brokerage"] = round(fee, 2)
             tr_copy["net_pnl"] = round(pnl - fee, 2)
+            tr_copy["date"] = canonical_date
             formatted.append(tr_copy)
 
         # Performance curve across the session
         curve = self._build_historical_curve(trades)
 
-        return {
+        res = {
             "date": canonical_date,
             "mode": mode,
             "track": track,
@@ -177,6 +195,8 @@ class HistoricalService:
             "trades": formatted,
             "performance_curve": curve,
         }
+        self._track_cache[cache_key] = res
+        return res
 
     def _load_trades_for_date(self, canonical_date: str) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
         """Read and cache trade records for a session date."""
@@ -257,6 +277,8 @@ class HistoricalService:
                                 "target_price": float(data.get("target_price", 0.0)),
                                 "stop_loss": float(data.get("stop_loss", 0.0)),
                                 "status": data.get("status", "OPEN"),
+                                "entry_reason": data.get("entry_reason") or data.get("metadata", {}).get("entry_reason") or data.get("metadata", {}).get("archetype") or "-",
+                                "origin_track": data.get("origin_track") or data.get("metadata", {}).get("origin_track") or data.get("metadata", {}).get("sub_track") or track,
                                 "exit_price": data.get("exit_price"),
                                 "exit_time": data.get("exit_time"),
                                 "exit_reason": data.get("exit_reason"),
@@ -345,6 +367,8 @@ class HistoricalService:
 
         win_rate = (wins / trades_count * 100.0) if trades_count > 0 else 0.0
         net_pnl = gross_pnl - brokerage
+        start_budget = 250000.0
+        end_budget = round(start_budget + net_pnl, 2)
 
         return {
             "mode": mode,
@@ -357,10 +381,12 @@ class HistoricalService:
             "gross_pnl": round(gross_pnl, 2),
             "brokerage": round(brokerage, 2),
             "net_pnl": round(net_pnl, 2),
+            "start_budget": start_budget,
+            "end_budget": end_budget,
         }
 
     def _build_historical_curve(self, trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Cumulative realized PnL curve plotted across time."""
+        """Cumulative realized PnL curve plotted across time with net and gross options."""
         if not trades:
             return []
 
@@ -371,13 +397,16 @@ class HistoricalService:
 
         closed_sorted = sorted(closed_trades, key=lambda t: float(t["exit_time"]))
         curve = []
-        cum_pnl = 0.0
+        cum_net = 0.0
+        cum_gross = 0.0
 
         # Start anchor
         first_ts = float(closed_sorted[0]["exit_time"])
         curve.append({
             "time": datetime.fromtimestamp(first_ts - 60.0, tz=IST).strftime("%H:%M:%S"),
             "timestamp": round(first_ts - 60.0, 1),
+            "net_pnl": 0.0,
+            "gross_pnl": 0.0,
             "pnl": 0.0,
         })
 
@@ -385,11 +414,14 @@ class HistoricalService:
             x_ts = float(tr["exit_time"])
             pnl = float(tr.get("realized_pnl", 0.0))
             fee = float(tr.get("metadata", {}).get("brokerage", 60.0))
-            cum_pnl += (pnl - fee)
+            cum_net += (pnl - fee)
+            cum_gross += pnl
             curve.append({
                 "time": datetime.fromtimestamp(x_ts, tz=IST).strftime("%H:%M:%S"),
                 "timestamp": round(x_ts, 1),
-                "pnl": round(cum_pnl, 2),
+                "net_pnl": round(cum_net, 2),
+                "gross_pnl": round(cum_gross, 2),
+                "pnl": round(cum_net, 2),
             })
 
         return curve

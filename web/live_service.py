@@ -44,6 +44,7 @@ class LiveService:
 
         # Cached parsed state
         self._cached_trades_by_mode_track: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        self._journal_mtimes: Dict[str, float] = {}
 
     async def start(self) -> None:
         """Start async background listener for active options ZeroMQ sockets."""
@@ -69,43 +70,40 @@ class LiveService:
         sub.setsockopt(zmq.LINGER, 0)
         sub.setsockopt(zmq.RCVHWM, 50000)
 
-        # Attempt connection to feed_options.ipc (TICK.OPT) and quotes_stream.ipc
-        connected = False
-        if os.path.exists(self.feed_ipc.replace("ipc://", "")):
-            try:
-                sub.connect(self.feed_ipc)
-                sub.setsockopt(zmq.SUBSCRIBE, b"TICK.OPT")
-                connected = True
-            except Exception:
-                pass
-
-        if os.path.exists(self.stream_ipc.replace("ipc://", "")):
-            try:
-                sub.connect(self.stream_ipc)
-                sub.setsockopt(zmq.SUBSCRIBE, b"QUOTE.")
-                connected = True
-            except Exception:
-                pass
-
-        if not connected:
-            # Re-try every 3 seconds if sockets become available
-            while self.running and not connected:
-                await asyncio.sleep(3.0)
-                if os.path.exists(self.feed_ipc.replace("ipc://", "")):
-                    try:
-                        sub.connect(self.feed_ipc)
-                        sub.setsockopt(zmq.SUBSCRIBE, b"TICK.OPT")
-                        connected = True
-                    except Exception:
-                        pass
+        connected_feed = False
+        connected_stream = False
 
         while self.running:
+            # Check and connect to available IPC sockets dynamically
+            if not connected_feed and os.path.exists(self.feed_ipc.replace("ipc://", "")):
+                try:
+                    sub.connect(self.feed_ipc)
+                    sub.setsockopt(zmq.SUBSCRIBE, b"TICK.OPT")
+                    connected_feed = True
+                except Exception:
+                    pass
+
+            if not connected_stream and os.path.exists(self.stream_ipc.replace("ipc://", "")):
+                try:
+                    sub.connect(self.stream_ipc)
+                    sub.setsockopt(zmq.SUBSCRIBE, b"QUOTE.")
+                    connected_stream = True
+                except Exception:
+                    pass
+
+            if not (connected_feed or connected_stream):
+                await asyncio.sleep(1.0)
+                continue
+
             try:
-                msg = await asyncio.wait_for(sub.recv(), timeout=1.0)
-                # Parse message: either TICK.OPT or QUOTE.
-                if len(msg) > 8:
-                    topic = msg[:8]
-                    raw_bytes = msg[8:]
+                frames = await asyncio.wait_for(sub.recv_multipart(), timeout=1.0)
+                raw_bytes = None
+                if len(frames) >= 2:
+                    raw_bytes = frames[1]
+                elif len(frames) == 1 and len(frames[0]) > 8:
+                    raw_bytes = frames[0][8:]
+
+                if raw_bytes:
                     try:
                         data = unpack_message(raw_bytes)
                         token = normalize_instrument_token(data.get("token") or data.get("symbol", ""))
@@ -159,12 +157,9 @@ class LiveService:
         """
         Scan live journal files for the current session date.
         Reconstructs all open and closed trades and groups performance by mode and track.
+        Caches parsed state using file mtimes to prevent disk polling on every click.
         """
         now = time.time()
-        # Scan at most once per second unless forced
-        if not force and (now - self._last_scan_ts) < 0.8 and self._cached_trades_by_mode_track:
-            return self._build_live_summary()
-
         date_str = self.get_today_date_str()
         session_dir = os.path.join(self.recordings_dir, date_str)
         if not os.path.exists(session_dir):
@@ -175,6 +170,27 @@ class LiveService:
 
         if not os.path.exists(session_dir):
             return {"date": date_str, "modes": {}, "overall": self._empty_overall()}
+
+        # Check file mtimes in session_dir
+        current_mtimes: Dict[str, float] = {}
+        for fname in sorted(os.listdir(session_dir)):
+            if fname.startswith("journal_") and fname.endswith(".jsonl"):
+                fpath = os.path.join(session_dir, fname)
+                try:
+                    current_mtimes[fname] = os.path.getmtime(fpath)
+                except OSError:
+                    pass
+
+        # If cache exists and mtimes haven't changed and date matches, reuse cached parsed trades
+        if (
+            not force
+            and self._cached_trades_by_mode_track
+            and self._cache_date == date_str
+            and current_mtimes == self._journal_mtimes
+        ):
+            # Fast in-memory recalculation for live MTM quotes
+            self._sync_lvc_from_flushed_parquet(session_dir, self.active_open_tokens)
+            return self._build_live_summary()
 
         modes = ["paper", "paper_delayed", "live", "sim"]
         trades_by_mode_track: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
@@ -209,6 +225,7 @@ class LiveService:
 
         self.active_open_tokens = all_open_tokens
         self._cached_trades_by_mode_track = trades_by_mode_track
+        self._journal_mtimes = current_mtimes
         self._cache_date = date_str
         self._last_scan_ts = now
 
@@ -285,6 +302,8 @@ class LiveService:
                                 "highest_price": float(data.get("highest_price", 0.0)),
                                 "current_bid": float(data.get("current_bid", 0.0)),
                                 "status": data.get("status", "OPEN"),
+                                "entry_reason": data.get("entry_reason") or data.get("metadata", {}).get("entry_reason") or data.get("metadata", {}).get("archetype") or "-",
+                                "origin_track": data.get("origin_track") or data.get("metadata", {}).get("origin_track") or data.get("metadata", {}).get("sub_track") or track,
                                 "exit_price": data.get("exit_price"),
                                 "exit_time": data.get("exit_time"),
                                 "exit_reason": data.get("exit_reason"),
@@ -365,6 +384,9 @@ class LiveService:
             tot_net += stats["net_pnl"]
 
         tot_closed = tot_trades - tot_open
+        active_track_names = set(track for (mode, track) in self._cached_trades_by_mode_track.keys())
+        n_active = len(active_track_names) if active_track_names else 1
+
         overall = {
             "trades": tot_trades,
             "open": tot_open,
@@ -373,10 +395,12 @@ class LiveService:
             "breakevens": tot_be,
             "losses": tot_losses,
             "win_rate": (tot_wins / tot_closed * 100.0) if tot_closed > 0 else 0.0,
-            "gross_pnl": round(tot_gross, 2),
+            "gross_pnl": round(tot_gross / n_active, 2),
             "brokerage": round(tot_brokerage, 2),
-            "mtm_pnl": round(tot_mtm, 2),
-            "net_pnl": round(tot_net, 2),
+            "mtm_pnl": round(tot_mtm / n_active, 2),
+            "net_pnl": round(tot_net / n_active, 2),
+            "raw_total_net": round(tot_net, 2),
+            "active_tracks_count": n_active,
         }
 
         return {
@@ -433,6 +457,8 @@ class LiveService:
 
         win_rate = (wins / closed_count * 100.0) if closed_count > 0 else 0.0
         net_pnl = (gross_pnl - brokerage) + mtm_pnl
+        start_budget = 250000.0
+        current_budget = round(start_budget + net_pnl, 2)
 
         return {
             "mode": mode,
@@ -448,6 +474,8 @@ class LiveService:
             "brokerage": round(brokerage, 2),
             "mtm_pnl": round(mtm_pnl, 2),
             "net_pnl": round(net_pnl, 2),
+            "start_budget": start_budget,
+            "current_budget": current_budget,
         }
 
     def get_track_detail(self, mode: str, track: str) -> Dict[str, Any]:
@@ -467,16 +495,29 @@ class LiveService:
             x_ts = float(tr.get("exit_time") or 0.0)
             tr_copy["entry_time_str"] = datetime.fromtimestamp(e_ts, tz=IST).strftime("%H:%M:%S") if e_ts > 0 else "-"
             tr_copy["exit_time_str"] = datetime.fromtimestamp(x_ts, tz=IST).strftime("%H:%M:%S") if x_ts > 0 else "-"
+            tr_copy["date"] = self._cache_date
 
             entry_p = float(tr.get("entry_price", 0.0))
             if tr.get("status") == "OPEN":
-                cur_p = float(tr.get("current_bid") or entry_p)
+                tok = tr.get("token", "")
+                quote = self.lvc.get(tok, {})
+                q_ts = float(quote.get("timestamp") or 0.0)
+                if q_ts > 0:
+                    tr_copy["last_quote_time_str"] = datetime.fromtimestamp(q_ts, tz=IST).strftime("%H:%M:%S")
+                    tr_copy["last_quote_age_sec"] = max(0, round(time.time() - q_ts, 1))
+                else:
+                    tr_copy["last_quote_time_str"] = "-"
+                    tr_copy["last_quote_age_sec"] = None
+
+                cur_p = float(quote.get("bid") or quote.get("ltp") or tr.get("current_bid") or entry_p)
                 pnl = float(tr.get("mtm", 0.0))
                 ret_pct = (cur_p - entry_p) / entry_p if entry_p > 0 else 0.0
             else:
                 cur_p = float(tr.get("exit_price") or entry_p)
                 pnl = float(tr.get("realized_pnl", 0.0))
                 ret_pct = (cur_p - entry_p) / entry_p if entry_p > 0 else 0.0
+                tr_copy["last_quote_time_str"] = "-"
+                tr_copy["last_quote_age_sec"] = None
 
             tr_copy["pnl"] = round(pnl, 2)
             tr_copy["return_pct"] = round(ret_pct * 100.0, 2)
@@ -498,7 +539,8 @@ class LiveService:
     def _build_intraday_curve(self, trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Generate time-indexed points for cumulative PnL across the trading day.
-        Sampling at trade lifecycle events and 5-minute intervals.
+        Sampling at trade lifecycle events and 3-minute intervals.
+        Provides both net_pnl (including brokerage) and gross_pnl.
         """
         if not trades:
             return []
@@ -521,8 +563,8 @@ class LiveService:
         min_ts = sorted_ts[0]
         max_ts = max(sorted_ts[-1], time.time())
 
-        # Build 2-5 minute interval ticks
-        step = 180.0  # 3 minutes
+        # Build 3 minute interval ticks
+        step = 180.0
         t = min_ts
         while t <= max_ts:
             ts_points.add(t)
@@ -531,7 +573,8 @@ class LiveService:
 
         eval_times = sorted(ts_points)
         curve = []
-        cum_closed_pnl = 0.0
+        cum_closed_net = 0.0
+        cum_closed_gross = 0.0
         processed_exits = set()
 
         for cur_t in eval_times:
@@ -545,7 +588,8 @@ class LiveService:
                     if x_ts <= cur_t:
                         pnl = float(tr.get("realized_pnl", 0.0))
                         fee = float(tr.get("metadata", {}).get("brokerage", 60.0))
-                        cum_closed_pnl += (pnl - fee)
+                        cum_closed_net += (pnl - fee)
+                        cum_closed_gross += pnl
                         processed_exits.add(tid)
 
             # Check open trades MTM at cur_t
@@ -556,12 +600,15 @@ class LiveService:
                     if e_ts <= cur_t:
                         cur_mtm += float(tr.get("mtm", 0.0))
 
-            total_val = cum_closed_pnl + cur_mtm
+            total_net = cum_closed_net + cur_mtm
+            total_gross = cum_closed_gross + cur_mtm
             dt_str = datetime.fromtimestamp(cur_t, tz=IST).strftime("%H:%M:%S")
             curve.append({
                 "time": dt_str,
                 "timestamp": round(cur_t, 1),
-                "pnl": round(total_val, 2),
+                "net_pnl": round(total_net, 2),
+                "gross_pnl": round(total_gross, 2),
+                "pnl": round(total_net, 2),
             })
 
         return curve

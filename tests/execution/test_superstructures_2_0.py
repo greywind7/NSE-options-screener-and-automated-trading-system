@@ -59,7 +59,7 @@ class TestSuperstructures20(unittest.TestCase):
                     "lot_size": 250,
                 }
             },
-            timestamp=time.time(),
+            timestamp=1794803400.0,  # 10:00 AM IST morning opportunity
         )
 
         superstructure.on_opportunity(opp)
@@ -94,7 +94,7 @@ class TestSuperstructures20(unittest.TestCase):
                     "lot_size": 175,
                 }
             },
-            timestamp=time.time(),
+            timestamp=1794803400.0,  # 10:00 AM IST morning opportunity
         )
         superstructure.on_opportunity(opp2)
         # Count should still be 1!

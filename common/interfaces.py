@@ -29,6 +29,8 @@ class TradeState:
     highest_price: float
     current_bid: float
     status: str = "OPEN"  # OPEN, CLOSED
+    entry_reason: Optional[str] = None
+    origin_track: Optional[str] = None
     exit_price: Optional[float] = None
     exit_time: Optional[float] = None
     exit_reason: Optional[str] = None

@@ -43,6 +43,7 @@ class CandleManager:
         universe_csv: str = "data/filtered.csv",
         baseline_file: str = "data/index.json",
         exchange: str = "NSE",
+        enable_zmq: bool = True,
     ):
         from core.config.config_loader import get_config_manager
         cfg = get_config_manager()
@@ -53,6 +54,7 @@ class CandleManager:
         self.baseline_file = baseline_file
         self.schedule = get_trading_schedule(exchange)
         self.running = False
+        self.enable_zmq = enable_zmq
 
         # Load 221 Universe symbols
         self.symbol_to_index: Dict[str, int] = {}
@@ -82,12 +84,17 @@ class CandleManager:
         self.current_bar_idx = np.full(NUM_SYMBOLS, -1, dtype=np.int32)
         self.current_min_idx = np.zeros(NUM_SYMBOLS, dtype=np.int32)
 
-        # ZeroMQ Subscriber
-        self.ctx = zmq.Context()
-        self.sub = self.ctx.socket(zmq.SUB)
-        self.sub.setsockopt(zmq.RCVHWM, 100000)
-        self.sub.setsockopt(zmq.SUBSCRIBE, b"TICK.EQ")
-        self.sub.connect(self.sub_ipc)
+        # ZeroMQ Subscriber (only when enable_zmq is True)
+        if self.enable_zmq:
+            self.ctx = zmq.Context()
+            self.sub = self.ctx.socket(zmq.SUB)
+            self.sub.setsockopt(zmq.LINGER, 0)
+            self.sub.setsockopt(zmq.RCVHWM, 100000)
+            self.sub.setsockopt(zmq.SUBSCRIBE, b"TICK.EQ")
+            self.sub.connect(self.sub_ipc)
+        else:
+            self.ctx = None
+            self.sub = None
 
     def _load_universe(self) -> None:
         """Load exactly active 221 symbols from data/filtered.csv and build token mapping."""
@@ -323,9 +330,66 @@ class CandleManager:
         expected_vol = baseline_5m * expected_fraction
         return float(total_extrap_vol) / max(1.0, expected_vol)
 
+    def warmup_from_parquet(self, session_date: Optional[str] = None, recordings_dir: str = "recordings") -> int:
+        """
+        Seamless state recovery: rebuild intraday 1m/3m/5m/15m OHLC and SHM baseline
+        by chronologically replaying flushed equity ticks from today's recording partition.
+        """
+        from datetime import datetime
+        import polars as pl
+        from core.common.time_utils import get_market_date_str
+
+        date_str = session_date or get_market_date_str()
+        cand_paths = [
+            os.path.join(recordings_dir, date_str, "equity_ticks.parquet"),
+            os.path.join(recordings_dir, date_str.replace("-", ""), "equity_ticks.parquet"),
+        ]
+
+        pq_file = None
+        for p in cand_paths:
+            if os.path.exists(p) and os.path.getsize(p) > 0:
+                pq_file = p
+                break
+
+        if not pq_file:
+            return 0
+
+        ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts_str}] [CANDLE_MANAGER] 🔄 Warmup: Restoring state from '{pq_file}'...")
+        try:
+            df = pl.read_parquet(pq_file)
+            if len(df) == 0:
+                return 0
+
+            ts_col = "exchange_timestamp" if "exchange_timestamp" in df.columns else "received_timestamp"
+            df = df.sort(ts_col)
+
+            tokens = df["token"].to_list() if "token" in df.columns else []
+            ltps = df["ltp"].to_numpy() if "ltp" in df.columns else []
+            vols = df["volume"].to_numpy() if "volume" in df.columns else []
+            tss = df[ts_col].to_numpy()
+
+            replayed = 0
+            for i in range(len(tss)):
+                tok = tokens[i]
+                if tok in self.token_to_idx:
+                    ltp = float(ltps[i])
+                    vol = int(vols[i])
+                    ts = float(tss[i])
+                    self.on_tick(token=tok, ltp=ltp, vol=vol, ts=ts)
+                    replayed += 1
+
+            ts_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{ts_end}] [CANDLE_MANAGER] ✓ Warmup completed: Replayed {replayed:,} ticks. State restored to bar #{self.current_bar_idx}!")
+            return replayed
+        except Exception as e:
+            print(f"[CANDLE_MANAGER] ⚠️ Warmup error: {e}", file=sys.stderr)
+            return 0
+
     def start(self) -> None:
         """Run the main event loop listening to ZeroMQ ticks."""
         self.running = True
+        self.warmup_from_parquet()
         print(f"[CANDLE_MANAGER] Active | Listening on {self.sub_ipc} | SHM: {self.shm_name}")
         while self.running:
             try:
@@ -344,9 +408,21 @@ class CandleManager:
 
     def stop(self) -> None:
         self.running = False
-        self.sub.close()
-        self.ctx.term()
-        self.shm.close()
+        if self.sub:
+            try:
+                self.sub.close(linger=0)
+            except Exception:
+                pass
+        if self.ctx:
+            try:
+                self.ctx.term()
+            except Exception:
+                pass
+        if self.shm:
+            try:
+                self.shm.close()
+            except Exception:
+                pass
         print("[CANDLE_MANAGER] Stopped cleanly.")
 
 

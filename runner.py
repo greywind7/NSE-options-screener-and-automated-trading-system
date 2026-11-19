@@ -334,14 +334,24 @@ def cmd_quotesbroker(args: argparse.Namespace) -> int:
 
 
 def cmd_dashboard(args: argparse.Namespace) -> int:
-    """Launch Universal Terminal Dashboard."""
-    from ui.dashboard import TerminalDashboard
-    d = TerminalDashboard(
-        alerts_ipc=getattr(args, "alerts_ipc", "ipc:///tmp/scoring_alerts_pub.ipc"),
-        rms_ipc=getattr(args, "rms_ipc", "ipc:///tmp/rms_strike_pub.ipc"),
-        recordings_dir=getattr(args, "recordings_dir", "recordings"),
-    )
-    d.start(refresh_interval=getattr(args, "refresh", 1.0))
+    """The CLI terminal dashboard has been retired in favor of the Web UI."""
+    if getattr(args, "legacy", False):
+        from ui.dashboard import TerminalDashboard
+        d = TerminalDashboard(
+            alerts_ipc=getattr(args, "alerts_ipc", "ipc:///tmp/scoring_alerts_pub.ipc"),
+            rms_ipc=getattr(args, "rms_ipc", "ipc:///tmp/rms_strike_pub.ipc"),
+            recordings_dir=getattr(args, "recordings_dir", "recordings"),
+        )
+        d.start(refresh_interval=getattr(args, "refresh", 1.0))
+        return 0
+
+    print("=" * 80)
+    print("ℹ️  CLI TERMINAL DASHBOARD RETIRED")
+    print("   The terminal curses dashboard has been retired.")
+    print("   Please use the modern Web Analytics & Live Alerts UI:")
+    print("   👉 Run:  python runner.py web")
+    print("   👉 Open: http://localhost:8080")
+    print("=" * 80)
     return 0
 
 
@@ -432,12 +442,13 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
     print(f"  • RMS & Strikes      : Spawned (PID: {p_rms.pid})")
 
     # 3. Execution Superstructures (one child process per mode and track)
+    is_continue = getattr(args, "continue_state", False)
     for m in modes:
         for tr in tracks:
-            exec_code = f"from execution.superstructures.{'paper' if m == 'paper' else 'delayed' if m == 'paper_delayed' else 'live'} import {'Paper' if m == 'paper' else 'Delayed' if m == 'paper_delayed' else 'Live'}Superstructure; s = {'Paper' if m == 'paper' else 'Delayed' if m == 'paper_delayed' else 'Live'}Superstructure(track_names=['{tr}']); s.start()"
+            exec_code = f"from execution.superstructures.{'paper' if m == 'paper' else 'delayed' if m == 'paper_delayed' else 'live'} import {'Paper' if m == 'paper' else 'Delayed' if m == 'paper_delayed' else 'Live'}Superstructure; s = {'Paper' if m == 'paper' else 'Delayed' if m == 'paper_delayed' else 'Live'}Superstructure(track_names=['{tr}'], continue_state={is_continue}); s.start()"
             p_exec = spawn_process([py_bin, "-c", exec_code], f"exec_{m}_{tr}", f"logs/exec_{m}_{tr}.log")
             procs.append(p_exec)
-            print(f"  • Track Process      : {m.upper()} [{tr}] (PID: {p_exec.pid})")
+            print(f"  • Track Process      : {m.upper()} [{tr}] (PID: {p_exec.pid}) {'[CONTINUE STATE]' if is_continue else ''}")
 
     # 4. Optional Market Recorder
     if getattr(args, "record", False):
@@ -448,18 +459,13 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
         procs.append(p_rec)
         print(f"  • Market Recorder   : Spawned (PID: {p_rec.pid})")
 
-    # 5. Universal Dashboard (Started implicitly)
-    dash_cmd = [py_bin, "-m", "ui.dashboard", "--modes", ",".join(modes), "--tracks", ",".join(tracks)]
-    p_dash = spawn_process(dash_cmd, "dashboard")
-    procs.append(p_dash)
-    print(f"  • Universal Dashboard: Spawned (PID: {p_dash.pid})")
-
     os.makedirs("logs", exist_ok=True)
     with open("logs/strategy.pid", "w", encoding="utf-8") as f:
         f.write(str(os.getpid()))
 
     print("=" * 80)
-    print("✓ All distributed processes online. Press Ctrl+C to terminate.")
+    print("✓ All distributed processes online (headless). Telemetry available at http://localhost:8080")
+    print("  Press Ctrl+C to terminate.")
     print("=" * 80)
     return supervise_processes(procs)
 
@@ -832,6 +838,14 @@ def cmd_stop(args: argparse.Namespace) -> int:
                 os.remove(path)
             except Exception:
                 pass
+
+    # Clean up simulation shared memory and temporary files
+    try:
+        from core.candles.shm_layout import unlink_shm
+        for shm_name in ["shm_sim_ohlc", "shm_scoring_ohlc"]:
+            unlink_shm(shm_name)
+    except Exception:
+        pass
     print("All processes stopped.")
     return 0
 
@@ -1182,8 +1196,9 @@ def main():
     subparsers.add_parser("quotesbroker", help="Start LVC quotes broker")
 
     # Command: dashboard
-    p_dash = subparsers.add_parser("dashboard", help="Start universal terminal telemetry dashboard")
+    p_dash = subparsers.add_parser("dashboard", help="Start universal terminal telemetry dashboard (Retired in favor of web UI)")
     p_dash.add_argument("--refresh", type=float, default=1.0, help="Refresh interval seconds")
+    p_dash.add_argument("--legacy", action="store_true", default=False, help="Launch retired curses terminal dashboard")
 
     # Command: prepare
     p_prep = subparsers.add_parser("prepare", help="Execute pre-market preparation pipeline")
@@ -1235,6 +1250,7 @@ def main():
     p_strat.add_argument("--config", "--strategy-config", dest="strategy_config", default="config/strategies.json", help="Path to strategy configuration file (default: config/strategies.json)")
     p_strat.add_argument("--execution-config", dest="execution_config", default="config/execution.json", help="Path to execution configuration file (default: config/execution.json)")
     p_strat.add_argument("--record", action="store_true", help="Launch market tick recorder service")
+    p_strat.add_argument("--continue", dest="continue_state", action="store_true", help="Recover previous state & active positions from today's journals")
     p_strat.add_argument("--debug", action="store_true", help="Dump raw incoming ticks to recorder debug log")
 
     # Command: start (alias for strat)
@@ -1244,6 +1260,7 @@ def main():
     p_start.add_argument("--mcx", action="store_true", help="Shortcut for --exchange MCX")
     p_start.add_argument("--mode", default="paper", help="Execution mode(s): paper, paper_delayed, live, all, or comma-separated e.g. 'paper,live' (default: paper)")
     p_start.add_argument("--tracks", "--track", dest="tracks", default=None, help="Filter active strategy tracks: fast_momentum, trend_pullback, fixed_target, composite, or ALL")
+    p_start.add_argument("--continue", dest="continue_state", action="store_true", help="Recover previous state & active positions from today's journals")
     p_start.add_argument("--legacy", action="store_true", default=False, help="Run legacy strategy engine instead of 2.0 distributed architecture")
     p_start.add_argument("--record", action="store_true", help="Launch market tick recorder service")
     p_start.add_argument("--debug", action="store_true", help="Dump raw incoming ticks to recorder debug log")

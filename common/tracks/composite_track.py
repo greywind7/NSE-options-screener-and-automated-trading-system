@@ -114,13 +114,20 @@ class CompositeTrack:
         """
         Handle incoming setup opportunity and delegate across sub-tracks.
         Sub-tracks evaluate entry against capital availability limits.
+        Fair rotation: Whichever track accepts the trade rotates to the bottom of the
+        ranking list. Tracks that rejected due to illiquid strikes or spread gates retain
+        their top priority for future opportunities.
         """
         if self.context.is_frozen():
             return None
 
-        for st in self.sub_tracks:
+        for idx, st in enumerate(self.sub_tracks):
             tr = st.on_opportunity(opp)
             if tr:
+                # Rotate the accepting track to the bottom of the priority queue
+                if len(self.sub_tracks) > 1:
+                    accepting = self.sub_tracks.pop(idx)
+                    self.sub_tracks.append(accepting)
                 return tr
         return None
 
@@ -139,3 +146,10 @@ class CompositeTrack:
         """Route order result to all constituent sub-tracks."""
         for st in self.sub_tracks:
             st.on_order_result(result)
+
+    def exit_trade(self, trade: TradeState, exit_price: float, reason: str, ts: float) -> None:
+        """Route trade exit to the sub-track that owns this active trade."""
+        for st in self.sub_tracks:
+            if trade.trade_id in st.active_trades:
+                st.exit_trade(trade, exit_price=exit_price, reason=reason, ts=ts)
+                return

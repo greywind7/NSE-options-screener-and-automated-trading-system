@@ -33,12 +33,20 @@ class TestScoringEngine3(unittest.TestCase):
             shm_name=self.shm_name,
             pool=None,
             universe_csv="data/filtered.csv",
+            enable_zmq=False,
+            persist_alerts=False,
         )
 
     def tearDown(self):
         self.engine.stop()
         self.shm.close()
         unlink_shm(self.shm_name)
+        for p in ["logs/alerts_2026-11-15.jsonl"]:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
     def _make_sim_timestamp(self, bar_idx: int, sec_offset: int = 60) -> float:
         """Create timestamp aligned to 09:15 IST market hours."""

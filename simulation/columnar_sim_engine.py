@@ -567,10 +567,10 @@ class ColumnarSimEngine:
             f"  • Active Modes : {', '.join(self.modes)} ({self.min_delay_ms:.0f}ms - {self.max_delay_ms:.0f}ms random delay)"
         )
 
-        # 1. Initialize State Layer: CandleManager & ScoringEngine with isolated SHM
+        # 1. Initialize State Layer: CandleManager & ScoringEngine with isolated SHM (ZeroMQ disabled in offline simulation)
         unlink_shm(self.shm_name)
-        candle_mgr = CandleManager(shm_name=self.shm_name)
-        scoring_eng = ScoringEngine3(shm_name=self.shm_name, min_pole_pct=self.min_pole_pct)
+        candle_mgr = CandleManager(shm_name=self.shm_name, enable_zmq=False)
+        scoring_eng = ScoringEngine3(shm_name=self.shm_name, min_pole_pct=self.min_pole_pct, enable_zmq=False, persist_alerts=False)
         print(f"  • Scoring Engine: min_pole_pct={scoring_eng.min_pole_pct*100.0:.2f}% | min_clv={scoring_eng.min_clv} | invalidation_retrace={scoring_eng.invalidation_retrace_pct*100.0:.0f}%")
 
         # 2. Initialize Execution Superstructures & Tracks for active modes only
@@ -720,7 +720,8 @@ class ColumnarSimEngine:
                 for trade in list(track.active_trades.values()):
                     if trade.status == "OPEN":
                         bid = trade.current_bid if trade.current_bid > 0 else trade.entry_price
-                        track.exit_trade(trade, exit_price=bid, reason="EOD_SQUAREOFF", ts=last_ts)
+                        if hasattr(track, "exit_trade"):
+                            track.exit_trade(trade, exit_price=bid, reason="EOD_SQUAREOFF", ts=last_ts)
 
         # Collect closed trades
         for m_name, track_dict in tracks_by_mode.items():

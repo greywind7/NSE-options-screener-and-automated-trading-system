@@ -6,20 +6,65 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import hashlib
 import json
+import multiprocessing as mp
 import os
+import pickle
+import tempfile
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import polars as pl
 
 from core.common.time_utils import IST
 from simulation.columnar_sim_engine import ColumnarSimEngine
+from web.candle_service import CandleService
+
+
+def _simulation_worker_process(
+    queue: Any,
+    result_file: str,
+    target_date: str,
+    params: Dict[str, Any],
+    recordings_dir: str,
+) -> None:
+    """
+    Independent worker process entrypoint.
+    Executes in a separate OS process with its own memory space and GIL.
+    Ensures web server event loop remains completely responsive.
+    """
+    try:
+        def progress_cb(status: str) -> None:
+            try:
+                queue.put_nowait({"type": "progress", "status": status})
+            except Exception:
+                pass
+
+        sim_svc = SimulationService(recordings_dir=recordings_dir)
+        results = sim_svc._execute_simulation_sync(
+            target_date=target_date,
+            params=params,
+            progress_cb=progress_cb,
+        )
+
+        with open(result_file, "wb") as f:
+            pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        queue.put_nowait({"type": "done", "file": result_file})
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            queue.put_nowait({"type": "error", "error": str(e), "traceback": tb})
+        except Exception:
+            pass
 
 
 class SimulationService:
     def __init__(self, recordings_dir: str = "recordings"):
         self.recordings_dir = recordings_dir
         self.executor = ThreadPoolExecutor(max_workers=2)
+        self._current_process: Optional[mp.Process] = None
 
         # In-memory parquet cache
         self.cached_date: Optional[str] = None
@@ -32,13 +77,115 @@ class SimulationService:
         self.progress_status: str = "Idle"
         self.last_run_time: float = 0.0
         self.latest_results: Optional[Dict[str, Any]] = None
+        self.latest_params: Optional[Dict[str, Any]] = None
         self.latest_error: Optional[str] = None
+        self.runs_history: Dict[str, Dict[str, Any]] = {}
+        # Parameter hash deduplication cache: param_hash -> results dict
+        self.cache_by_param_hash: Dict[str, Dict[str, Any]] = {}
+
+    def cleanup(self) -> None:
+        """
+        Teardown all simulation state, worker threads, temp files, and cached run data.
+        Ensures complete reset on server shutdown or queue clear.
+        """
+        self.is_running = False
+        self.progress_status = "Idle"
+        self.current_job_id = ""
+        self.latest_results = None
+        self.latest_params = None
+        self.latest_error = None
+        self.last_run_time = 0.0
+
+        # Terminate running worker process if active
+        if self._current_process and self._current_process.is_alive():
+            try:
+                self._current_process.terminate()
+                self._current_process.join(timeout=0.5)
+                if self._current_process.is_alive():
+                    self._current_process.kill()
+            except Exception:
+                pass
+        self._current_process = None
+
+        # Clear in-memory datasets and history
+        self.runs_history.clear()
+        self.cache_by_param_hash.clear()
+        self.cached_equity_df = None
+        self.cached_options_df = None
+        self.cached_date = None
+
+        # Safely terminate executor worker threads
+        if self.executor:
+            try:
+                self.executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            self.executor = ThreadPoolExecutor(max_workers=2)
+
+        # Clean up shared memory segments and temporary simulation files
+        self._cleanup_temp_files_and_shm()
+
+    def _cleanup_temp_files_and_shm(self) -> None:
+        """Remove simulation shared memory segments and lingering temp files."""
+        from core.candles.shm_layout import unlink_shm
+        for shm_name in ["shm_sim_ohlc", "shm_scoring_ohlc"]:
+            try:
+                unlink_shm(shm_name)
+            except Exception:
+                pass
+
+        # Clean up any lingering temporary shm files
+        try:
+            import glob
+            import tempfile
+            patterns = [
+                os.path.join(tempfile.gettempdir(), "*sim*.shm"),
+                os.path.join(tempfile.gettempdir(), "*scoring*.shm"),
+                "/tmp/*sim*.shm",
+                "/tmp/*scoring*.shm",
+            ]
+            for pat in patterns:
+                for fpath in glob.glob(pat):
+                    try:
+                        if os.path.exists(fpath):
+                            os.remove(fpath)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def compute_param_hash(self, target_date: str, params: Dict[str, Any]) -> str:
+        """Compute deterministic SHA256 hash of simulation parameters for deduplication."""
+        norm_params = {
+            "date": target_date,
+            "global_settings": params.get("global_settings", {}),
+            "base_tracks": params.get("base_tracks", {}),
+            "composite_tracks": params.get("composite_tracks", []),
+            "custom_tracks": params.get("custom_tracks", []),
+        }
+        canonical_str = json.dumps(norm_params, sort_keys=True)
+        return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
+
+    def get_run_detail(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve stored simulation run details by ID, or latest run if blank/latest."""
+        if run_id in self.runs_history:
+            return self.runs_history[run_id]
+        if run_id in ("latest", "current", "") and self.latest_results:
+            return {
+                "id": self.current_job_id or "RUN-latest",
+                "date": self.latest_results.get("date", ""),
+                "params": self.latest_params or {},
+                "results": self.latest_results,
+                "runtime": round(self.last_run_time, 2),
+                "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
+            }
+        return None
 
     def get_simulation_dates(self) -> List[Dict[str, Any]]:
-        """List recording dates that contain valid equity & option recording files."""
+        """List recording dates that contain valid equity & option recording files (chronological order)."""
         dates = []
         if os.path.exists(self.recordings_dir):
-            for entry in sorted(os.listdir(self.recordings_dir), reverse=True):
+            for entry in sorted(os.listdir(self.recordings_dir), reverse=False):
                 full_path = os.path.join(self.recordings_dir, entry)
                 if not os.path.isdir(full_path):
                     continue
@@ -65,7 +212,7 @@ class SimulationService:
                         "is_cached": (self.cached_date == norm_date),
                     })
 
-        # Deduplicate
+        # Deduplicate and sort chronologically (ascending)
         unique_dates = []
         seen = set()
         for d in dates:
@@ -73,6 +220,7 @@ class SimulationService:
                 seen.add(d["date"])
                 unique_dates.append(d)
 
+        unique_dates.sort(key=lambda d: d["date"])
         return unique_dates
 
     def get_default_config(self) -> Dict[str, Any]:
@@ -184,32 +332,124 @@ class SimulationService:
 
     async def run_simulation_job(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Run simulation asynchronously in thread pool with custom parameter overrides and composer tracks.
+        Run simulation asynchronously in a dedicated worker process with custom parameter overrides.
+        Process isolation guarantees 0% GIL contention with the web server event loop.
+        Supports instant parameter-hash deduplication for identical configurations.
         """
         if self.is_running:
             raise RuntimeError("A simulation is already in progress.")
 
         self.is_running = True
         self.latest_error = None
-        job_id = f"sim_{int(time.time() * 1000)}"
+        # Use passed run_id if available, else sequential RUN-N
+        req_id = params.get("run_id")
+        job_id = req_id if req_id else f"RUN-{len(self.runs_history) + 1}"
         self.current_job_id = job_id
+        self.latest_results = None
+        self.progress_status = "Initializing simulation..."
         start_ts = time.time()
+
+        result_file = None
+        process = None
 
         try:
             target_date = params.get("date") or "2026-11-19"
-            loop = asyncio.get_running_loop()
+            param_hash = self.compute_param_hash(target_date, params)
 
-            # Run in worker thread
-            results = await loop.run_in_executor(
-                self.executor,
-                self._execute_simulation_sync,
-                target_date,
-                params,
+            # Check parameter-hash deduplication cache
+            if param_hash in self.cache_by_param_hash:
+                cached_res = self.cache_by_param_hash[param_hash]
+                self.latest_results = cached_res
+                self.latest_params = params
+                self.last_run_time = 0.01
+                self.progress_status = "Completed (Cached)"
+                self.runs_history[job_id] = {
+                    "id": job_id,
+                    "date": target_date,
+                    "params": params,
+                    "results": cached_res,
+                    "runtime": 0.01,
+                    "cached": True,
+                    "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
+                }
+                return cached_res
+
+            temp_fd, result_file = tempfile.mkstemp(prefix=f"sim_res_{job_id}_", suffix=".pkl")
+            os.close(temp_fd)
+
+            ctx = mp.get_context("spawn")
+            queue = ctx.Queue()
+
+            process = ctx.Process(
+                target=_simulation_worker_process,
+                args=(queue, result_file, target_date, params, self.recordings_dir),
+                daemon=True,
             )
+            self._current_process = process
+            process.start()
+
+            results = None
+            while process.is_alive() or not queue.empty():
+                while True:
+                    try:
+                        msg = queue.get_nowait()
+                    except Exception:
+                        break
+
+                    mtype = msg.get("type")
+                    if mtype == "progress":
+                        self.progress_status = msg.get("status", self.progress_status)
+                    elif mtype == "error":
+                        err = msg.get("error", "Simulation worker error")
+                        raise RuntimeError(err)
+                    elif mtype == "done":
+                        res_path = msg.get("file", result_file)
+                        if os.path.exists(res_path):
+                            with open(res_path, "rb") as f:
+                                results = pickle.load(f)
+                            try:
+                                os.remove(res_path)
+                            except Exception:
+                                pass
+
+                if results is not None:
+                    break
+
+                if not process.is_alive():
+                    if process.exitcode != 0 and results is None:
+                        raise RuntimeError(f"Simulation worker process crashed with exit code {process.exitcode}")
+                    break
+
+                await asyncio.sleep(0.1)
+
+            if results is None and result_file and os.path.exists(result_file):
+                try:
+                    with open(result_file, "rb") as f:
+                        results = pickle.load(f)
+                    os.remove(result_file)
+                except Exception:
+                    pass
+
+            if results is None:
+                raise RuntimeError("Simulation finished without producing results.")
+
+            # Store in deduplication cache
+            self.cache_by_param_hash[param_hash] = results
 
             self.latest_results = results
+            self.latest_params = params
             self.last_run_time = time.time() - start_ts
             self.progress_status = "Completed"
+
+            # Save in history for multi-run inspection and clean tab views
+            self.runs_history[job_id] = {
+                "id": job_id,
+                "date": target_date,
+                "params": params,
+                "results": results,
+                "runtime": round(self.last_run_time, 2),
+                "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
+            }
             return results
 
         except Exception as e:
@@ -217,12 +457,35 @@ class SimulationService:
             self.progress_status = f"Failed: {e}"
             raise e
         finally:
+            if process and process.is_alive():
+                try:
+                    process.terminate()
+                    process.join(timeout=0.5)
+                except Exception:
+                    pass
+            self._current_process = None
+            if result_file and os.path.exists(result_file):
+                try:
+                    os.remove(result_file)
+                except Exception:
+                    pass
             self.is_running = False
 
-    def _execute_simulation_sync(self, target_date: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Synchronous execution inside worker thread."""
+    def _execute_simulation_sync(
+        self,
+        target_date: str,
+        params: Dict[str, Any],
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, Any]:
+        """Synchronous execution inside dedicated worker process."""
+        if progress_cb:
+            progress_cb(f"Ingesting and caching market dataset for {target_date}...")
         self._ensure_cache(target_date)
-        self.progress_status = f"Executing simulation across modes for {target_date}..."
+
+        msg = f"Executing simulation across modes for {target_date}..."
+        self.progress_status = msg
+        if progress_cb:
+            progress_cb(msg)
 
         data_path = self._resolve_data_path(target_date)
         glob = params.get("global_settings", {})
@@ -250,11 +513,62 @@ class SimulationService:
             eod_squareoff_time=squareoff_time,
             session_date=target_date,
             strategy_cfg=strategy_cfg,
+            shm_name=f"shm_sim_ohlc_{os.getpid()}",
             cached_equity_df=self.cached_equity_df,
             cached_options_df=self.cached_options_df,
         )
 
-        matrix_results = engine.run_simulation()
+        try:
+            matrix_results = engine.run_simulation()
+        finally:
+            from core.candles.shm_layout import unlink_shm
+            unlink_shm(engine.shm_name)
+
+        if progress_cb:
+            progress_cb("Precomputing chart candles for closed trades...")
+
+        # Precompute candles ONCE for unique underlyings and options across all closed trades
+        unique_underlyings = set()
+        unique_options = set()
+        for m in modes:
+            for tr_obj in engine.closed_trades.get(m, []):
+                tr_dict = tr_obj.to_dict() if hasattr(tr_obj, "to_dict") else tr_obj
+                tr_sym = str(tr_dict.get("symbol", "")).strip()
+                tr_tok = str(tr_dict.get("token", "")).strip()
+                u_tok = str(tr_dict.get("metadata", {}).get("underlying_token", "") or f"NSE:{tr_sym}").strip()
+                opt_sym = str(tr_dict.get("metadata", {}).get("option_symbol", "") or tr_sym).strip()
+                if tr_sym:
+                    unique_underlyings.add((u_tok, tr_sym))
+                if tr_tok:
+                    unique_options.add((tr_tok, opt_sym))
+
+        precomputed_underlyings: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for u_tok, tr_sym in unique_underlyings:
+            try:
+                precomputed_underlyings[(u_tok, tr_sym)] = candle_svc.get_candles(
+                    target_date=target_date,
+                    token=u_tok,
+                    symbol=tr_sym,
+                    is_option=False,
+                    interval_minutes=5,
+                    source_df=self.cached_equity_df,
+                )
+            except Exception:
+                precomputed_underlyings[(u_tok, tr_sym)] = []
+
+        precomputed_options: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for tr_tok, opt_sym in unique_options:
+            try:
+                precomputed_options[(tr_tok, opt_sym)] = candle_svc.get_candles(
+                    target_date=target_date,
+                    token=tr_tok,
+                    symbol=opt_sym,
+                    is_option=True,
+                    interval_minutes=5,
+                    source_df=self.cached_options_df,
+                )
+            except Exception:
+                precomputed_options[(tr_tok, opt_sym)] = []
 
         # Format closed trades & curves per mode & track
         trade_details_by_mode: Dict[str, Dict[str, Any]] = {}
@@ -262,7 +576,7 @@ class SimulationService:
             trade_details_by_mode[m] = {}
             track_trades: Dict[str, List[Dict[str, Any]]] = {}
             for tr_obj in engine.closed_trades.get(m, []):
-                tr_dict = tr_obj.to_dict()
+                tr_dict = tr_obj.to_dict() if hasattr(tr_obj, "to_dict") else tr_obj
                 tr_name = tr_dict.get("track", "unknown")
                 if tr_name not in track_trades:
                     track_trades[tr_name] = []
@@ -287,6 +601,17 @@ class SimulationService:
                     tr_copy["return_pct"] = round(ret_pct * 100.0, 2)
                     tr_copy["brokerage"] = round(fee, 2)
                     tr_copy["net_pnl"] = round(pnl - fee, 2)
+                    tr_copy["date"] = target_date
+
+                    # Attach pre-built 5-minute candles
+                    tr_sym = str(tr.get("symbol", "")).strip()
+                    tr_tok = str(tr.get("token", "")).strip()
+                    u_tok = str(tr.get("metadata", {}).get("underlying_token", "") or f"NSE:{tr_sym}").strip()
+                    opt_sym = str(tr.get("metadata", {}).get("option_symbol", "") or tr_sym).strip()
+
+                    tr_copy["underlying_candles"] = precomputed_underlyings.get((u_tok, tr_sym), [])
+                    tr_copy["option_candles"] = precomputed_options.get((tr_tok, opt_sym), [])
+
                     formatted_trades.append(tr_copy)
 
                 curve = self._build_simulation_curve(formatted_trades)
@@ -382,7 +707,7 @@ class SimulationService:
         }
 
     def _build_simulation_curve(self, trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Cumulative realized PnL curve plotted across time."""
+        """Cumulative realized PnL curve plotted across time with net and gross values."""
         if not trades:
             return []
 
@@ -392,23 +717,30 @@ class SimulationService:
 
         closed_sorted = sorted(closed_trades, key=lambda t: float(t["exit_time"]))
         curve = []
-        cum_pnl = 0.0
+        cum_net = 0.0
+        cum_gross = 0.0
 
         first_ts = float(closed_sorted[0]["exit_time"])
         curve.append({
             "time": datetime.fromtimestamp(first_ts - 60.0, tz=IST).strftime("%H:%M:%S"),
             "timestamp": round(first_ts - 60.0, 1),
+            "net_pnl": 0.0,
+            "gross_pnl": 0.0,
             "pnl": 0.0,
         })
 
         for tr in closed_sorted:
             x_ts = float(tr["exit_time"])
             net_pnl = float(tr.get("net_pnl", 0.0))
-            cum_pnl += net_pnl
+            gross_pnl = float(tr.get("pnl", 0.0) or tr.get("realized_pnl", 0.0))
+            cum_net += net_pnl
+            cum_gross += gross_pnl
             curve.append({
                 "time": datetime.fromtimestamp(x_ts, tz=IST).strftime("%H:%M:%S"),
                 "timestamp": round(x_ts, 1),
-                "pnl": round(cum_pnl, 2),
+                "net_pnl": round(cum_net, 2),
+                "gross_pnl": round(cum_gross, 2),
+                "pnl": round(cum_net, 2),
             })
 
         return curve

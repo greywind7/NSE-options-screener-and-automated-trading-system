@@ -128,22 +128,22 @@
         },
         {
           "type": "composite",
-          "name": "composite_split_ATM",
+          "name": "composite_split_OTM",
           "shared_pool": false,
           "composition": [
             {
               "fast_momentum": [
-                "ATM"
+                "OTM"
               ]
             },
             {
               "trend_pullback": [
-                "ATM"
+                "OTM"
               ]
             },
             {
               "fixed_target": [
-                "ATM"
+                "OTM"
               ]
             }
           ]
@@ -166,6 +166,72 @@
             {
               "fixed_target": [
                 "OTM"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "composite",
+          "name": "composite_shared_fast_momentum",
+          "shared_pool": true,
+          "composition": [
+            {
+              "fast_momentum": [
+                "ATM",
+                "ITM",
+                "OTM"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "composite",
+          "name": "composite_shared_trend_pullback",
+          "shared_pool": true,
+          "composition": [
+            {
+              "trend_pullback": [
+                "ATM",
+                "ITM",
+                "OTM"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "composite",
+          "name": "composite_shared_fixed_target",
+          "shared_pool": true,
+          "composition": [
+            {
+              "fixed_target": [
+                "ATM",
+                "ITM",
+                "OTM"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "composite",
+          "name": "combined_star",
+          "shared_pool": false,
+          "composition": [
+            {
+              "fast_momentum": [
+                "ITM"
+              ]
+            },
+            {
+              "trend_pullback": [
+                "ATM",
+                "ITM",
+                "OTM"
+              ]
+            },
+            {
+              "fixed_target": [
+                "ITM"
               ]
             }
           ]

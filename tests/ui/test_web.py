@@ -10,11 +10,14 @@ import tempfile
 import time
 import unittest
 from aiohttp.test_utils import AioHTTPTestCase, unittest_run_loop
+import polars as pl
 
+from web.candle_service import CandleService
 from web.historical_service import HistoricalService
 from web.live_service import LiveService
 from web.server import AnalyticsWebServer
 from web.simulation_service import SimulationService
+from web.alert_service import AlertService
 
 
 class TestWebServices(unittest.TestCase):
@@ -76,6 +79,29 @@ class TestWebServices(unittest.TestCase):
             f.write(json.dumps(self.closed_trade) + "\n")
             f.write(json.dumps(self.open_trade) + "\n")
 
+        # Create sample equity and option parquet files for candle tests
+        eq_df = pl.DataFrame({
+            "token": ["NSE:RELIANCE", "NSE:RELIANCE"],
+            "symbol": ["RELIANCE", "RELIANCE"],
+            "ltp": [2500.0, 2520.0],
+            "bid": [2499.0, 2519.0],
+            "ask": [2501.0, 2521.0],
+            "volume": [1000, 2000],
+            "exchange_timestamp": [1795060800.0, 1795060830.0],
+        })
+        eq_df.write_parquet(os.path.join(self.session_dir, "equity_ticks.parquet"))
+
+        opt_df = pl.DataFrame({
+            "token": ["NSE_FO:54321", "NSE_FO:54321"],
+            "symbol": ["RELIANCE26NOV2500CE", "RELIANCE26NOV2500CE"],
+            "ltp": [50.0, 55.0],
+            "bid": [49.5, 54.5],
+            "ask": [50.5, 55.5],
+            "volume": [100, 250],
+            "exchange_timestamp": [1795060800.0, 1795060840.0],
+        })
+        opt_df.write_parquet(os.path.join(self.session_dir, "option_depth.parquet"))
+
     def tearDown(self):
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
@@ -106,12 +132,55 @@ class TestWebServices(unittest.TestCase):
         self.assertAlmostEqual(track_stats["mtm_pnl"], 1750.0, places=1)
         # Net PnL = (2500 - 60) realized + 1750 MTM - 30 (open fee) = 4160.0
         self.assertAlmostEqual(track_stats["net_pnl"], 4160.0, places=1)
+        self.assertIn("start_budget", track_stats)
+        self.assertIn("current_budget", track_stats)
+        self.assertEqual(track_stats["start_budget"], 250000.0)
+        self.assertAlmostEqual(track_stats["current_budget"], 254160.0, places=1)
 
         # Test track detail
         detail = live_srv.get_track_detail("paper", "fast_momentum_ATM")
         self.assertEqual(detail["track"], "fast_momentum_ATM")
         self.assertEqual(len(detail["trades"]), 2)
         self.assertTrue(len(detail["performance_curve"]) > 0)
+
+        # Verify dual curve pnl options
+        curve_pt = detail["performance_curve"][-1]
+        self.assertIn("net_pnl", curve_pt)
+        self.assertIn("gross_pnl", curve_pt)
+
+        # Verify open trade quote timestamp info
+        open_tr = [t for t in detail["trades"] if t["status"] == "OPEN"][0]
+        self.assertNotEqual(open_tr["last_quote_time_str"], "-")
+        self.assertIsNotNone(open_tr["last_quote_age_sec"])
+
+    def test_candle_service_aggregation(self):
+        candle_srv = CandleService(recordings_dir=self.test_dir)
+        candles = candle_srv.get_candles(
+            target_date=self.session_date,
+            token="NSE:RELIANCE",
+            symbol="RELIANCE",
+            is_option=False,
+        )
+        self.assertEqual(len(candles), 1)
+        c = candles[0]
+        self.assertEqual(c["open"], 2500.0)
+        self.assertEqual(c["high"], 2520.0)
+        self.assertEqual(c["low"], 2500.0)
+        self.assertEqual(c["close"], 2520.0)
+        self.assertEqual(c["volume"], 1000)
+
+        # Verify option candles
+        opt_candles = candle_srv.get_candles(
+            target_date=self.session_date,
+            token="NSE_FO:54321",
+            symbol="RELIANCE26NOV2500CE",
+            is_option=True,
+        )
+        self.assertEqual(len(opt_candles), 1)
+        oc = opt_candles[0]
+        self.assertEqual(oc["open"], 50.0)
+        self.assertEqual(oc["high"], 55.0)
+        self.assertEqual(oc["close"], 55.0)
 
     def test_historical_service_overview_and_curve(self):
         hist_srv = HistoricalService(recordings_dir=self.test_dir)
@@ -158,6 +227,75 @@ class TestWebServices(unittest.TestCase):
         self.assertEqual(momentum["brokerage_per_order"], 25.0)
         self.assertEqual(len(momentum["enabled_tracks"]), 2)
 
+    def test_param_hash_deduplication(self):
+        sim_srv = SimulationService(recordings_dir=self.test_dir)
+        p1 = {"global_settings": {"capital": 250000.0}, "base_tracks": {"fast_momentum": {"target_pct": 0.15}}}
+        p2 = {"global_settings": {"capital": 250000.0}, "base_tracks": {"fast_momentum": {"target_pct": 0.15}}}
+        p3 = {"global_settings": {"capital": 500000.0}, "base_tracks": {"fast_momentum": {"target_pct": 0.15}}}
+
+        h1 = sim_srv.compute_param_hash("2026-11-19", p1)
+        h2 = sim_srv.compute_param_hash("2026-11-19", p2)
+        h3 = sim_srv.compute_param_hash("2026-11-19", p3)
+
+        self.assertEqual(h1, h2)
+        self.assertNotEqual(h1, h3)
+
+    def test_alert_service_and_caching(self):
+        logs_dir = os.path.join(self.test_dir, "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        alert_file = os.path.join(logs_dir, "alerts_2026-11-19.jsonl")
+
+        sample_alert = {
+            "alert_id": "ALT_123456",
+            "symbol": "RELIANCE",
+            "direction": "BULL",
+            "archetype": "FLAG_BULL_BREAKOUT",
+            "trigger_price": 2505.50,
+            "rvol": 3.45,
+            "clv": 0.82,
+            "atr": 15.20,
+            "timestamp": 1795060800.0,
+        }
+        with open(alert_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps(sample_alert) + "\n")
+
+        svc = AlertService(recordings_dir=self.test_dir, logs_dir=logs_dir)
+        res = svc.get_alerts("2026-11-19")
+        self.assertEqual(res["total_count"], 1)
+        self.assertEqual(len(res["latest_5"]), 1)
+        self.assertEqual(res["latest_5"][0]["symbol"], "RELIANCE")
+        self.assertEqual(res["latest_5"][0]["direction"], "BULL")
+
+        # Test candle retrieval with trigger marker
+        c_res = svc.get_alert_candles("RELIANCE", "2026-11-19", trigger_price=2505.50, trigger_ts=1795060800.0)
+        self.assertEqual(c_res["symbol"], "RELIANCE")
+        self.assertEqual(len(c_res["markers"]), 1)
+        self.assertEqual(c_res["markers"][0]["type"], "TRIGGER")
+
+    def test_simulation_service_cleanup(self):
+        """Verify that simulation service teardown removes all history, caches, and temp SHM."""
+        sim_svc = SimulationService(recordings_dir=self.test_dir)
+        sim_svc.runs_history["RUN-1"] = {"id": "RUN-1", "results": {"test": 123}}
+        sim_svc.cache_by_param_hash["abc"] = {"cached": True}
+        sim_svc.cached_date = "2026-11-19"
+        sim_svc.cached_equity_df = pl.DataFrame({"a": [1]})
+        sim_svc.cached_options_df = pl.DataFrame({"b": [2]})
+        sim_svc.is_running = True
+        sim_svc.progress_status = "Running"
+        sim_svc.latest_results = {"test": 1}
+
+        # Invoke teardown cleanup
+        sim_svc.cleanup()
+
+        self.assertFalse(sim_svc.is_running)
+        self.assertEqual(sim_svc.progress_status, "Idle")
+        self.assertEqual(len(sim_svc.runs_history), 0)
+        self.assertEqual(len(sim_svc.cache_by_param_hash), 0)
+        self.assertIsNone(sim_svc.cached_equity_df)
+        self.assertIsNone(sim_svc.cached_options_df)
+        self.assertIsNone(sim_svc.cached_date)
+        self.assertIsNone(sim_svc.latest_results)
+
 
 class TestWebServerEndpoints(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -177,7 +315,26 @@ class TestWebServerEndpoints(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 200)
         self.assertIn("ANTIGRAVITY", resp.text)
         self.assertIn("Live Telemetry", resp.text)
+        self.assertIn("Live Alerts", resp.text)
+        self.assertIn("view-alerts", resp.text)
+        self.assertIn("alert-chart-modal", resp.text)
         self.assertIn("Simulation Lab", resp.text)
+        self.assertIn("sim-type-batch-btn", resp.text)
+        self.assertIn("sim-runs-list", resp.text)
+        self.assertIn("view-sim-results", resp.text)
+        self.assertIn("nav-tab-sim-results", resp.text)
+        self.assertIn("sr-run-select", resp.text)
+        self.assertIn("sr-params-body", resp.text)
+        self.assertIn("sr-matrix-tbody", resp.text)
+
+    async def test_sim_results_standalone_page_route(self):
+        from aiohttp.test_utils import make_mocked_request
+        req = make_mocked_request("GET", "/sim/results?run_id=RUN-1", app=self.server_inst.app)
+        resp = await self.server_inst.handle_sim_results_page(req)
+        self.assertEqual(resp.status, 200)
+        self.assertIn("Simulation Report", resp.text)
+        self.assertIn("srp-matrix-tbody", resp.text)
+        self.assertIn("srp-params-body", resp.text)
 
     async def test_api_status_route(self):
         from aiohttp.test_utils import make_mocked_request
@@ -195,6 +352,84 @@ class TestWebServerEndpoints(unittest.IsolatedAsyncioTestCase):
         data = json.loads(resp.text)
         self.assertIn("base_tracks", data)
         self.assertIn("global_settings", data)
+
+    async def test_api_chart_candles_route(self):
+        from aiohttp.test_utils import make_mocked_request
+        # Test endpoint with interval returns 5m candles gracefully
+        req = make_mocked_request(
+            "GET",
+            "/api/chart/candles?date=2026-11-19&symbol=RELIANCE&is_option=0&interval=5",
+            app=self.server_inst.app,
+        )
+        resp = await self.server_inst.handle_chart_candles(req)
+        self.assertEqual(resp.status, 200)
+        data = json.loads(resp.text)
+        self.assertEqual(data["symbol"], "RELIANCE")
+        self.assertEqual(data["interval"], 5)
+        self.assertIn("candles", data)
+        self.assertIsInstance(data["candles"], list)
+
+    async def test_api_alerts_route(self):
+        from aiohttp.test_utils import make_mocked_request
+        req = make_mocked_request("GET", "/api/alerts?date=2026-11-19", app=self.server_inst.app)
+        resp = await self.server_inst.handle_alerts(req)
+        self.assertEqual(resp.status, 200)
+        data = json.loads(resp.text)
+        self.assertIn("latest_5", data)
+        self.assertIn("alerts", data)
+        self.assertIn("total_count", data)
+
+    async def test_api_alert_candles_route(self):
+        from aiohttp.test_utils import make_mocked_request
+        req = make_mocked_request(
+            "GET",
+            "/api/alerts/candles?symbol=RELIANCE&date=2026-11-19&trigger_price=2500&trigger_ts=1795060800",
+            app=self.server_inst.app,
+        )
+        resp = await self.server_inst.handle_alert_candles(req)
+        self.assertEqual(resp.status, 200)
+        data = json.loads(resp.text)
+        self.assertEqual(data["symbol"], "RELIANCE")
+        self.assertIn("candles", data)
+        self.assertIn("markers", data)
+        self.assertEqual(len(data["markers"]), 1)
+        self.assertEqual(data["markers"][0]["type"], "TRIGGER")
+
+    async def test_api_sim_clear_and_boot_id_route(self):
+        from aiohttp.test_utils import make_mocked_request
+        # 1. Verify boot id is present in sim status and sim runs
+        req_st = make_mocked_request("GET", "/api/sim/status", app=self.server_inst.app)
+        resp_st = await self.server_inst.handle_sim_status(req_st)
+        self.assertEqual(resp_st.status, 200)
+        data_st = json.loads(resp_st.text)
+        self.assertIn("server_boot_id", data_st)
+        self.assertEqual(data_st["server_boot_id"], self.server_inst.server_boot_id)
+
+        # 2. Add fake run and verify clearing
+        self.server_inst.simulation_service.runs_history["RUN-TEST"] = {
+            "id": "RUN-TEST",
+            "date": "2026-11-19",
+            "runtime": 1.2,
+        }
+        req_runs = make_mocked_request("GET", "/api/sim/runs", app=self.server_inst.app)
+        resp_runs = await self.server_inst.handle_sim_runs_list(req_runs)
+        self.assertEqual(resp_runs.status, 200)
+        data_runs = json.loads(resp_runs.text)
+        self.assertEqual(len(data_runs["runs"]), 1)
+        self.assertEqual(data_runs["server_boot_id"], self.server_inst.server_boot_id)
+
+        # 3. Call POST /api/sim/clear
+        req_clear = make_mocked_request("POST", "/api/sim/clear", app=self.server_inst.app)
+        resp_clear = await self.server_inst.handle_sim_clear(req_clear)
+        self.assertEqual(resp_clear.status, 200)
+        data_clear = json.loads(resp_clear.text)
+        self.assertEqual(data_clear["status"], "cleared")
+        self.assertEqual(len(self.server_inst.simulation_service.runs_history), 0)
+
+    async def test_server_teardown_lifecycle(self):
+        # Verify teardown cleans up simulation and live services safely
+        self.server_inst.teardown()
+        self.assertFalse(self.server_inst.simulation_service.is_running)
 
 
 if __name__ == "__main__":
