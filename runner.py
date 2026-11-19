@@ -345,6 +345,17 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    """Launch Modern Analytics & Simulation Web UI."""
+    from web.server import AnalyticsWebServer
+    host = getattr(args, "host", "0.0.0.0")
+    port = int(getattr(args, "port", 8080))
+    rec_dir = getattr(args, "record_dir", "recordings")
+    server = AnalyticsWebServer(host=host, port=port, recordings_dir=rec_dir)
+    server.run()
+    return 0
+
+
 def cmd_listen(args: argparse.Namespace) -> int:
     """Launch centralized Market Data Listener service."""
     from core.feed.upstox_listener import MarketDataListener
@@ -1339,6 +1350,12 @@ def main():
     # Command: test
     subparsers.add_parser("test", help="Run automated test suites")
 
+    # Command: web
+    p_web = subparsers.add_parser("web", help="Launch modern Analytics & Simulation Web UI")
+    p_web.add_argument("--host", default="0.0.0.0", help="Web host (default: 0.0.0.0)")
+    p_web.add_argument("--port", type=int, default=8080, help="Web port (default: 8080)")
+    p_web.add_argument("--record-dir", default="recordings", help="Recordings directory (default: recordings)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1371,6 +1388,7 @@ def main():
         "status": cmd_status,
         "stop": cmd_stop,
         "test": cmd_test,
+        "web": cmd_web,
     }
 
     code = dispatch[args.command](args)

@@ -121,12 +121,18 @@ class ColumnarSimEngine:
         entry_freeze_time: Optional[str] = None,
         eod_squareoff_time: Optional[str] = None,
         brokerage_per_order: Optional[float] = None,
+        strategy_cfg: Optional[Dict[str, Any]] = None,
+        cached_equity_df: Optional[pl.DataFrame] = None,
+        cached_options_df: Optional[pl.DataFrame] = None,
     ):
         from common.tracks.base_track import _parse_time_to_minutes
         from common.tracks.factory import get_enabled_track_names
         from core.config.config_loader import get_config_manager
         self.data_path = data_path
-        self.tracks = tracks or get_enabled_track_names()
+        self.strategy_cfg = strategy_cfg
+        self._cached_equity_df = cached_equity_df
+        self._cached_options_df = cached_options_df
+        self.tracks = tracks or get_enabled_track_names(strategy_cfg)
         self.modes = [m.strip() for m in modes] if modes else ["paper", "paper_delayed"]
         self.capital = capital
         self.session_date = session_date
@@ -134,7 +140,11 @@ class ColumnarSimEngine:
 
         cfg = get_config_manager()
         exec_cfg = cfg.execution.get("execution", {})
-        strat_momentum = cfg.strategy.get("strategies", {}).get("momentum", {})
+        strat_momentum = (
+            self.strategy_cfg.get("strategies", {}).get("momentum", {})
+            if self.strategy_cfg and "strategies" in self.strategy_cfg
+            else (self.strategy_cfg.get("momentum", {}) if self.strategy_cfg else cfg.strategy.get("strategies", {}).get("momentum", {}))
+        )
         delayed_cfg = exec_cfg.get("paper_delayed", {})
         paper_cfg = exec_cfg.get("paper", {})
         sim_cfg = exec_cfg.get("sim", {})
@@ -305,6 +315,13 @@ class ColumnarSimEngine:
         Ingest equity ticks and option depth files.
         Separates equity underlyings and options depth records, sorting each by exchange_timestamp.
         """
+        if self._cached_equity_df is not None:
+            self.df_equity = self._cached_equity_df
+            self.df_options = self._cached_options_df
+            if self.df_options is not None and len(self.df_options) > 0:
+                self._build_options_index()
+            return self.df_equity, self.df_options
+
         files = self._collect_files()
         if not files:
             raise FileNotFoundError(f"No recording files found at: {self.data_path}")
@@ -380,8 +397,12 @@ class ColumnarSimEngine:
                 "ask_qtys": ask_qtys,
             }
 
-            # Register in options catalog: try contract string parsing first, then manifest token map
+            # Register in options catalog: try contract string parsing first, then manifest token map, then row symbol
             opt_details = parse_option_details(norm_token) or self.token_map.get(norm_token)
+            if not opt_details and "symbol" in sub_df.columns and len(sub_df) > 0:
+                first_sym = sub_df["symbol"][0]
+                if first_sym:
+                    opt_details = parse_option_details(first_sym)
             if opt_details:
                 und, strike, otype = opt_details
                 und = und.upper()
@@ -514,6 +535,7 @@ class ColumnarSimEngine:
         tracks = create_tracks(
             context=context,
             track_filter=self.tracks,
+            strategy_cfg=self.strategy_cfg,
             entry_freeze_time=self.entry_freeze_time,
             eod_squareoff_time=self.eod_squareoff_time,
         )

@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Antigravity Analytics // 2.0</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+  <!-- =========================================================================
+       HEADER / NAVBAR
+       ========================================================================= -->
+  <header class="header-bar">
+    <div class="brand-section">
+      <div class="brand-logo">AG</div>
+      <div>
+        <span class="brand-title">ANTIGRAVITY</span>
+        <span class="brand-tag">Analytics 2.0</span>
+      </div>
+    </div>
+
+    <!-- Navigation Tabs -->
+    <nav class="nav-tabs">
+      <button class="tab-btn active" data-tab="live">
+        <span style="color:var(--accent-red); font-size:14px;">●</span> Live Telemetry
+      </button>
+      <button class="tab-btn" data-tab="historical">
+        <span>📜</span> Historical Review
+      </button>
+      <button class="tab-btn" data-tab="simulation">
+        <span style="color:var(--accent-cyan); font-size:14px;">⚡</span> Simulation Lab
+      </button>
+    </nav>
+
+    <!-- Status & Clock -->
+    <div class="status-section">
+      <div class="status-pill">
+        <span id="socket-dot" class="pulse-dot idle"></span>
+        <span id="socket-text">Connecting...</span>
+      </div>
+      <div id="market-clock" class="clock-display">00:00:00 IST</div>
+    </div>
+  </header>
+
+  <!-- =========================================================================
+       MAIN SPA CONTAINER
+       ========================================================================= -->
+  <main class="main-container">
+
+    <!-- =======================================================================
+         TAB 1: LIVE TELEMETRY & MTM
+         ======================================================================= -->
+    <section id="view-live" class="tab-view active">
+      <!-- Live Overview Stat Cards -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Net P&L (Total)</div>
+          <div id="live-stat-net-pnl" class="stat-value">₹0.00</div>
+          <div id="live-stat-mtm" class="stat-subtext">MTM: ₹0.00</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Win Rate</div>
+          <div id="live-stat-win-rate" class="stat-value">0.0%</div>
+          <div class="stat-subtext">Closed Trades (>+2.5%)</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Active Open Positions</div>
+          <div id="live-stat-open-pos" class="stat-value">0</div>
+          <div class="stat-subtext">Streaming Options Depth</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Closed Trades</div>
+          <div id="live-stat-closed" class="stat-value">0 Trades</div>
+          <div class="stat-subtext">Journalled Today</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Est. Brokerage</div>
+          <div id="live-stat-fees" class="stat-value">₹0.00</div>
+          <div class="stat-subtext">₹60 Round-Trip</div>
+        </div>
+      </div>
+
+      <!-- Controls & Mode Filter -->
+      <div class="controls-bar">
+        <div class="filter-group">
+          <span class="filter-label">Filter Execution Mode:</span>
+          <div class="pill-group">
+            <button class="pill-btn live-mode-pill active" data-mode="all">All Modes</button>
+            <button class="pill-btn live-mode-pill" data-mode="paper">Paper</button>
+            <button class="pill-btn live-mode-pill" data-mode="paper_delayed">Paper Delayed</button>
+            <button class="pill-btn live-mode-pill" data-mode="live">Live Broker</button>
+          </div>
+        </div>
+        <div style="font-size:11px; color:var(--text-dim);">
+          Click any track row below to inspect its performance curve and trades.
+        </div>
+      </div>
+
+      <!-- Track Matrix Table -->
+      <div class="table-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <span>🔴 Live Strategy Tracks Performance</span>
+          </div>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Mode</th>
+                <th>Track Name</th>
+                <th>Open</th>
+                <th class="text-center">Trades</th>
+                <th class="text-center">Wins</th>
+                <th class="text-center">B/E</th>
+                <th class="text-center">Losses</th>
+                <th class="text-center">Win Rate</th>
+                <th class="text-right">Gross Realized</th>
+                <th class="text-right">Brokerage</th>
+                <th class="text-right">MTM (Unrealized)</th>
+                <th class="text-right">Net P&L</th>
+              </tr>
+            </thead>
+            <tbody id="live-track-tbody">
+              <tr><td colspan="12" class="text-center" style="padding:24px; color:var(--text-dim);">Loading active sessions...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Selected Track Detail Panel -->
+      <div id="live-detail-panel" class="detail-panel" style="display:none;">
+        <div class="detail-header">
+          <div class="detail-title-group">
+            <span id="live-detail-mode-badge" class="badge">MODE</span>
+            <span id="live-detail-title" class="detail-title">Track Name</span>
+          </div>
+          <div>
+            <span class="stat-label">Net Performance:</span>
+            <span id="live-detail-net" class="stat-value" style="font-size:18px; margin-left:8px;">₹0.00</span>
+          </div>
+        </div>
+
+        <!-- Canvas Chart Box -->
+        <div class="chart-box">
+          <div class="chart-header">
+            <span class="chart-title">Intraday Performance Curve (Realized + MTM across the Day)</span>
+          </div>
+          <canvas id="live-chart-canvas" class="chart-canvas"></canvas>
+        </div>
+
+        <!-- Trades Log Table -->
+        <div class="table-panel">
+          <div class="panel-header">
+            <div class="panel-title"><span>📋 Individual Trade Journal & Active Depth</span></div>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Trade ID</th>
+                  <th>Symbol</th>
+                  <th>Contract</th>
+                  <th class="text-center">Qty</th>
+                  <th class="text-right">Entry Price</th>
+                  <th class="text-center">Entry Time</th>
+                  <th class="text-right">Exit / Bid</th>
+                  <th class="text-center">Exit Time</th>
+                  <th class="text-center">Status</th>
+                  <th class="text-center">Reason</th>
+                  <th class="text-right">Return %</th>
+                  <th class="text-right">Brokerage</th>
+                  <th class="text-right">Net P&L</th>
+                </tr>
+              </thead>
+              <tbody id="live-trades-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =======================================================================
+         TAB 2: HISTORICAL REVIEW
+         ======================================================================= -->
+    <section id="view-historical" class="tab-view">
+      <!-- Date Selector & Filter Controls Bar -->
+      <div class="controls-bar">
+        <div class="filter-group">
+          <span class="filter-label">Select Session Date:</span>
+          <select id="historical-date-select" class="custom-select"></select>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">Filter Mode:</span>
+          <div class="pill-group">
+            <button class="pill-btn hist-mode-pill active" data-mode="all">All Modes</button>
+            <button class="pill-btn hist-mode-pill" data-mode="paper">Paper</button>
+            <button class="pill-btn hist-mode-pill" data-mode="paper_delayed">Paper Delayed</button>
+            <button class="pill-btn hist-mode-pill" data-mode="live">Live</button>
+            <button class="pill-btn hist-mode-pill" data-mode="sim">Sim</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Historical Overview Stat Cards -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Historical Net P&L</div>
+          <div id="hist-stat-net-pnl" class="stat-value">₹0.00</div>
+          <div class="stat-subtext">Net after Brokerage</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Win Rate</div>
+          <div id="hist-stat-win-rate" class="stat-value">0.0%</div>
+          <div class="stat-subtext">Return > +2.5%</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Total Trades</div>
+          <div id="hist-stat-trades" class="stat-value">0 Trades</div>
+          <div class="stat-subtext">Session Total</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Total Brokerage</div>
+          <div id="hist-stat-fees" class="stat-value">₹0.00</div>
+          <div class="stat-subtext">Estimated Round-Trip</div>
+        </div>
+      </div>
+
+      <!-- Historical Track Matrix Table -->
+      <div class="table-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <span>📜 Historical Track Performance Matrix</span>
+          </div>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Mode</th>
+                <th>Track Name</th>
+                <th class="text-center">Trades</th>
+                <th class="text-center">Wins</th>
+                <th class="text-center">B/E</th>
+                <th class="text-center">Losses</th>
+                <th class="text-center">Win Rate</th>
+                <th class="text-right">Gross P&L</th>
+                <th class="text-right">Brokerage</th>
+                <th class="text-right">Net P&L</th>
+              </tr>
+            </thead>
+            <tbody id="hist-track-tbody">
+              <tr><td colspan="10" class="text-center" style="padding:24px; color:var(--text-dim);">Select a date above to inspect historical performance.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Historical Detail Panel -->
+      <div id="historical-detail-panel" class="detail-panel" style="display:none;">
+        <div class="detail-header">
+          <div class="detail-title-group">
+            <span id="hist-detail-mode-badge" class="badge">MODE</span>
+            <span id="hist-detail-title" class="detail-title">Track Name</span>
+          </div>
+          <div>
+            <span class="stat-label">Net Performance:</span>
+            <span id="hist-detail-net" class="stat-value" style="font-size:18px; margin-left:8px;">₹0.00</span>
+          </div>
+        </div>
+
+        <!-- Canvas Chart Box -->
+        <div class="chart-box">
+          <div class="chart-header">
+            <span class="chart-title">Intraday Performance Curve Across Historical Session</span>
+          </div>
+          <canvas id="historical-chart-canvas" class="chart-canvas"></canvas>
+        </div>
+
+        <!-- Trades Log Table -->
+        <div class="table-panel">
+          <div class="panel-header">
+            <div class="panel-title"><span>📋 Journalled Trades</span></div>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Trade ID</th>
+                  <th>Symbol</th>
+                  <th>Contract</th>
+                  <th class="text-center">Qty</th>
+                  <th class="text-right">Entry Price</th>
+                  <th class="text-center">Entry Time</th>
+                  <th class="text-right">Exit Price</th>
+                  <th class="text-center">Exit Time</th>
+                  <th class="text-center">Exit Reason</th>
+                  <th class="text-right">Return %</th>
+                  <th class="text-right">Brokerage</th>
+                  <th class="text-right">Net P&L</th>
+                </tr>
+              </thead>
+              <tbody id="hist-trades-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =======================================================================
+         TAB 3: SIMULATION LAB & TRACK COMPOSER
+         ======================================================================= -->
+    <section id="view-simulation" class="tab-view">
+      <div class="sim-grid">
+        <!-- Sidebar: Global Parameters & Execution Controls -->
+        <aside class="sim-sidebar">
+          <div class="form-card">
+            <div class="panel-title" style="margin-bottom:4px;">
+              <span>⚡ Simulation Target & Budget</span>
+            </div>
+
+            <!-- Date Select -->
+            <div class="form-group">
+              <label class="form-label">Simulation Recording Date</label>
+              <select id="sim-date-select" class="custom-select" style="width:100%;"></select>
+            </div>
+
+            <!-- Execution Modes -->
+            <div class="form-group">
+              <label class="form-label">Execution Modes</label>
+              <div class="checkbox-group">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="sim-mode-paper" checked /> Paper
+                </label>
+                <label class="checkbox-label">
+                  <input type="checkbox" id="sim-mode-delayed" checked /> Paper Delayed
+                </label>
+              </div>
+            </div>
+
+            <!-- Capital & Delay -->
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Capital / Track (₹)</label>
+                <input type="number" id="sim-capital" class="form-input" value="250000" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Min Pole %</label>
+                <input type="number" id="sim-min-pole" class="form-input" value="0.50" step="0.05" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Min Delay (ms)</label>
+                <input type="number" id="sim-min-delay" class="form-input" value="200" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Max Delay (ms)</label>
+                <input type="number" id="sim-max-delay" class="form-input" value="500" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Fee / Order (₹)</label>
+                <input type="number" id="sim-brokerage" class="form-input" value="30" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Entry Freeze</label>
+                <input type="text" id="sim-freeze-time" class="form-input" value="15:00" />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">EOD Square-off Time</label>
+              <input type="text" id="sim-squareoff-time" class="form-input" value="15:15" />
+            </div>
+
+            <!-- Custom Composed Tracks Section -->
+            <div class="form-group" style="margin-top:8px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <label class="form-label">Custom Composed Tracks</label>
+                <button type="button" id="sim-add-track-btn" class="btn btn-secondary btn-sm">+ Add Track</button>
+              </div>
+              <div id="sim-custom-tracks-container" style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
+                <span style="color:var(--text-dim); font-size:11px;">No custom tracks composed yet.</span>
+              </div>
+            </div>
+
+            <!-- Run & Reset Buttons -->
+            <div style="display:flex; flex-direction:column; gap:8px; margin-top:12px;">
+              <button type="button" id="sim-run-btn" class="btn btn-primary" style="padding:12px;">
+                <span>🚀 Run Historical Simulation</span>
+              </button>
+              <button type="button" id="sim-reset-btn" class="btn btn-secondary btn-sm">
+                <span>🔄 Reset to Config Defaults</span>
+              </button>
+              <div id="sim-status-text" style="font-size:11px; color:var(--text-dim); text-align:center;">
+                Parquet dataset will be cached in memory for instant re-runs.
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Main Area: Configurable Base Tracks & Results Matrix -->
+        <main class="sim-main">
+          <!-- Configurable Base Tracks Cards -->
+          <div class="table-panel">
+            <div class="panel-header">
+              <div class="panel-title"><span>🛠️ Configure Strategy Archetype Parameters</span></div>
+            </div>
+            <div style="padding:14px;">
+
+              <!-- Track 1: Fast Momentum -->
+              <div class="track-card">
+                <div class="track-card-header">
+                  <div class="track-card-title">
+                    <span style="color:var(--accent-cyan);">⚡ Fast Momentum Track</span>
+                  </div>
+                  <div class="checkbox-label">
+                    <input type="checkbox" id="fm-enable-toggle" checked /> Enabled
+                  </div>
+                </div>
+                <div class="track-card-body">
+                  <div class="form-group">
+                    <label class="form-label">Target %</label>
+                    <input type="number" id="fm-target" class="form-input" value="15.0" step="0.5" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Stop Loss %</label>
+                    <input type="number" id="fm-sl" class="form-input" value="5.0" step="0.5" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Breakeven Trigger %</label>
+                    <input type="number" id="fm-be" class="form-input" value="2.5" step="0.5" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Target Decay (s)</label>
+                    <input type="number" id="fm-decay-sec" class="form-input" value="900" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Decay Floor %</label>
+                    <input type="number" id="fm-decay-floor" class="form-input" value="2.5" step="0.5" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Stagnation Timeout (s)</label>
+                    <input type="number" id="fm-stagnation" class="form-input" value="1800" />
+                  </div>
+                  <div class="form-group" style="grid-column: 1 / -1;">
+                    <label class="form-label">Strike Modes</label>
+                    <div class="checkbox-group">
+                      <label class="checkbox-label"><input type="checkbox" id="fm-mode-itm" checked /> ITM</label>
+                      <label class="checkbox-label"><input type="checkbox" id="fm-mode-atm" checked /> ATM</label>
+                      <label class="checkbox-label"><input type="checkbox" id="fm-mode-otm" checked /> OTM</label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Track 2: Trend Pullback -->
+              <div class="track-card">
+                <div class="track-card-header">
+                  <div class="track-card-title">
+                    <span style="color:var(--accent-green);">📈 Trend Pullback Track</span>
+                  </div>
+                  <div class="checkbox-label">
+                    <input type="checkbox" id="tp-enable-toggle" checked /> Enabled
+                  </div>
+                </div>
+                <div class="track-card-body">
+                  <div class="form-group">
+                    <label class="form-label">Target %</label>
+                    <input type="number" id="tp-target" class="form-input" value="25.0" step="0.5" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Stop Loss %</label>
+                    <input type="number" id="tp-sl" class="form-input" value="5.0" step="0.5" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Trailing Step %</label>
+                    <input type="number" id="tp-trailing-step" class="form-input" value="1.0" step="0.1" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Breakeven Trigger %</label>
+                    <input type="number" id="tp-be" class="form-input" value="2.5" step="0.5" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Timeout (s)</label>
+                    <input type="number" id="tp-timeout" class="form-input" value="3600" />
+                  </div>
+                  <div class="form-group" style="grid-column: 1 / -1;">
+                    <label class="form-label">Strike Modes</label>
+                    <div class="checkbox-group">
+                      <label class="checkbox-label"><input type="checkbox" id="tp-mode-itm" checked /> ITM</label>
+                      <label class="checkbox-label"><input type="checkbox" id="tp-mode-atm" checked /> ATM</label>
+                      <label class="checkbox-label"><input type="checkbox" id="tp-mode-otm" checked /> OTM</label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Track 3: Fixed Target -->
+              <div class="track-card">
+                <div class="track-card-header">
+                  <div class="track-card-title">
+                    <span style="color:var(--accent-amber);">🎯 Fixed Target Track</span>
+                  </div>
+                  <div class="checkbox-label">
+                    <input type="checkbox" id="ft-enable-toggle" checked /> Enabled
+                  </div>
+                </div>
+                <div class="track-card-body">
+                  <div class="form-group">
+                    <label class="form-label">Target %</label>
+                    <input type="number" id="ft-target" class="form-input" value="15.0" step="0.5" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Stop Loss %</label>
+                    <input type="number" id="ft-sl" class="form-input" value="5.0" step="0.5" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Fixed Target (₹)</label>
+                    <input type="number" id="ft-fixed-inr" class="form-input" value="750" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Breakeven Trigger %</label>
+                    <input type="number" id="ft-be" class="form-input" value="2.5" step="0.5" />
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Timeout (s)</label>
+                    <input type="number" id="ft-timeout" class="form-input" value="1800" />
+                  </div>
+                  <div class="form-group" style="grid-column: 1 / -1;">
+                    <label class="form-label">Strike Modes</label>
+                    <div class="checkbox-group">
+                      <label class="checkbox-label"><input type="checkbox" id="ft-mode-itm" checked /> ITM</label>
+                      <label class="checkbox-label"><input type="checkbox" id="ft-mode-atm" checked /> ATM</label>
+                      <label class="checkbox-label"><input type="checkbox" id="ft-mode-otm" checked /> OTM</label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Simulation Results Panel (Displayed after running) -->
+          <div id="sim-results-panel" style="display:none;">
+            <div class="controls-bar" style="margin-bottom:14px;">
+              <div class="filter-group">
+                <span class="filter-label">Filter Results by Mode:</span>
+                <div class="pill-group">
+                  <button class="pill-btn sim-mode-pill active" data-mode="all">All Modes</button>
+                  <button class="pill-btn sim-mode-pill" data-mode="paper">Paper</button>
+                  <button class="pill-btn sim-mode-pill" data-mode="paper_delayed">Paper Delayed</button>
+                </div>
+              </div>
+              <div style="font-size:11px; color:var(--text-dim);">
+                Click any track row below to view its simulated performance curve and trades.
+              </div>
+            </div>
+
+            <!-- Matrix Table -->
+            <div class="table-panel">
+              <div class="panel-header">
+                <div class="panel-title"><span>📊 Simulation Results Matrix</span></div>
+              </div>
+              <div class="table-wrapper">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Mode</th>
+                      <th>Track</th>
+                      <th class="text-center">Trades</th>
+                      <th class="text-center">Wins</th>
+                      <th class="text-center">B/E</th>
+                      <th class="text-center">Losses</th>
+                      <th class="text-center">Win Rate</th>
+                      <th class="text-right">Gross P&L</th>
+                      <th class="text-right">Brokerage</th>
+                      <th class="text-right">Net P&L</th>
+                      <th class="text-right">End Budget</th>
+                      <th class="text-right">Return %</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sim-matrix-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Drilldown Detail Panel -->
+            <div id="sim-detail-panel" class="detail-panel" style="display:none;">
+              <div class="detail-header">
+                <div class="detail-title-group">
+                  <span id="sim-detail-mode-badge" class="badge">MODE</span>
+                  <span id="sim-detail-title" class="detail-title">Track Name</span>
+                </div>
+              </div>
+
+              <!-- Canvas Curve -->
+              <div class="chart-box">
+                <div class="chart-header">
+                  <span class="chart-title">Simulated Intraday Cumulative Net P&L Curve</span>
+                </div>
+                <canvas id="sim-chart-canvas" class="chart-canvas"></canvas>
+              </div>
+
+              <!-- Simulated Trade Log Table -->
+              <div class="table-panel">
+                <div class="panel-header">
+                  <div class="panel-title"><span>📋 Simulated Trades Executed</span></div>
+                </div>
+                <div class="table-wrapper">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Trade ID</th>
+                        <th>Symbol</th>
+                        <th>Contract</th>
+                        <th class="text-center">Qty</th>
+                        <th class="text-right">Entry Price</th>
+                        <th class="text-center">Entry Time</th>
+                        <th class="text-right">Exit Price</th>
+                        <th class="text-center">Exit Time</th>
+                        <th class="text-center">Exit Reason</th>
+                        <th class="text-right">Return %</th>
+                        <th class="text-right">Brokerage</th>
+                        <th class="text-right">Net P&L</th>
+                      </tr>
+                    </thead>
+                    <tbody id="sim-trades-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </main>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- =========================================================================
+       MODAL: TRACK COMPOSER
+       ========================================================================= -->
+  <div id="composer-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <span class="modal-title">Compose Custom Track Variant</span>
+        <button id="composer-modal-close" class="close-btn">&times;</button>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Track Identifier Name</label>
+        <input type="text" id="composer-name" class="form-input" placeholder="e.g. custom_scalp_ITM" />
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Base Archetype</label>
+          <select id="composer-arch" class="custom-select" style="width:100%;">
+            <option value="fast_momentum">Fast Momentum</option>
+            <option value="trend_pullback">Trend Pullback</option>
+            <option value="fixed_target">Fixed Target</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Strike Mode</label>
+          <select id="composer-mode" class="custom-select" style="width:100%;">
+            <option value="ATM">ATM (At the Money)</option>
+            <option value="ITM">ITM (In the Money)</option>
+            <option value="OTM">OTM (Out of Money)</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Target %</label>
+          <input type="number" id="composer-target" class="form-input" value="20.0" step="0.5" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Stop Loss %</label>
+          <input type="number" id="composer-sl" class="form-input" value="6.0" step="0.5" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Timeout (Seconds)</label>
+        <input type="number" id="composer-timeout" class="form-input" value="2400" />
+      </div>
+      <input type="hidden" id="composer-type" value="base" />
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:10px;">
+        <button id="composer-modal-save" class="btn btn-primary">Save Track to Simulation</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Scripts -->
+  <script src="/static/js/chart_engine.js"></script>
+  <script src="/static/js/live_tab.js"></script>
+  <script src="/static/js/historical_tab.js"></script>
+  <script src="/static/js/simulation_tab.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
