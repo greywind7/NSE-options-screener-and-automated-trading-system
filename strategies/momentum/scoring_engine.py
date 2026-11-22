@@ -35,12 +35,28 @@ class SymbolMetadata:
     status: Optional[str] = None
     status_bar_idx: int = -1
     breakout_bars: List[int] = field(default_factory=list)
+    pole_bars: List[int] = field(default_factory=list)
 
     def has_breakout_in_last_n_bars(self, n: int, current_bar_idx: int) -> bool:
-        for b in self.breakout_bars[-n:]:
+        for b in reversed(self.breakout_bars):
             if current_bar_idx - b < n:
                 return True
+            else:
+                break
         return False
+
+    def has_pole_in_last_n_bars(self, n: int, current_bar_idx: int) -> bool:
+        for b in reversed(self.pole_bars):
+            if current_bar_idx - b < n:
+                return True
+            else:
+                break
+        return False
+
+    def record_pole(self, bar_idx: int) -> None:
+        self.pole_bars.append(bar_idx)
+        if len(self.pole_bars) > 20:
+            self.pole_bars = self.pole_bars[-20:]
 
     def record_breakout(self, bar_idx: int) -> None:
         self.breakout_bars.append(bar_idx)
@@ -160,13 +176,51 @@ class ScoringEngine3:
                 return candle
         return self.candles[idx, bar_idx].copy()
 
+    def _has_recent_pole(self, sym_idx: int, bar_idx: int, n: int = 5) -> bool:
+        """
+        Check if any candidate pole was formed within the last n bars.
+        Used to prevent entering pure breakouts during contraction.
+        """
+        start_bar = max(0, bar_idx - n)
+        raw_bars = self.candles[sym_idx, start_bar:bar_idx]
+        bars = [b for b in raw_bars if b["open"] > 0]
+        n_bars = len(bars)
+        if n_bars < 1:
+            return False
+
+        for length in (3, 2, 1):
+            for i in range(n_bars - length + 1):
+                slice_b = bars[i : i + length]
+                all_green = all(float(b["close"]) >= float(b["open"]) for b in slice_b)
+                all_red = all(float(b["close"]) <= float(b["open"]) for b in slice_b)
+                if not (all_green or all_red):
+                    continue
+
+                low = float(min(b["low"] for b in slice_b))
+                high = float(max(b["high"] for b in slice_b))
+                height = high - low
+                if low <= 0.0 or height <= 0.01:
+                    continue
+                if (height / low) < self.min_pole_pct:
+                    continue
+
+                # Pole must have institutional volume thrust (rvol >= min_volume_thrust_mult)
+                has_thrust = any(float(b["rvol"]) >= self.min_volume_thrust_mult for b in slice_b)
+                if has_thrust:
+                    return True
+
+        return False
+
     def _check_flag_breakout(
         self, symbol: str, idx: int, bar_idx: int, c: np.void, rvol: float, atr: float, now_ts: float
     ) -> Optional[SetupAlert]:
         """
         Archetype 1: Bull / Bear Flag Breakout (Contraction Breakout).
         Searches dynamically across the last up to 7 candles to detect the most recent pole (1 to 3 candles max),
-        verifies pole volume > consolidation volume, consolidation >= 2 candles, and 50% Retracement Check
+        refines pole boundaries:
+        - Expands backwards on earlier side if new candle adds >= 33% pole length without significant volume loss.
+        - Trims latest candle if removing it still leaves a valid pole and increases average pole volume per candle.
+        Verifies average pole volume >= 2.0x consolidation volume, consolidation >= 2 candles, and 50% Retracement Check
         evaluated FIRST before OLS regression target.
         """
         if bar_idx < 3:
@@ -174,11 +228,16 @@ class ScoringEngine3:
 
         # Lookback up to 7 closed candles (filtering for populated historical bars)
         lookback = min(7, bar_idx)
-        raw_hist = self.candles[idx, (bar_idx - lookback) : bar_idx]
-        hist_candles = [b for b in raw_hist if b["open"] > 0]
-        n_hist = len(hist_candles)
+        start_idx = bar_idx - lookback
+        raw_hist = self.candles[idx, start_idx : bar_idx]
+        hist_tuples = [(start_idx + offset, b) for offset, b in enumerate(raw_hist) if b["open"] > 0]
+        n_hist = len(hist_tuples)
         if n_hist < 3:
             return None
+        hist_candles = [t[1] for t in hist_tuples]
+        hist_bar_indices = [t[0] for t in hist_tuples]
+
+        evaluated_pairs = set()
 
         # Search for candidate pole start index (p_start) backwards to identify the most recent pole
         # Consolidation requires at least 2 candles: p_end = p_start + pole_len <= n_hist - 2
@@ -188,17 +247,100 @@ class ScoringEngine3:
                 if p_end > n_hist - 2:
                     continue
 
-                contraction = hist_candles[p_end:]
+                init_pole = hist_candles[p_start:p_end]
+                is_bull_cand = all(float(b["close"]) >= float(b["open"]) for b in init_pole)
+                is_bear_cand = all(float(b["close"]) <= float(b["open"]) for b in init_pole)
+                if not (is_bull_cand or is_bear_cand):
+                    continue
+
+                init_low = float(min(b["low"] for b in init_pole))
+                init_high = float(max(b["high"] for b in init_pole))
+                init_height = init_high - init_low
+                if init_height <= 0.01 or init_low <= 0.0:
+                    continue
+                if (init_height / init_low) < self.min_pole_pct:
+                    continue
+
+                cur_direction = "BULL" if is_bull_cand else "BEAR"
+                cur_p_start = p_start
+                cur_p_end = p_end
+
+                # Refinement 1: Try extending pole backwards on earlier side (cur_p_start - 1).
+                # Number of pole candles capped at 3.
+                while (cur_p_end - cur_p_start) < 3 and cur_p_start > 0:
+                    prev_bar = hist_candles[cur_p_start - 1]
+                    if cur_direction == "BULL" and not (float(prev_bar["close"]) >= float(prev_bar["open"])):
+                        break
+                    if cur_direction == "BEAR" and not (float(prev_bar["close"]) <= float(prev_bar["open"])):
+                        break
+
+                    cur_pole = hist_candles[cur_p_start:cur_p_end]
+                    cur_low = float(min(b["low"] for b in cur_pole))
+                    cur_high = float(max(b["high"] for b in cur_pole))
+                    cur_height = cur_high - cur_low
+                    cur_avg_vol = float(np.mean([float(b["volume"]) for b in cur_pole]))
+
+                    test_pole = hist_candles[cur_p_start - 1 : cur_p_end]
+                    test_low = float(min(b["low"] for b in test_pole))
+                    test_high = float(max(b["high"] for b in test_pole))
+                    test_height = test_high - test_low
+                    test_avg_vol = float(np.mean([float(b["volume"]) for b in test_pole]))
+
+                    # Does including it increase the pole length significantly? At least 33%?
+                    height_increase_pct = (test_height - cur_height) / max(0.01, cur_height)
+                    if height_increase_pct < 0.33:
+                        break
+
+                    # Does including it increase average volume or not decrease it significantly?
+                    if test_avg_vol < 0.90 * cur_avg_vol:
+                        break
+
+                    cur_p_start -= 1
+
+                # Refinement 2: Check if latest pole candle is actually a contraction candle.
+                # If removing it increases average volume per candle and still leaves a valid pole.
+                while (cur_p_end - cur_p_start) > 1:
+                    cur_pole = hist_candles[cur_p_start:cur_p_end]
+                    cur_avg_vol = float(np.mean([float(b["volume"]) for b in cur_pole]))
+
+                    trimmed_pole = hist_candles[cur_p_start : cur_p_end - 1]
+                    trimmed_low = float(min(b["low"] for b in trimmed_pole))
+                    trimmed_high = float(max(b["high"] for b in trimmed_pole))
+                    trimmed_height = trimmed_high - trimmed_low
+                    if trimmed_low <= 0.0 or trimmed_height <= 0.01:
+                        break
+                    trimmed_pct = trimmed_height / trimmed_low
+
+                    # Still a valid pole?
+                    if trimmed_pct < self.min_pole_pct:
+                        break
+
+                    trimmed_avg_vol = float(np.mean([float(b["volume"]) for b in trimmed_pole]))
+                    # Does removing that candle volume increase our average volume per candle in the pole?
+                    if trimmed_avg_vol > cur_avg_vol:
+                        cur_p_end -= 1
+                    else:
+                        break
+
+                if (cur_p_start, cur_p_end) in evaluated_pairs:
+                    continue
+                evaluated_pairs.add((cur_p_start, cur_p_end))
+
+                pole = hist_candles[cur_p_start:cur_p_end]
+                contraction = hist_candles[cur_p_end:]
                 if len(contraction) < 2 or len(contraction) > self.max_consolidation_candles:
                     continue
 
-                pole = hist_candles[p_start:p_end]
-
                 pole_vol = float(np.mean([float(b["volume"]) for b in pole]))
                 contr_vol = float(np.mean([float(b["volume"]) for b in contraction]))
-                # Pole must have large volume and consolidation comparatively lower volume
-                if pole_vol <= contr_vol:
+
+                # Invariant: Average volume in pole must be at least twice that of contraction
+                if pole_vol < 2.0 * contr_vol:
                     continue
+
+                # Record that a valid pole is detected for this symbol (recorded at the actual pole end bar)
+                pole_end_bar = hist_bar_indices[cur_p_end - 1]
+                self.meta[symbol].record_pole(pole_end_bar)
 
                 pole_low = float(min(b["low"] for b in pole))
                 pole_high = float(max(b["high"] for b in pole))
@@ -206,12 +348,8 @@ class ScoringEngine3:
                 if pole_height <= 0.01 or pole_low <= 0.0:
                     continue
 
-                pole_pct = pole_height / pole_low
-                if pole_pct < self.min_pole_pct:
-                    continue
-
                 # --- Bull Flag ---
-                if all(float(b["close"]) >= float(b["open"]) for b in pole):
+                if cur_direction == "BULL":
                     contr_low = float(min(b["low"] for b in contraction))
                     retracement = (pole_high - contr_low) / pole_height
 
@@ -247,7 +385,7 @@ class ScoringEngine3:
                             )
 
                 # --- Bear Flag ---
-                if all(float(b["close"]) <= float(b["open"]) for b in pole):
+                if cur_direction == "BEAR":
                     contr_high = float(max(b["high"] for b in contraction))
                     bear_retracement = (contr_high - pole_low) / pole_height
 
@@ -290,8 +428,13 @@ class ScoringEngine3:
         """
         Archetype 2: Pure 3-Candle Impulse Breakout / Breakdown.
         Enforces 2.0x Baseline Thrust, structural multi-bar break, and CLV >= 0.75.
+        Guarded against taking breakouts within 5 candles of a pole to prevent contraction traps.
         """
         if bar_idx < 3:
+            return None
+
+        # Guard: If a pole was detected within the last 5 candles, do not check for breakout lest we get caught in a contraction
+        if self._has_recent_pole(idx, bar_idx, 5) or self.meta[symbol].has_pole_in_last_n_bars(5, bar_idx):
             return None
 
         prev = self.candles[idx, (bar_idx - 3) : bar_idx]
@@ -402,7 +545,12 @@ class ScoringEngine3:
                 continue
 
             # Archetype 2: Pure 3-Candle Impulse Breakout
-            if m.has_breakout_in_last_n_bars(3, bar_idx):
+            # Guard against entering pure breakouts if recent breakout occurred or within 5 bars of a pole
+            if (
+                m.has_breakout_in_last_n_bars(3, bar_idx)
+                or m.has_pole_in_last_n_bars(5, bar_idx)
+                or self._has_recent_pole(idx, bar_idx, 5)
+            ):
                 m.last_evaluated_ts = c_ts
                 continue
 

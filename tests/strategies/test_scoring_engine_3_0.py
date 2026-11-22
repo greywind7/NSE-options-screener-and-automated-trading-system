@@ -273,6 +273,143 @@ class TestScoringEngine3(unittest.TestCase):
         )
         self.assertIsNone(alert_red_wick)
 
+    def test_pole_trimming_contraction_candle(self):
+        """
+        Verify that a low-volume contraction candle mistakenly grouped into an initial 3-candle
+        pole is trimmed from the pole and transferred into contraction, enabling valid flag trigger.
+        """
+        sym_idx = 0
+        symbol = self.engine.index_to_symbol[sym_idx]
+        bar_idx = 4
+        now_ts = self._make_sim_timestamp(bar_idx, sec_offset=60)
+
+        # Bear Flag scenario:
+        # Bar 0: Red thrust 1 (vol 10000)
+        self._set_bar(sym_idx, 0, now_ts - 1200, 5000.0, 5005.0, 4900.0, 4910.0, 10000, atr=50.0)
+        # Bar 1: Red thrust 2 (vol 12000)
+        self._set_bar(sym_idx, 1, now_ts - 900, 4910.0, 4915.0, 4820.0, 4830.0, 12000, atr=50.0)
+        # Bar 2: Red contraction candle (vol 2000) - Lower volume than pole candles
+        self._set_bar(sym_idx, 2, now_ts - 600, 4830.0, 4840.0, 4810.0, 4820.0, 2000, atr=50.0)
+        # Bar 3: Contraction 2 (vol 1800)
+        self._set_bar(sym_idx, 3, now_ts - 300, 4820.0, 4835.0, 4815.0, 4830.0, 1800, atr=50.0)
+
+        # Active Bar 4: Breakdown bar
+        # Low 4780, High 4835, Close 4785 -> CLV bear = (4835 - 4785) / (4835 - 4780) = 50/55 = 0.909 >= 0.75
+        self._set_bar(sym_idx, 4, now_ts, 4830.0, 4835.0, 4780.0, 4785.0, 3500, rvol=3.5, atr=50.0, is_closed=False)
+
+        alerts = self.engine.evaluate_universe(now_ts=now_ts)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].symbol, symbol)
+        self.assertEqual(alerts[0].archetype, "FLAG_BEAR_BREAKDOWN")
+        self.assertEqual(alerts[0].flag_low, 4820.0)  # Low of trimmed pole (Bar 0-1)
+
+    def test_pole_expansion_earlier_side(self):
+        """
+        Verify that backward expansion captures an earlier thrust candle if it significantly increases
+        pole height (>= 33%) without substantial volume degradation.
+        """
+        sym_idx = 0
+        symbol = self.engine.index_to_symbol[sym_idx]
+        bar_idx = 5
+        now_ts = self._make_sim_timestamp(bar_idx, sec_offset=60)
+
+        # Bar 0: Noise
+        self._set_bar(sym_idx, 0, now_ts - 1500, 5000.0, 5005.0, 4995.0, 5000.0, 1000, atr=50.0)
+        # Bar 1: Strong green impulse 1 (height 100, vol 10000)
+        self._set_bar(sym_idx, 1, now_ts - 1200, 5000.0, 5100.0, 5000.0, 5095.0, 10000, atr=50.0)
+        # Bar 2: Strong green impulse 2 (height 105, vol 11000)
+        self._set_bar(sym_idx, 2, now_ts - 900, 5095.0, 5200.0, 5095.0, 5190.0, 11000, atr=50.0)
+        # Bar 3: Contraction 1 (vol 2000)
+        self._set_bar(sym_idx, 3, now_ts - 600, 5190.0, 5195.0, 5150.0, 5160.0, 2000, atr=50.0)
+        # Bar 4: Contraction 2 (vol 1800)
+        self._set_bar(sym_idx, 4, now_ts - 300, 5160.0, 5175.0, 5145.0, 5150.0, 1800, atr=50.0)
+
+        # Active Bar 5: Bull Breakout
+        self._set_bar(sym_idx, 5, now_ts, 5150.0, 5215.0, 5150.0, 5210.0, 3500, rvol=3.5, atr=50.0, is_closed=False)
+
+        alerts = self.engine.evaluate_universe(now_ts=now_ts)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].symbol, symbol)
+        self.assertEqual(alerts[0].archetype, "FLAG_BULL_BREAKOUT")
+        # Confirms pole was expanded to include Bar 1 (flag_high = 5200.0)
+        self.assertEqual(alerts[0].flag_high, 5200.0)
+
+    def test_pole_volume_less_than_2x_contraction_rejected(self):
+        """Verify that a flag setup is strictly rejected if pole average volume is < 2.0x contraction average volume."""
+        sym_idx = 0
+        symbol = self.engine.index_to_symbol[sym_idx]
+        bar_idx = 3
+        now_ts = self._make_sim_timestamp(bar_idx, sec_offset=60)
+
+        # Bar 0: Pole with weak volume (3000)
+        self._set_bar(sym_idx, 0, now_ts - 900, 5000.0, 5200.0, 5000.0, 5180.0, 3000, atr=50.0)
+        # Bar 1: Contraction 1 (vol 2000)
+        self._set_bar(sym_idx, 1, now_ts - 600, 5180.0, 5190.0, 5150.0, 5160.0, 2000, atr=50.0)
+        # Bar 2: Contraction 2 (vol 2000) -> contr_vol = 2000. Ratio = 3000 / 2000 = 1.5x (< 2.0x)
+        self._set_bar(sym_idx, 2, now_ts - 300, 5160.0, 5175.0, 5140.0, 5150.0, 2000, atr=50.0)
+
+        # Active Bar 3: Breakout
+        self._set_bar(sym_idx, 3, now_ts, 5150.0, 5215.0, 5150.0, 5210.0, 3500, rvol=3.5, atr=50.0, is_closed=False)
+
+        # Rejected because 1.5x < 2.0x threshold
+        alert_rejected = self.engine._check_flag_breakout(
+            symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 3.5, 50.0, now_ts
+        )
+        self.assertIsNone(alert_rejected)
+
+        # Now increase Bar 0 volume to 5000 -> Ratio = 5000 / 2000 = 2.5x (>= 2.0x) -> Must TRIGGER!
+        self.candles[sym_idx, 0]["volume"] = 5000
+        alert_accepted = self.engine._check_flag_breakout(
+            symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 3.5, 50.0, now_ts
+        )
+        self.assertIsNotNone(alert_accepted)
+        self.assertEqual(alert_accepted.archetype, "FLAG_BULL_BREAKOUT")
+
+    def test_pole_within_last_5_candles_blocks_pure_breakout(self):
+        """Verify that if a pole was formed within the last 5 candles, pure impulse breakouts are blocked."""
+        sym_idx = 1
+        symbol = self.engine.index_to_symbol[sym_idx]
+        bar_idx = 4
+        now_ts = self._make_sim_timestamp(bar_idx, sec_offset=60)
+
+        # Bar 0: Noise
+        self._set_bar(sym_idx, 0, now_ts - 1200, 1000.0, 1002.0, 998.0, 1000.0, 1000, rvol=1.0, atr=10.0)
+        # Bar 1: Institutional Pole (Height 50 pts = 5%, rvol 4.0 >= 2.0)
+        self._set_bar(sym_idx, 1, now_ts - 900, 1000.0, 1050.0, 1000.0, 1048.0, 8000, rvol=4.0, atr=10.0)
+        # Bar 2: Contraction pause
+        self._set_bar(sym_idx, 2, now_ts - 600, 1048.0, 1052.0, 1040.0, 1042.0, 1000, rvol=1.0, atr=10.0)
+        # Bar 3: Contraction pause
+        self._set_bar(sym_idx, 3, now_ts - 300, 1042.0, 1045.0, 1038.0, 1040.0, 900, rvol=0.9, atr=10.0)
+
+        # Active Bar 4: Attempts Pure Breakout (breaks above combined high 1052)
+        self._set_bar(sym_idx, 4, now_ts, 1040.0, 1060.0, 1040.0, 1058.0, 4000, rvol=4.0, atr=10.0, is_closed=False)
+
+        # Bar 1 was a pole within the last 5 bars (bar_idx 4 - 1 = 3 < 5). Pure breakout MUST be blocked!
+        alert_blocked = self.engine._check_pure_breakout(
+            symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 4.0, 10.0, now_ts
+        )
+        self.assertIsNone(alert_blocked)
+
+        alerts = self.engine.evaluate_universe(now_ts=now_ts)
+        pure_alerts = [a for a in alerts if "PURE" in a.archetype]
+        self.assertEqual(len(pure_alerts), 0)
+
+        # Now test that when pole is older than 5 bars (e.g. pole at bar 1, evaluating at bar 7), pure breakout succeeds
+        bar_idx_far = 7
+        now_ts_far = self._make_sim_timestamp(bar_idx_far, sec_offset=60)
+        # Bars 2, 3, 4, 5, 6: Base bars without pole characteristics (rvol=1.0, tight range)
+        for b in range(2, 7):
+            self._set_bar(sym_idx, b, now_ts_far - (7 - b) * 300, 1040.0, 1045.0, 1038.0, 1042.0, 1000, rvol=1.0, atr=10.0)
+
+        # Active Bar 7: Pure breakout from bars 4..6 base
+        self._set_bar(sym_idx, 7, now_ts_far, 1042.0, 1070.0, 1042.0, 1068.0, 4000, rvol=4.0, atr=10.0, is_closed=False)
+
+        alert_allowed = self.engine._check_pure_breakout(
+            symbol, sym_idx, bar_idx_far, self.candles[sym_idx, bar_idx_far], 4.0, 10.0, now_ts_far
+        )
+        self.assertIsNotNone(alert_allowed)
+        self.assertEqual(alert_allowed.archetype, "PURE_BULL_BREAKOUT")
+
 
 if __name__ == "__main__":
     unittest.main()
