@@ -253,8 +253,11 @@ class AnalyticsWebServer:
 
         run_id = body.get("run_id") or f"RUN-{len(self.simulation_service.runs_history) + 1}"
         body["run_id"] = run_id
+        self.simulation_service.is_running = True
         self.simulation_service.current_job_id = run_id
         self.simulation_service.progress_status = "Initializing simulation..."
+        self.simulation_service.latest_error = None
+        self.simulation_service.latest_results = None
 
         # Launch background task and attach completion handler to safely retrieve any unhandled exception
         task = asyncio.create_task(self.simulation_service.run_simulation_job(body))

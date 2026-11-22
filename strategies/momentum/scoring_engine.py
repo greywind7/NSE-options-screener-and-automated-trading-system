@@ -531,10 +531,6 @@ class ScoringEngine3:
             if rvol < self.min_volume_thrust_mult:
                 continue
 
-            # Gate 4: Early candle jitter guard (skip first 45 seconds of bar)
-            if elapsed_in_bar < 45:
-                continue
-
             # Archetype 1: Bull / Bear Flag Breakout
             flag_alert = self._check_flag_breakout(symbol, idx, bar_idx, candle, rvol, atr, now_ts)
             if flag_alert:

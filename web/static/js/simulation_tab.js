@@ -597,6 +597,7 @@ window.SimulationTab = {
 
     return new Promise((resolve) => {
       let pollCount = 0;
+      let hasSeenRunning = false;
       const timer = setInterval(async () => {
         try {
           pollCount++;
@@ -613,27 +614,35 @@ window.SimulationTab = {
               }
             }
 
-            if (st.is_running) {
+            if (st.is_running && st.current_job_id === run.id) {
+              hasSeenRunning = true;
               run.progressText = st.progress_status || "Simulating trades...";
               this.renderRunsList();
-            } else {
-              // Ensure we do not resolve on stale idle state before the background worker sets up
-              if (st.current_job_id !== run.id && pollCount <= 15) {
-                return;
-              }
-              clearInterval(timer);
-              if (st.error) {
-                run.status = "failed";
-                run.error = st.error;
-              } else {
-                run.status = "completed";
-                run.runtime = st.last_run_time || 0.0;
-                await this.fetchRunResults(run);
-              }
-              this.renderRunsList();
-              this.saveRunsToStorage();
-              resolve(run);
+              return;
             }
+
+            if (st.is_running && st.current_job_id !== run.id) {
+              return;
+            }
+
+            // st.is_running is false
+            const jobFinished = (st.current_job_id === run.id && (st.has_results || st.error));
+            if (!hasSeenRunning && !jobFinished && pollCount <= 15) {
+              return;
+            }
+
+            clearInterval(timer);
+            if (st.error && (st.current_job_id === run.id || !st.current_job_id)) {
+              run.status = "failed";
+              run.error = st.error;
+            } else {
+              run.status = "completed";
+              run.runtime = st.last_run_time || 0.0;
+              await this.fetchRunResults(run);
+            }
+            this.renderRunsList();
+            this.saveRunsToStorage();
+            resolve(run);
           }
         } catch (e) {
           clearInterval(timer);
@@ -686,7 +695,19 @@ window.SimulationTab = {
       payload.run_id = `RUN-${this.runs.length + 1}`;
 
       await this.runSingleSimAsync(payload);
-      // Clean delay between sequential batch runs to allow worker memory and caches to settle
+
+      // Verify server reports idle before launching the next date in the batch
+      for (let waitSec = 0; waitSec < 15; waitSec++) {
+        try {
+          const checkRes = await fetch("/api/sim/status");
+          if (checkRes.ok) {
+            const checkSt = await checkRes.json();
+            if (!checkSt.is_running) break;
+          }
+        } catch (_) {}
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      // Clean settle delay between sequential batch runs
       await new Promise((r) => setTimeout(r, 400));
     }
 
@@ -740,6 +761,11 @@ window.SimulationTab = {
             }
             this.renderRunsList();
           } else {
+            // If the server hasn't started this job yet, wait
+            if (st.current_job_id !== run.id && !st.has_results && !st.error) {
+              return;
+            }
+
             clearInterval(this.pollTimer);
             this.pollTimer = null;
             if (btn) btn.disabled = false;
@@ -841,21 +867,22 @@ window.SimulationTab = {
 
       let summaryHtml = "";
       if (r.status === "completed" && r.results && r.results.matrix) {
-        let netTotal = 0;
+        let totalNet = 0;
         let totalTrades = 0;
         let totalWins = 0;
-        for (const mTracks of Object.values(r.results.matrix)) {
-          for (const st of Object.values(mTracks)) {
-            netTotal += st.net_pnl || 0;
-            totalTrades += st.trades || 0;
-            totalWins += st.wins || 0;
-          }
+        const targetTracks = r.results.matrix.paper || Object.values(r.results.matrix)[0] || {};
+        const trackCount = Object.keys(targetTracks).length || 1;
+        for (const st of Object.values(targetTracks)) {
+          totalNet += st.net_pnl || 0;
+          totalTrades += st.trades || 0;
+          totalWins += st.wins || 0;
         }
-        const netClass = netTotal >= 0 ? "val-profit" : "val-loss";
+        const avgNet = trackCount > 0 ? totalNet / trackCount : 0;
+        const netClass = avgNet >= 0 ? "val-profit" : "val-loss";
         const wr = totalTrades > 0 ? ((totalWins / totalTrades) * 100).toFixed(1) : "0.0";
         summaryHtml = `
           <div class="sim-run-card-summary">
-            <span class="font-mono font-bold ${netClass}">${window.App.formatINR(netTotal)}</span>
+            <span class="font-mono font-bold ${netClass}">Avg: ${window.App.formatINR(avgNet)}</span>
             <span style="font-size:10px; color:var(--text-dim);">${wr}% Win (${totalTrades} trds)</span>
             <div style="display:flex; gap:6px;">
               <span class="sim-run-view-btn" style="color:var(--accent-green);">View Tab</span>

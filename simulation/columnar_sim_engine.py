@@ -997,18 +997,29 @@ class ColumnarSimEngine:
                 )
 
             lines.append("  " + "-" * (len(header) - 2))
+            num_tracks = max(1, len(results.get(mode, {})))
+            avg_trades = int(round(mode_trades / num_tracks))
+            avg_wins = int(round(mode_wins / num_tracks))
+            avg_bes = int(round(mode_bes / num_tracks))
+            avg_losses = int(round(mode_losses / num_tracks))
+            avg_start_cap = mode_start_cap / num_tracks
+            avg_gross_pnl = mode_gross_pnl / num_tracks
+            avg_brokerage = mode_brokerage / num_tracks
+            avg_net_pnl = mode_net_pnl / num_tracks
+            avg_end_cap = avg_start_cap + avg_net_pnl
             mode_win_pct = (mode_wins / mode_trades * 100.0) if mode_trades > 0 else 0.0
-            mode_ret_pct = (mode_net_pnl / mode_start_cap * 100.0) if mode_start_cap > 0 else 0.0
-            total_start_str = f"₹{mode_start_cap:,.2f}"
-            total_gross_str = f"₹{mode_gross_pnl:+,.2f}"
-            total_brok_str = f"₹{mode_brokerage:,.2f}"
-            total_net_str = f"₹{mode_net_pnl:+,.2f}"
-            total_end_str = f"₹{mode_start_cap + mode_net_pnl:,.2f}"
+            avg_ret_pct = (avg_net_pnl / avg_start_cap * 100.0) if avg_start_cap > 0 else 0.0
+
+            avg_start_str = f"₹{avg_start_cap:,.2f}"
+            avg_gross_str = f"₹{avg_gross_pnl:+,.2f}"
+            avg_brok_str = f"₹{avg_brokerage:,.2f}"
+            avg_net_str = f"₹{avg_net_pnl:+,.2f}"
+            avg_end_str = f"₹{avg_end_cap:,.2f}"
             tot_win_str = f"{mode_win_pct:.1f}%"
-            tot_ret_str = f"{mode_ret_pct:+.1f}%"
-            tot_label = f"TOTAL ({mode.upper()})"
+            avg_ret_str = f"{avg_ret_pct:+.1f}%"
+            avg_label = f"AVERAGE ({mode.upper()})"
             lines.append(
-                f"  {tot_label:<22} | {mode_trades:<7} | {mode_wins:<12} | {mode_bes:<12} | {mode_losses:<12} | {tot_win_str:>7} | {total_start_str:>14} | {total_gross_str:>13} | {total_brok_str:>11} | {total_net_str:>15} | {total_end_str:>14} | {tot_ret_str:>9}"
+                f"  {avg_label:<22} | {avg_trades:<7} | {avg_wins:<12} | {avg_bes:<12} | {avg_losses:<12} | {tot_win_str:>7} | {avg_start_str:>14} | {avg_gross_str:>13} | {avg_brok_str:>11} | {avg_net_str:>15} | {avg_end_str:>14} | {avg_ret_str:>9}"
             )
 
         lines.append("\n" + "=" * tbl_width)
