@@ -3,11 +3,11 @@
     "name": "Upstox Algorithmic Trading Infrastructure Spec 2.0",
     "version": "2.0.0",
     "manifest": {
-      "max_stream_underlyings_with_options": 110,
+      "max_stream_underlyings_with_options": 221,
       "popular_strikes": 3
     },
     "feed": {
-      "max_stream_underlyings_with_options": 110,
+      "max_stream_underlyings_with_options": 221,
       "max_websocket_keys": 1800
     },
     "ipc": {

@@ -49,10 +49,10 @@ class StructuralConvexityTrack(BaseTrack):
         flag_high = trade.metadata.get("flag_high")
 
         if direction == "BULL" and flag_low is not None and ltp <= float(flag_low):
-            exit_p = trade.current_bid if trade.current_bid > 0.0 else trade.entry_price
+            exit_p = trade.current_bid if trade.current_bid > 0.0 else 0.0
             self.exit_trade(trade, exit_price=exit_p, reason="STRUCTURAL_INVALIDATION", ts=ts)
         elif direction == "BEAR" and flag_high is not None and ltp >= float(flag_high):
-            exit_p = trade.current_bid if trade.current_bid > 0.0 else trade.entry_price
+            exit_p = trade.current_bid if trade.current_bid > 0.0 else 0.0
             self.exit_trade(trade, exit_price=exit_p, reason="STRUCTURAL_INVALIDATION", ts=ts)
 
     def evaluate_exit_rules(

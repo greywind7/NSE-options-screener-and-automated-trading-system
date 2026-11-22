@@ -37,9 +37,9 @@ def run_manifest_generator(
     """
     Generate subscription_manifest.json containing underlying streaming keys,
     popular option streaming keys, and background polling batches.
-    Strategy B: Options are streamed only for the top N most liquid underlyings
-    (ranked by volume/turnover from data/index.json) to strictly stay below the
-    2,000 WebSocket full-depth key limit. Remaining options are background polled.
+    Strategy B: Options are streamed for the top N underlyings (or full universe if configured)
+    partitioned across parallel WebSocket connections (each staying below the 2,000 Upstox limit).
+    Remaining options are background polled.
     """
     if skip_if_exists and os.path.exists(output_json) and os.path.getsize(output_json) > 10_000:
         print(f"  ✓ Valid Subscription Manifest found at '{output_json}'. (Skipping generation)")
@@ -330,7 +330,7 @@ def run_manifest_generator(
     print(f"  ✓ Saved Subscription Manifest to '{output_json}'")
     print(f"    • Underlyings Streamed      : {len(underlying_keys):,}")
     print(f"    • Popular Options Streamed  : {len(popular_option_keys):,} ({len(stream_options_symbols)} Top Liquid Underlyings @ 3 above/below ATM)")
-    print(f"    • Total Streamed Keys (WS)  : {len(underlying_keys) + len(popular_option_keys):,} (Upstox WS limit: 2,000)")
+    print(f"    • Total Streamed Keys (WS)  : {len(underlying_keys) + len(popular_option_keys):,} (Upstox limit: 2,000/conn, 4,000 across dual connections)")
     print(f"    • Background Options Polled : {len(background_poll_keys):,} across {len(background_poll_batches)} batches")
     print(f"    • Total Contracts Tracked   : {manifest['summary']['total_tracked_instruments']:,}")
     return output_json

@@ -314,6 +314,58 @@ class TestFeedHandler(unittest.TestCase):
             self.assertIn("OPT_", event["token"])
             self.assertEqual(len(event["bids"]), 1)
 
+    def test_deterministic_crc32_sharding_stability(self):
+        """Verify CRC32-based sharding is stable across restarts and adding/removing symbols."""
+        syms = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "SBIN", "ICICIBANK", "BHARTIARTL"]
+        initial_map = {s: self.feed.get_connection_for_symbol(s) for s in syms}
+
+        # NIFTY variants must always pin to Connection 0
+        self.assertEqual(self.feed.get_connection_for_symbol("NIFTY"), 0)
+        self.assertEqual(self.feed.get_connection_for_symbol("NIFTY 50"), 0)
+
+        # Create a brand new FeedHandler instance and verify identical shard assignments
+        new_feed = FeedHandler(mode="mock", num_connections=2, silent=True, ctx=self.ctx)
+        try:
+            for s in syms:
+                self.assertEqual(new_feed.get_connection_for_symbol(s), initial_map[s],
+                                 f"Sharding drift detected for symbol {s}")
+            # Add a new symbol in the middle
+            new_feed.get_connection_for_symbol("NEWSTOCK")
+            # Existing symbols must NOT change connection
+            for s in syms:
+                self.assertEqual(new_feed.get_connection_for_symbol(s), initial_map[s],
+                                 f"Adding new symbol shifted shard for {s}")
+        finally:
+            new_feed.stop()
+
+    def test_capacity_pruning_cleans_other_symbols_sets(self):
+        """Verify capacity pruning removes unheld contracts from other symbols' active sets (BUG-006 fix)."""
+        conn = self.feed.connections[0]
+        conn.max_contracts = 6  # very tight limit to force pruning
+        conn.underlying_keys = {"NSE_EQ|STOCK_A", "NSE_EQ|STOCK_B"}
+        # STOCK_A has 2 options
+        conn.active_options_by_symbol["STOCK_A"] = {"NSE_FO|STOCK_A_100CE", "NSE_FO|STOCK_A_100PE"}
+        conn.active_option_keys = {"NSE_FO|STOCK_A_100CE", "NSE_FO|STOCK_A_100PE"}
+        conn.subscribed_keys = set(conn.underlying_keys) | set(conn.active_option_keys)
+        self.feed.options_map["STOCK_B"] = {
+            "strikes": {
+                "200.0": {"CE": "NSE_FO|STOCK_B_200CE", "PE": "NSE_FO|STOCK_B_200PE"},
+                "210.0": {"CE": "NSE_FO|STOCK_B_210CE", "PE": "NSE_FO|STOCK_B_210PE"},
+            }
+        }
+        self.feed.available_strikes_by_symbol["STOCK_B"] = [200.0, 210.0]
+        self.feed.underlying_key_to_symbol["NSE_EQ|STOCK_B"] = "STOCK_B"
+        self.feed.symbol_to_conn["STOCK_B"] = 0
+
+        # Adding 4 options for STOCK_B: 2 (underlyings) + 2 (A options) + 4 (new B options) = 8 > max 6
+        to_add, to_remove = self.feed.evaluate_dynamic_options("NSE_EQ|STOCK_B", 200.0, conn_id=0)
+        self.assertGreater(len(to_add), 0)
+        # Pruning must have removed keys from STOCK_A
+        self.assertGreater(len(to_remove), 0)
+        for pruned_key in to_remove:
+            self.assertNotIn(pruned_key, conn.active_options_by_symbol["STOCK_A"],
+                             f"Pruned key {pruned_key} still present in STOCK_A options set!")
+
 
 if __name__ == "__main__":
     unittest.main()

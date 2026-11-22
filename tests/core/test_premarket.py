@@ -93,10 +93,11 @@ class TestPreMarketPipeline(unittest.TestCase):
 
         summary = manifest.get("summary", {})
         self.assertGreater(summary.get("total_underlying_equities", 0), 200)
-        # Strategy B: popular options stream for Top N liquid underlyings (~1,540 keys) to stay under 2,000 total keys
+        # Dual-connection architecture: Upstox 2,000 keys per connection (up to 4,000 total across 2 connections)
         self.assertGreater(summary.get("total_popular_options_streamed", 0), 1000)
         total_ws_keys = summary.get("total_underlying_equities", 0) + summary.get("total_popular_options_streamed", 0)
-        self.assertLessEqual(total_ws_keys, 2000, "Total WebSocket streamed keys must not exceed Upstox 2,000 key limit")
+        self.assertLessEqual(total_ws_keys, 4000, "Total WebSocket streamed keys must not exceed dual-connection limit of 4,000 keys")
+        self.assertLessEqual(total_ws_keys // 2, 2000, "Average per-connection keys must not exceed Upstox 2,000 key limit")
         self.assertGreater(summary.get("total_background_options_polled", 0), 10000)
 
         # Verify underlying keys format

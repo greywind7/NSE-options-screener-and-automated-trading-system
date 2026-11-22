@@ -26,6 +26,7 @@ import ssl
 import sys
 import threading
 import time
+import zlib
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -35,7 +36,6 @@ from core.auth.upstox_auth import get_access_token, http_get_json, log_debug
 from core.common.ipc_schemas import (
     EquityTickEvent,
     OptionDepthTickEvent,
-    TickEvent,
     pack_message,
 )
 from core.common.symbol_utils import normalize_instrument_token, is_option_contract
@@ -70,8 +70,6 @@ class ConnectionState:
     underlying_symbols: Set[str] = field(default_factory=set)
     active_option_keys: Set[str] = field(default_factory=set)
     active_options_by_symbol: Dict[str, Set[str]] = field(default_factory=lambda: defaultdict(set))
-    last_atm_by_symbol: Dict[str, float] = field(default_factory=dict)
-    last_reval_time_by_symbol: Dict[str, float] = field(default_factory=dict)
     max_contracts: int = 1800  # Upstox WS limit: 2000 keys per connection
     total_ticks_received: int = 0
     total_ticks_published: int = 0
@@ -102,6 +100,8 @@ class FeedHandler:
     ):
         cfg = get_config_manager()
         ipc_endpoints = cfg.get_ipc_endpoints()
+        sys_feed_cfg = cfg.system.get("system", {}).get("feed", {})
+        cfg_max_contracts = sys_feed_cfg.get("max_websocket_keys")
 
         self.mode = mode.lower()
         self.exchange = exchange.upper()
@@ -109,7 +109,10 @@ class FeedHandler:
         self.feed_options_ipc = feed_options_ipc or ipc_endpoints.get("feed_options_ipc", DEFAULT_FEED_OPT_IPC)
         self.access_token = access_token or get_access_token()
         self.poll_interval = max(0.2, float(poll_interval))
-        self.max_stream_contracts = max(1, int(max_stream_contracts))
+        if cfg_max_contracts and max_stream_contracts == 1800:
+            self.max_stream_contracts = max(1, int(cfg_max_contracts))
+        else:
+            self.max_stream_contracts = max(1, int(max_stream_contracts))
         self.silent = bool(silent)
         self.allow_rest_fallback = bool(allow_rest_fallback)
         self.debug_log = "logs/debug.log"
@@ -162,7 +165,6 @@ class FeedHandler:
         self.symbol_to_conn: Dict[str, int] = {}
         self.key_to_conn: Dict[str, int] = {}
 
-        self.running = False
         self._running = False
         self.total_eq_published = 0
         self.total_opt_published = 0
@@ -196,17 +198,21 @@ class FeedHandler:
         self._ws_loop: Optional[asyncio.AbstractEventLoop] = None
 
     @property
+    def running(self) -> bool:
+        """Backwards compatible accessor for running state."""
+        return self._running
+
+    @running.setter
+    def running(self, val: bool) -> None:
+        self._running = bool(val)
+
+    @property
     def _active_ws(self) -> Any:
         """Backwards compatibility accessor for active websocket connection."""
         for c in self.connections:
             if c.ws is not None:
                 return c.ws
         return None
-
-    @_active_ws.setter
-    def _active_ws(self, val: Any) -> None:
-        if self.connections:
-            self.connections[0].ws = val
 
     def _sync_global_option_keys(self) -> None:
         """Synchronize feed-level sets from per-connection state for backwards compatibility."""
@@ -245,7 +251,10 @@ class FeedHandler:
             return self.symbol_to_conn[sym_clean]
         if not self.connections:
             return 0
-        c_id = abs(hash(sym_clean)) % len(self.connections)
+        if sym_clean in ("NIFTY", "NIFTY 50"):
+            c_id = 0
+        else:
+            c_id = zlib.crc32(sym_clean.encode("utf-8")) % len(self.connections)
         self.symbol_to_conn[sym_clean] = c_id
         self.connections[c_id].underlying_symbols.add(sym_clean)
         return c_id
@@ -470,15 +479,8 @@ class FeedHandler:
             if s_clean:
                 all_und_symbols.add(s_clean)
 
-        sorted_symbols = sorted(list(all_und_symbols))
-        # Ensure NIFTY 50 is pinned to Connection 0
-        for n_variant in ("NIFTY 50", "NIFTY"):
-            if n_variant in sorted_symbols:
-                sorted_symbols.remove(n_variant)
-                sorted_symbols.insert(0, n_variant)
-
-        for idx, sym_u in enumerate(sorted_symbols):
-            c_id = idx % self.num_connections
+        for sym_u in sorted(list(all_und_symbols)):
+            c_id = self.get_connection_for_symbol(sym_u)
             self.symbol_to_conn[sym_u] = c_id
             self.connections[c_id].underlying_symbols.add(sym_u)
 
@@ -486,7 +488,7 @@ class FeedHandler:
         for k in list(self.underlying_keys):
             k_clean = k.replace(":", "|")
             s = self.underlying_key_to_symbol.get(k_clean) or self.underlying_key_to_symbol.get(k) or self.symbol_map.get(k_clean)
-            c_id = self.get_connection_for_symbol(s) if s else (abs(hash(k_clean)) % self.num_connections)
+            c_id = self.get_connection_for_symbol(s) if s else (zlib.crc32(k_clean.encode("utf-8")) % self.num_connections)
             self._register_key_to_conn(k, c_id)
             self.connections[c_id].underlying_keys.add(k)
             self.connections[c_id].subscribed_keys.add(k)
@@ -496,7 +498,7 @@ class FeedHandler:
             k = pop_item["key"]
             opt_sym = pop_item["symbol"]
             u_sym = pop_item.get("underlying", "")
-            c_id = self.get_connection_for_symbol(u_sym) if u_sym else (abs(hash(k)) % self.num_connections)
+            c_id = self.get_connection_for_symbol(u_sym) if u_sym else (zlib.crc32(k.encode("utf-8")) % self.num_connections)
             instruments.append({"key": k, "symbol": opt_sym, "conn_id": c_id})
             self._register_key_to_conn(k, c_id)
             self.connections[c_id].active_option_keys.add(k)
@@ -722,8 +724,6 @@ class FeedHandler:
             keys_to_add |= (protected_for_sym - current_keys)
 
         if not keys_to_add and not keys_to_remove:
-            conn.last_atm_by_symbol[lookup_sym] = atm_strike
-            conn.last_reval_time_by_symbol[lookup_sym] = now
             self.last_atm_by_symbol[lookup_sym] = atm_strike
             self.last_reval_time_by_symbol[lookup_sym] = now
             return [], []
@@ -733,13 +733,14 @@ class FeedHandler:
             capacity_pruned = self._prune_dynamic_options_to_fit(keys_to_add, protected_keys, lookup_sym, conn_id=c_id)
             if capacity_pruned:
                 keys_to_remove |= capacity_pruned
+                for k in capacity_pruned:
+                    for sym_set in conn.active_options_by_symbol.values():
+                        sym_set.discard(k)
 
         # Update in-memory sets for connection
         conn.active_options_by_symbol[lookup_sym] = (current_keys - keys_to_remove) | keys_to_add
         conn.active_option_keys = (conn.active_option_keys - keys_to_remove) | keys_to_add
         conn.subscribed_keys = (conn.subscribed_keys - keys_to_remove) | keys_to_add
-        conn.last_atm_by_symbol[lookup_sym] = atm_strike
-        conn.last_reval_time_by_symbol[lookup_sym] = now
 
         for k in keys_to_add:
             self._register_key_to_conn(k, c_id)
@@ -1011,8 +1012,6 @@ class FeedHandler:
                         continue
 
                     ssl_ctx = ssl.create_default_context()
-                    ssl_ctx.check_hostname = False
-                    ssl_ctx.verify_mode = ssl.CERT_NONE
 
                     async with websockets.connect(conn_ws_url, ssl=ssl_ctx, ping_interval=None, max_size=10 * 1024 * 1024) as ws:
                         conn.ws = ws
@@ -1061,18 +1060,25 @@ class FeedHandler:
                                                         ap, aq = float(ba.askP or 0.0), int(ba.askQ or 0)
                                                         if bp > 0: bids.append([bp, bq, 1])
                                                         if ap > 0: asks.append([ap, aq, 1])
-                                                    bid = bids[0][0] if bids else ltp
-                                                    ask = asks[0][0] if asks else ltp
+                                                    is_opt = is_option_contract(canonical_key)
+                                                    bid = bids[0][0] if bids else (0.0 if is_opt else ltp)
+                                                    ask = asks[0][0] if asks else (0.0 if is_opt else ltp)
                                         elif feed_union == "firstLevelWithGreeks":
                                             fl = feed.firstLevelWithGreeks
                                             ltp = float(fl.ltpc.ltp or 0.0)
                                             vol = int(fl.vtt or 0)
+                                            is_opt = is_option_contract(canonical_key)
                                             if fl.firstDepth:
-                                                bid = float(fl.firstDepth.bidP or ltp)
-                                                ask = float(fl.firstDepth.askP or ltp)
+                                                bid = float(fl.firstDepth.bidP or 0.0)
+                                                ask = float(fl.firstDepth.askP or 0.0)
+                                            else:
+                                                bid = 0.0 if is_opt else ltp
+                                                ask = 0.0 if is_opt else ltp
                                         elif feed_union == "ltpc":
                                             ltp = float(feed.ltpc.ltp or 0.0)
-                                            bid, ask = ltp, ltp
+                                            is_opt = is_option_contract(canonical_key)
+                                            bid = 0.0 if is_opt else ltp
+                                            ask = 0.0 if is_opt else ltp
 
                                         if vol > 0:
                                             self.last_seen_volume[canonical_key] = vol
@@ -1087,8 +1093,8 @@ class FeedHandler:
                                                 symbol=sym,
                                                 ltp=ltp,
                                                 volume=vol,
-                                                bid=bid or ltp,
-                                                ask=ask or ltp,
+                                                bid=bid if is_opt else (bid or ltp),
+                                                ask=ask if is_opt else (ask or ltp),
                                                 bid_qty=bid_q,
                                                 ask_qty=ask_q,
                                                 exchange_ts=now_ts,
@@ -1109,27 +1115,39 @@ class FeedHandler:
                     backoff = min(15.0, backoff * 1.5)
 
         async def dual_runner():
-            self._ws_loop = asyncio.get_running_loop()
             await asyncio.gather(*(ws_connection_worker(i) for i in range(self.num_connections)))
 
-        while self._running:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._ws_loop = loop
+        try:
+            while self._running:
+                try:
+                    loop.run_until_complete(dual_runner())
+                except Exception as e:
+                    if not self._running:
+                        break
+                    print(f"[FEED] Main dual runner exited: {e}. Restarting in 2s...", file=sys.stderr)
+                    time.sleep(2.0)
+        finally:
             try:
-                asyncio.run(dual_runner())
-            except Exception as e:
-                if not self._running:
-                    break
-                print(f"[FEED] Main dual runner exited: {e}. Restarting in 2s...", file=sys.stderr)
-                time.sleep(2.0)
+                pending = asyncio.all_tasks(loop)
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            loop.close()
+            self._ws_loop = None
 
     def _run_poll_stream(self) -> None:
         """Fallback REST poller in batches of 500 contracts."""
-        print("📡 Ingestion Engine: REST POLLER FALLBACK STREAM")
+        print("📡 Ingestion Engine: REST POLLER FALLBACK STREAM (Stub - not active)")
         while self._running:
-            now_ts = time.time()
             time.sleep(self.poll_interval)
 
     def stop(self) -> None:
-        self.running = False
         self._running = False
         for conn in self.connections:
             if conn.ws:

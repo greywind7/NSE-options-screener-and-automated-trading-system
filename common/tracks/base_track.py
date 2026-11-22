@@ -342,12 +342,12 @@ class BaseTrack(ABC):
             dt = datetime.fromtimestamp(ts, tz=IST)
             curr_minutes = dt.hour * 60 + dt.minute
             if curr_minutes >= self.eod_squareoff_minutes:
-                bid = trade.current_bid if trade.current_bid > 0 else trade.entry_price
+                bid = trade.current_bid if trade.current_bid > 0 else 0.0
                 self.exit_trade(trade, exit_price=bid, reason="EOD_SQUAREOFF", ts=ts)
                 continue
 
             # 2. Evaluate timeout rules if elapsed exceeds threshold
-            bid = trade.current_bid if trade.current_bid > 0 else trade.entry_price
+            bid = trade.current_bid if trade.current_bid > 0 else 0.0
             ask = trade.entry_ask
             reason = self.evaluate_exit_rules(trade, bid, bid, ask, ts)
             if reason in ("STAGNATION_TIMEOUT", "FIXED_STAGNATION_TIMEOUT", "PULLBACK_STAGNATION_TIMEOUT", "MAX_HOLD_TIMEOUT", "PULLBACK_TIMEOUT"):

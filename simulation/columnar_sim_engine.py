@@ -439,12 +439,7 @@ class ColumnarSimEngine:
         bid = float(data["bids"][idx])
         ltp = float(data["ltps"][idx])
 
-        # If ask is 0, fall back to ltp
-        if ask <= 0.0 and ltp > 0.0:
-            ask = ltp
-        if bid <= 0.0 and ltp > 0.0:
-            bid = ltp
-
+        # Preserve genuine book depth: never fabricate bid/ask from LTP
         return {
             "token": norm,
             "bid": bid,
@@ -745,7 +740,9 @@ class ColumnarSimEngine:
             for tr_name, track in track_dict.items():
                 for trade in list(track.active_trades.values()):
                     if trade.status == "OPEN":
-                        bid = trade.current_bid if trade.current_bid > 0 else trade.entry_price
+                        # Strictly use prevailing market bid at EOD; never fall back to fabricated entry_price
+                        opt_q = self.get_option_quote(trade.token, last_ts)
+                        bid = (opt_q["bid"] if opt_q and opt_q["bid"] > 0 else (trade.current_bid if trade.current_bid > 0 else 0.0))
                         if hasattr(track, "exit_trade"):
                             track.exit_trade(trade, exit_price=bid, reason="EOD_SQUAREOFF", ts=last_ts)
 
