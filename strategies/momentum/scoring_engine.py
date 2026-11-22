@@ -383,6 +383,8 @@ class ScoringEngine3:
                                 flag_high=pole_high,
                                 flag_low=contr_low,
                                 timestamp=now_ts,
+                                pole_high=pole_high,
+                                pole_low=pole_low,
                             )
 
                 # --- Bear Flag ---
@@ -419,6 +421,8 @@ class ScoringEngine3:
                                 flag_high=contr_high,
                                 flag_low=pole_low,
                                 timestamp=now_ts,
+                                pole_high=pole_high,
+                                pole_low=pole_low,
                             )
 
         return None
@@ -471,6 +475,8 @@ class ScoringEngine3:
                 flag_high=combined_high,
                 flag_low=float(min(b["low"] for b in prev)),
                 timestamp=now_ts,
+                pole_high=combined_high,
+                pole_low=float(min(b["low"] for b in prev)),
             )
 
         # Bear Impulse
@@ -498,6 +504,8 @@ class ScoringEngine3:
                 flag_high=float(max(b["high"] for b in prev)),
                 flag_low=combined_low,
                 timestamp=now_ts,
+                pole_high=float(max(b["high"] for b in prev)),
+                pole_low=combined_low,
             )
 
         return None

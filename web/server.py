@@ -227,7 +227,8 @@ class AnalyticsWebServer:
 
     # 3. Simulation Handlers
     async def handle_sim_config(self, request: web.Request) -> web.Response:
-        cfg = self.simulation_service.get_default_config()
+        profile = request.query.get("profile", "default")
+        cfg = self.simulation_service.get_default_config(profile=profile)
         return web.json_response(cfg)
 
     async def handle_sim_status(self, request: web.Request) -> web.Response:

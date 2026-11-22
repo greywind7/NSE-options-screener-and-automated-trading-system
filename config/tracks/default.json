@@ -1,0 +1,240 @@
+{
+  "name": "default",
+  "display_name": "Default (All Tracks — v1 & v2)",
+  "description": "Comprehensive ensemble combining all baseline v1 tracks and next-generation v2 multi-regime tracks",
+  "enabled_tracks": [
+    {
+      "type": "base",
+      "name": "fast_momentum",
+      "modes": [
+        "ITM",
+        "ATM",
+        "OTM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "trend_pullback",
+      "modes": [
+        "ITM",
+        "ATM",
+        "OTM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "fixed_target",
+      "modes": [
+        "ITM",
+        "ATM",
+        "OTM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "structural_convexity",
+      "modes": [
+        "ATM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "opening_thrust_convex",
+      "modes": [
+        "ATM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "delta_scalp",
+      "modes": [
+        "ITM2"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "micro_chandelier",
+      "modes": [
+        "ITM1"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "gamma_runner",
+      "modes": [
+        "OTM2"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "volatility_expansion",
+      "modes": [
+        "ATM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "adaptive_regime",
+      "modes": [
+        "ATM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "trend_pullback_v2",
+      "modes": [
+        "ITM1"
+      ]
+    },
+    {
+      "type": "composite",
+      "name": "composite_shared_ITM",
+      "shared_pool": true,
+      "composition": [
+        {
+          "fast_momentum": [
+            "ITM"
+          ]
+        },
+        {
+          "trend_pullback": [
+            "ITM"
+          ]
+        },
+        {
+          "fixed_target": [
+            "ITM"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "composite",
+      "name": "composite_shared_ATM",
+      "shared_pool": true,
+      "composition": [
+        {
+          "fast_momentum": [
+            "ATM"
+          ]
+        },
+        {
+          "trend_pullback": [
+            "ATM"
+          ]
+        },
+        {
+          "fixed_target": [
+            "ATM"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "composite",
+      "name": "composite_shared_OTM",
+      "shared_pool": true,
+      "composition": [
+        {
+          "fast_momentum": [
+            "OTM"
+          ]
+        },
+        {
+          "trend_pullback": [
+            "OTM"
+          ]
+        },
+        {
+          "fixed_target": [
+            "OTM"
+          ]
+        }
+      ]
+    }
+  ],
+  "tracks": {
+    "fast_momentum": {
+      "target_pct": 0.15,
+      "sl_pct": 0.05,
+      "target_decay_sec": 900,
+      "decay_floor_pct": 0.025,
+      "stagnation_timeout_sec": 1800,
+      "breakeven_trigger_pct": 0.025,
+      "min_pole_pct": 0.005,
+      "capital": 250000.0
+    },
+    "trend_pullback": {
+      "target_pct": 0.25,
+      "sl_pct": 0.05,
+      "trailing_step_pct": 0.01,
+      "timeout_sec": 3600.0,
+      "breakeven_trigger_pct": 0.025,
+      "capital": 250000.0
+    },
+    "fixed_target": {
+      "target_pct": 0.15,
+      "sl_pct": 0.05,
+      "fixed_target_inr": 750.0,
+      "timeout_sec": 1800.0,
+      "breakeven_trigger_pct": 0.025,
+      "capital": 250000.0
+    },
+    "structural_convexity": {
+      "target_pct": 1.0,
+      "sl_pct": 0.12,
+      "breakeven_trigger_pct": 0.08,
+      "profit_trail_threshold_pct": 0.15,
+      "profit_trail_ratio": 0.50,
+      "capital": 250000.0
+    },
+    "opening_thrust_convex": {
+      "target_pct": 0.35,
+      "sl_pct": 0.06,
+      "breakeven_trigger_pct": 0.15,
+      "cutoff_time": "10:45",
+      "capital": 250000.0
+    },
+    "delta_scalp": {
+      "target_pct": 0.07,
+      "sl_pct": 0.04,
+      "velocity_timeout_sec": 180.0,
+      "capital": 250000.0
+    },
+    "micro_chandelier": {
+      "target_pct": 0.10,
+      "sl_pct": 0.05,
+      "stagnation_timeout_sec": 300.0,
+      "capital": 250000.0
+    },
+    "gamma_runner": {
+      "target_pct": 0.75,
+      "sl_pct": 0.15,
+      "capital": 250000.0
+    },
+    "volatility_expansion": {
+      "target_pct": 0.25,
+      "sl_pct": 0.08,
+      "breakeven_trigger_pct": 0.10,
+      "deceleration_timeout_sec": 300.0,
+      "capital": 250000.0
+    },
+    "adaptive_regime": {
+      "target_pct": 0.18,
+      "sl_pct": 0.07,
+      "breakeven_trigger_pct": 0.07,
+      "capital": 250000.0
+    },
+    "trend_pullback_v2": {
+      "target_pct": 0.25,
+      "sl_pct": 0.06,
+      "breakeven_trigger_pct": 0.04,
+      "trailing_step_pct": 0.008,
+      "timeout_sec": 3600.0,
+      "capital": 250000.0
+    },
+    "composite": {
+      "capital": 250000.0
+    }
+  }
+}

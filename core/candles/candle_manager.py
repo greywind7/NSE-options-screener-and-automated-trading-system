@@ -373,7 +373,7 @@ class CandleManager:
             replayed = 0
             for i in range(len(tss)):
                 tok = tokens[i]
-                if tok in self.token_to_idx:
+                if tok in self.symbol_to_index or normalize_instrument_token(tok) in self.symbol_to_index:
                     ltp = float(ltps[i])
                     vol = int(vols[i])
                     ts = float(tss[i])

@@ -62,6 +62,7 @@ window.SimulationTab = {
 
     // Synchronize simulation runs with active server session (clears queue if server restarted)
     this.syncWithServerSession();
+    this.loadConfig();
   },
 
   async syncWithServerSession() {
@@ -230,10 +231,21 @@ window.SimulationTab = {
       clearRunsBtn.addEventListener("click", () => this.clearAllRunsAndTempFiles());
     }
 
+    // Track Profile selector change
+    const profSelect = document.getElementById("sim-track-profile-select");
+    if (profSelect) {
+      profSelect.addEventListener("change", (e) => {
+        this.loadConfig(e.target.value);
+      });
+    }
+
     // Reset config button
     const resetBtn = document.getElementById("sim-reset-btn");
     if (resetBtn) {
-      resetBtn.addEventListener("click", () => this.loadConfig());
+      resetBtn.addEventListener("click", () => {
+        const curProf = document.getElementById("sim-track-profile-select")?.value || "default";
+        this.loadConfig(curProf);
+      });
     }
 
     // Add Track button
@@ -305,19 +317,41 @@ window.SimulationTab = {
     });
   },
 
-  async loadConfig() {
+  async loadConfig(profile = null) {
     try {
-      const res = await fetch("/api/sim/config");
+      const activeProf = profile || document.getElementById("sim-track-profile-select")?.value || "default";
+      const res = await fetch(`/api/sim/config?profile=${encodeURIComponent(activeProf)}`);
       if (res.ok) {
         this.config = await res.json();
         this.customTracks = [];
+        this.populateProfileSelect();
         this.populateDateSelect();
-        this.populateFormFields();
+        this.populateGlobalSettings();
+        this.renderBaseTracks();
         this.renderCustomTracksList();
         this.checkSimStatus();
       }
     } catch (e) {
       console.error("Failed to load simulation config:", e);
+    }
+  },
+
+  populateProfileSelect() {
+    const sel = document.getElementById("sim-track-profile-select");
+    const tag = document.getElementById("sim-active-profile-tag");
+    if (!sel || !this.config?.available_profiles) return;
+    const current = this.config.active_profile || "default";
+    sel.innerHTML = "";
+    for (const p of this.config.available_profiles) {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.innerText = p.name;
+      if (p.id === current) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    if (tag) {
+      const found = this.config.available_profiles.find((p) => p.id === current);
+      tag.innerText = `Profile: ${found ? found.name : current}`;
     }
   },
 
@@ -363,51 +397,107 @@ window.SimulationTab = {
     }
   },
 
-  populateFormFields() {
+  populateGlobalSettings() {
     if (!this.config) return;
     const g = this.config.global_settings || {};
-    const b = this.config.base_tracks || {};
+    const capEl = document.getElementById("sim-capital");
+    if (capEl) capEl.value = g.capital || 250000;
+    const minDelayEl = document.getElementById("sim-min-delay");
+    if (minDelayEl) minDelayEl.value = g.min_delay_ms || 200;
+    const maxDelayEl = document.getElementById("sim-max-delay");
+    if (maxDelayEl) maxDelayEl.value = g.max_delay_ms || 500;
+    const brokEl = document.getElementById("sim-brokerage");
+    if (brokEl) brokEl.value = g.brokerage_per_order || 30;
+    const minPoleEl = document.getElementById("sim-min-pole");
+    if (minPoleEl) minPoleEl.value = ((g.min_pole_pct || 0.005) * 100).toFixed(2);
+    const frzEl = document.getElementById("sim-freeze-time");
+    if (frzEl) frzEl.value = g.entry_freeze_time || "15:00";
+    const sqEl = document.getElementById("sim-squareoff-time");
+    if (sqEl) sqEl.value = g.eod_squareoff_time || "15:15";
+  },
 
-    // Global
-    document.getElementById("sim-capital").value = g.capital || 250000;
-    document.getElementById("sim-min-delay").value = g.min_delay_ms || 200;
-    document.getElementById("sim-max-delay").value = g.max_delay_ms || 500;
-    document.getElementById("sim-brokerage").value = g.brokerage_per_order || 30;
-    document.getElementById("sim-min-pole").value = ((g.min_pole_pct || 0.005) * 100).toFixed(2);
-    document.getElementById("sim-freeze-time").value = g.entry_freeze_time || "15:00";
-    document.getElementById("sim-squareoff-time").value = g.eod_squareoff_time || "15:15";
+  renderBaseTracks() {
+    const container = document.getElementById("sim-base-tracks-container");
+    if (!container || !this.config?.base_tracks) return;
+    container.innerHTML = "";
 
-    // Fast Momentum
-    const fm = b.fast_momentum || {};
-    document.getElementById("fm-target").value = ((fm.target_pct || 0.15) * 100).toFixed(1);
-    document.getElementById("fm-sl").value = ((fm.sl_pct || 0.05) * 100).toFixed(1);
-    document.getElementById("fm-decay-sec").value = fm.target_decay_sec || 900;
-    document.getElementById("fm-decay-floor").value = ((fm.decay_floor_pct || 0.025) * 100).toFixed(1);
-    document.getElementById("fm-stagnation").value = fm.stagnation_timeout_sec || 1800;
-    document.getElementById("fm-be").value = ((fm.breakeven_trigger_pct || 0.025) * 100).toFixed(1);
-    this.setModeCheckboxes("fm-mode", fm.modes || ["ITM", "ATM", "OTM"]);
+    const titles = {
+      fast_momentum: { label: "⚡ Fast Momentum Track", color: "var(--accent-cyan)" },
+      trend_pullback: { label: "📈 Trend Pullback Track", color: "var(--accent-green)" },
+      fixed_target: { label: "🎯 Fixed Target Track", color: "var(--accent-amber)" },
+      structural_convexity: { label: "💎 Structural Convexity Track (Underlying Support SL)", color: "var(--accent-cyan)" },
+      opening_thrust_convex: { label: "🚀 Opening Thrust Convex Track (09:15-10:30)", color: "var(--accent-green)" },
+      delta_scalp: { label: "🎯 Delta Scalp Track (Deep ITM2 - Zero Theta)", color: "#38bdf8" },
+      micro_chandelier: { label: "🕯️ Micro-Chandelier Track (Rapid Micro-Trails)", color: "#fbbf24" },
+      gamma_runner: { label: "🔥 Gamma Runner Track (OTM2 Convexity)", color: "#f43f5e" },
+      volatility_expansion: { label: "🌊 Volatility Expansion Track (IV Thrust)", color: "#a855f7" },
+      adaptive_regime: { label: "⏳ Adaptive Regime Track (Multi-Phase)", color: "#34d399" },
+      trend_pullback_v2: { label: "📈 Trend Pullback V2 Track (Spread-Calibrated SL)", color: "#2dd4bf" },
+    };
 
-    // Trend Pullback
-    const tp = b.trend_pullback || {};
-    document.getElementById("tp-target").value = ((tp.target_pct || 0.25) * 100).toFixed(1);
-    document.getElementById("tp-sl").value = ((tp.sl_pct || 0.05) * 100).toFixed(1);
-    document.getElementById("tp-trailing-step").value = ((tp.trailing_step_pct || 0.01) * 100).toFixed(1);
-    document.getElementById("tp-timeout").value = tp.timeout_sec || 3600;
-    document.getElementById("tp-be").value = ((tp.breakeven_trigger_pct || 0.025) * 100).toFixed(1);
-    this.setModeCheckboxes("tp-mode", tp.modes || ["ITM", "ATM", "OTM"]);
+    for (const [key, tCfg] of Object.entries(this.config.base_tracks)) {
+      const meta = titles[key] || { label: `🛠️ ${key.replace(/_/g, " ").toUpperCase()}`, color: "var(--accent-cyan)" };
+      const card = document.createElement("div");
+      card.className = "track-card";
+      card.id = `card-${key}`;
+      card.dataset.trackKey = key;
 
-    // Fixed Target
-    const ft = b.fixed_target || {};
-    document.getElementById("ft-target").value = ((ft.target_pct || 0.15) * 100).toFixed(1);
-    document.getElementById("ft-sl").value = ((ft.sl_pct || 0.05) * 100).toFixed(1);
-    document.getElementById("ft-fixed-inr").value = ft.fixed_target_inr || 750;
-    document.getElementById("ft-timeout").value = ft.timeout_sec || 1800;
-    document.getElementById("ft-be").value = ((ft.breakeven_trigger_pct || 0.025) * 100).toFixed(1);
-    this.setModeCheckboxes("ft-mode", ft.modes || ["ITM", "ATM", "OTM"]);
+      let fieldsHtml = "";
+      for (const [pKey, pVal] of Object.entries(tCfg)) {
+        if (pKey === "modes" || pKey === "enabled") continue;
+        const isPct = pKey.endsWith("_pct");
+        const valDisp = isPct && typeof pVal === "number" ? (pVal * 100).toFixed(1) : pVal;
+        const label = pKey.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        fieldsHtml += `
+          <div class="form-group">
+            <label class="form-label">${label}${isPct ? ' %' : ''}</label>
+            <input type="${typeof pVal === 'number' ? 'number' : 'text'}" 
+                   class="form-input track-field-input" 
+                   data-param="${pKey}" 
+                   data-is-pct="${isPct}" 
+                   value="${valDisp}" 
+                   ${typeof pVal === 'number' ? 'step="any"' : ''} />
+          </div>`;
+      }
+
+      const availableModes = ["ITM2", "ITM1", "ATM", "OTM1", "OTM2"];
+      const activeModes = tCfg.modes || ["ATM"];
+      let modesHtml = `<div class="form-group" style="grid-column: 1 / -1;">
+        <label class="form-label">Strike Modes</label>
+        <div class="checkbox-group">`;
+      for (const m of availableModes) {
+        modesHtml += `
+          <label class="checkbox-label" style="display:inline-flex; align-items:center; gap:4px; font-size:11px; cursor:pointer;">
+            <input type="checkbox" class="track-mode-cb" data-mode="${m}" ${activeModes.includes(m) ? "checked" : ""} /> ${m}
+          </label>`;
+      }
+      modesHtml += `</div></div>`;
+
+      card.innerHTML = `
+        <div class="track-card-header">
+          <div class="track-card-title">
+            <span style="color:${meta.color};">${meta.label}</span>
+          </div>
+          <div class="checkbox-label">
+            <input type="checkbox" class="track-enable-toggle" ${tCfg.enabled !== false ? "checked" : ""} /> Enabled
+          </div>
+        </div>
+        <div class="track-card-body">
+          ${fieldsHtml}
+          ${modesHtml}
+        </div>
+      `;
+      container.appendChild(card);
+    }
+  },
+
+  populateFormFields() {
+    this.populateGlobalSettings();
+    this.renderBaseTracks();
   },
 
   setModeCheckboxes(prefix, modes) {
-    ["ITM", "ATM", "OTM"].forEach((m) => {
+    ["ITM2", "ITM1", "ATM", "OTM1", "OTM2"].forEach((m) => {
       const el = document.getElementById(`${prefix}-${m.toLowerCase()}`);
       if (el) el.checked = modes.includes(m);
     });
@@ -415,7 +505,7 @@ window.SimulationTab = {
 
   getModeCheckboxes(prefix) {
     const list = [];
-    ["ITM", "ATM", "OTM"].forEach((m) => {
+    ["ITM2", "ITM1", "ATM", "OTM1", "OTM2"].forEach((m) => {
       const el = document.getElementById(`${prefix}-${m.toLowerCase()}`);
       if (el && el.checked) list.push(m);
     });
@@ -440,42 +530,35 @@ window.SimulationTab = {
       modes: modes,
     };
 
-    const base_tracks = {
-      fast_momentum: {
-        enabled: document.getElementById("fm-enable-toggle").checked,
-        target_pct: parseFloat(document.getElementById("fm-target").value) / 100.0,
-        sl_pct: parseFloat(document.getElementById("fm-sl").value) / 100.0,
-        target_decay_sec: parseInt(document.getElementById("fm-decay-sec").value),
-        decay_floor_pct: parseFloat(document.getElementById("fm-decay-floor").value) / 100.0,
-        stagnation_timeout_sec: parseInt(document.getElementById("fm-stagnation").value),
-        breakeven_trigger_pct: parseFloat(document.getElementById("fm-be").value) / 100.0,
-        modes: this.getModeCheckboxes("fm-mode"),
-      },
-      trend_pullback: {
-        enabled: document.getElementById("tp-enable-toggle").checked,
-        target_pct: parseFloat(document.getElementById("tp-target").value) / 100.0,
-        sl_pct: parseFloat(document.getElementById("tp-sl").value) / 100.0,
-        trailing_step_pct: parseFloat(document.getElementById("tp-trailing-step").value) / 100.0,
-        timeout_sec: parseFloat(document.getElementById("tp-timeout").value),
-        breakeven_trigger_pct: parseFloat(document.getElementById("tp-be").value) / 100.0,
-        modes: this.getModeCheckboxes("tp-mode"),
-      },
-      fixed_target: {
-        enabled: document.getElementById("ft-enable-toggle").checked,
-        target_pct: parseFloat(document.getElementById("ft-target").value) / 100.0,
-        sl_pct: parseFloat(document.getElementById("ft-sl").value) / 100.0,
-        fixed_target_inr: parseFloat(document.getElementById("ft-fixed-inr").value),
-        timeout_sec: parseFloat(document.getElementById("ft-timeout").value),
-        breakeven_trigger_pct: parseFloat(document.getElementById("ft-be").value) / 100.0,
-        modes: this.getModeCheckboxes("ft-mode"),
-      },
-    };
+    const base_tracks = {};
+    const cards = document.querySelectorAll(".track-card[data-track-key]");
+    if (cards.length > 0) {
+      cards.forEach((card) => {
+        const key = card.dataset.trackKey;
+        const enabled = card.querySelector(".track-enable-toggle")?.checked ?? true;
+        const modes = [];
+        card.querySelectorAll(".track-mode-cb:checked").forEach((cb) => modes.push(cb.dataset.mode));
+        const params = { enabled, modes };
+        card.querySelectorAll(".track-field-input").forEach((inp) => {
+          const pKey = inp.dataset.param;
+          const isPct = inp.dataset.isPct === "true";
+          const rawVal = inp.value;
+          const numVal = parseFloat(rawVal);
+          params[pKey] = isPct ? (isNaN(numVal) ? 0.0 : numVal / 100.0) : (isNaN(numVal) ? rawVal : numVal);
+        });
+        base_tracks[key] = params;
+      });
+    } else if (this.config && this.config.base_tracks) {
+      Object.assign(base_tracks, JSON.parse(JSON.stringify(this.config.base_tracks)));
+    }
 
+    const selProfile = document.getElementById("sim-track-profile-select")?.value || "default";
     const runId = `RUN-${this.runs.length + 1}`;
 
     return {
       run_id: runId,
       date: date,
+      track_profile: selProfile,
       global_settings: global_settings,
       base_tracks: base_tracks,
       custom_tracks: JSON.parse(JSON.stringify(this.customTracks)),

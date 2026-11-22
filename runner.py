@@ -419,6 +419,9 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
     if not raw_tracks or raw_tracks.strip().upper() == "ALL":
         from common.tracks.factory import get_enabled_track_names
         tracks = get_enabled_track_names()
+    elif raw_tracks.strip().lower() in ("v1", "v2", "default") or os.path.exists(os.path.join("config", "tracks", f"{raw_tracks.strip().lower()}.json")):
+        from common.tracks.factory import get_enabled_track_names
+        tracks = get_enabled_track_names(track_profile=raw_tracks.strip().lower())
     else:
         tracks = [t.strip() for t in raw_tracks.split(",") if t.strip()]
 
@@ -547,7 +550,10 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     delay_sec = getattr(args, "delay", None)
     track_filter = getattr(args, "track", None)
     tracks = None
-    if track_filter and track_filter.upper() not in ("ALL", "DYNAMIC_TRIO"):
+    if track_filter and (track_filter.strip().lower() in ("v1", "v2", "default") or os.path.exists(os.path.join("config", "tracks", f"{track_filter.strip().lower()}.json"))):
+        from common.tracks.factory import get_enabled_track_names
+        tracks = get_enabled_track_names(track_profile=track_filter.strip().lower())
+    elif track_filter and track_filter.upper() not in ("ALL", "DYNAMIC_TRIO"):
         tracks = [t.strip() for t in track_filter.split(",") if t.strip()]
 
     mode_arg = getattr(args, "mode", None) or "paper,paper_delayed"

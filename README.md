@@ -127,9 +127,10 @@ Trading Stuff/
 │   └── utils/          # Affinity pinning (Linux / macOS QoS), clock, structured logger
 ├── web/                # Analytics & Simulation Web UI (aiohttp, WebSocket MTM, SPA, isolated workers)
 ├── simulation/         # Fast monolithic Polars/Arrow columnar option depth backtester
-├── config/             # YAML configurations, market calendar (09:15-15:30 IST), instrument master
+├── config/             # JSON configurations, tracks profiles (config/tracks/v1, v2, default)
 ├── scripts/            # run_distributed.py (Process Supervisor with process group cleanup)
 ├── runner.py           # Central Operational Orchestrator (CLI Entry Point)
+├── EXECUTION_TRACKS.md # Authoritative specification & reference for v1 and v2 execution tracks
 ├── WEB_VIEW_FLOW.md
 ├── ARCHITECTURE_SPEC_2_0.md
 ├── ARCHITECTURE_EVOLUTION.md

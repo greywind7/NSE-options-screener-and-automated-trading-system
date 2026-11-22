@@ -746,9 +746,6 @@ window.SimResultsPage = {
     }
 
     this.setTamRange(this.tamCurrentRange);
-    } catch (e) {
-      console.error("Candle fetch error in sim results page:", e);
-    }
   },
 
   formatINR(val, sign = true) {

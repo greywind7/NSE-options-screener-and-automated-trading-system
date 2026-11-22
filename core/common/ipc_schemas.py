@@ -144,6 +144,8 @@ class SetupAlert:
     flag_high: float
     flag_low: float
     timestamp: float
+    pole_high: Optional[float] = None
+    pole_low: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -159,6 +161,14 @@ class ActionableOpportunity:
     trigger_price: float
     strikes: Dict[str, Any]
     timestamp: float
+    flag_high: Optional[float] = None
+    flag_low: Optional[float] = None
+    pole_high: Optional[float] = None
+    pole_low: Optional[float] = None
+    atr: Optional[float] = None
+    rvol: Optional[float] = None
+    clv: Optional[float] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -484,17 +484,24 @@ class ColumnarSimEngine:
             return {}
 
         # ITM and OTM strikes
-        itm_idx = max(0, idx_atm - 1) if otype == "CE" else min(len(available) - 1, idx_atm + 1)
-        otm_idx = min(len(available) - 1, idx_atm + 1) if otype == "CE" else max(0, idx_atm - 1)
-        itm_strike, itm_token = available[itm_idx]
-        otm_strike, otm_token = available[otm_idx]
+        itm1_idx = max(0, idx_atm - 1) if otype == "CE" else min(len(available) - 1, idx_atm + 1)
+        itm2_idx = max(0, idx_atm - 2) if otype == "CE" else min(len(available) - 1, idx_atm + 2)
+        otm1_idx = min(len(available) - 1, idx_atm + 1) if otype == "CE" else max(0, idx_atm - 1)
+        otm2_idx = min(len(available) - 1, idx_atm + 2) if otype == "CE" else max(0, idx_atm - 2)
+
+        itm_strike, itm_token = available[itm1_idx]
+        itm2_strike, itm2_token = available[itm2_idx]
+        otm_strike, otm_token = available[otm1_idx]
+        otm2_strike, otm2_token = available[otm2_idx]
 
         candidates = {
             "ATM": (atm_strike, atm_token),
             "ITM": (itm_strike, itm_token),
             "ITM1": (itm_strike, itm_token),
+            "ITM2": (itm2_strike, itm2_token),
             "OTM": (otm_strike, otm_token),
             "OTM1": (otm_strike, otm_token),
+            "OTM2": (otm2_strike, otm2_token),
         }
 
         lot_size = self.lot_sizes.get(und, 250)
@@ -612,6 +619,7 @@ class ColumnarSimEngine:
         ltps = df_eq["ltp"].to_numpy().astype(np.float64) if "ltp" in df_eq.columns else np.zeros(len(ts_arr))
         vols = df_eq["volume"].to_numpy().astype(np.int64) if "volume" in df_eq.columns else np.zeros(len(ts_arr), dtype=np.int64)
         total_eq = len(ts_arr)
+        latest_equity_ltp: Dict[str, float] = {}
 
         for i in range(total_eq):
             t_curr = float(ts_arr[i])
@@ -621,6 +629,15 @@ class ColumnarSimEngine:
 
             # Step A: Feed equity tick to CandleManager
             candle_mgr.on_tick(token=token, ltp=ltp, vol=vol, ts=t_curr)
+            sym_key = normalize_instrument_token(token)
+            raw_sym = sym_key.split(":", 1)[1] if ":" in sym_key else sym_key
+            sym_idx = candle_mgr.symbol_to_index.get(sym_key)
+            if sym_idx is None:
+                sym_idx = candle_mgr.symbol_to_index.get(raw_sym)
+            if sym_idx is not None and sym_idx < len(candle_mgr.index_to_symbol):
+                canonical_sym = candle_mgr.index_to_symbol[sym_idx]
+                latest_equity_ltp[canonical_sym] = ltp
+                latest_equity_ltp[raw_sym] = ltp
 
             # Step B: Serialized Scoring Spin Evaluation (Evaluates whenever 1.0 simulated second elapses)
             if (t_curr - last_scoring_eval_ts) >= 1.0:
@@ -653,6 +670,13 @@ class ColumnarSimEngine:
                             trigger_price=alert.trigger_price,
                             strikes=resolved_strikes,
                             timestamp=t_curr,
+                            flag_high=alert.flag_high,
+                            flag_low=alert.flag_low,
+                            pole_high=getattr(alert, "pole_high", None),
+                            pole_low=getattr(alert, "pole_low", None),
+                            atr=alert.atr,
+                            rvol=alert.rvol,
+                            clv=alert.clv,
                         )
 
                         # Dispatch to Active Mode Tracks
@@ -700,6 +724,8 @@ class ColumnarSimEngine:
                                 continue
                             if trade.entry_time and t_curr <= trade.entry_time:
                                 continue
+                            if trade.symbol in latest_equity_ltp:
+                                trade.metadata["underlying_ltp"] = latest_equity_ltp[trade.symbol]
                             opt_q = self.get_option_quote(trade.token, t_curr)
                             if opt_q:
                                 track.on_tick(

@@ -1,0 +1,131 @@
+{
+  "name": "v1",
+  "display_name": "v1 Tracks (Legacy Baseline)",
+  "description": "Baseline v1 execution tracks (Fast Momentum, Trend Pullback, Fixed Target, Composites)",
+  "enabled_tracks": [
+    {
+      "type": "base",
+      "name": "fast_momentum",
+      "modes": [
+        "ITM",
+        "ATM",
+        "OTM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "trend_pullback",
+      "modes": [
+        "ITM",
+        "ATM",
+        "OTM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "fixed_target",
+      "modes": [
+        "ITM",
+        "ATM",
+        "OTM"
+      ]
+    },
+    {
+      "type": "composite",
+      "name": "composite_shared_ITM",
+      "shared_pool": true,
+      "composition": [
+        {
+          "fast_momentum": [
+            "ITM"
+          ]
+        },
+        {
+          "trend_pullback": [
+            "ITM"
+          ]
+        },
+        {
+          "fixed_target": [
+            "ITM"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "composite",
+      "name": "composite_shared_ATM",
+      "shared_pool": true,
+      "composition": [
+        {
+          "fast_momentum": [
+            "ATM"
+          ]
+        },
+        {
+          "trend_pullback": [
+            "ATM"
+          ]
+        },
+        {
+          "fixed_target": [
+            "ATM"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "composite",
+      "name": "composite_shared_OTM",
+      "shared_pool": true,
+      "composition": [
+        {
+          "fast_momentum": [
+            "OTM"
+          ]
+        },
+        {
+          "trend_pullback": [
+            "OTM"
+          ]
+        },
+        {
+          "fixed_target": [
+            "OTM"
+          ]
+        }
+      ]
+    }
+  ],
+  "tracks": {
+    "fast_momentum": {
+      "target_pct": 0.15,
+      "sl_pct": 0.05,
+      "target_decay_sec": 900,
+      "decay_floor_pct": 0.025,
+      "stagnation_timeout_sec": 1800,
+      "breakeven_trigger_pct": 0.025,
+      "min_pole_pct": 0.005,
+      "capital": 250000.0
+    },
+    "trend_pullback": {
+      "target_pct": 0.25,
+      "sl_pct": 0.05,
+      "trailing_step_pct": 0.01,
+      "timeout_sec": 3600.0,
+      "breakeven_trigger_pct": 0.025,
+      "capital": 250000.0
+    },
+    "fixed_target": {
+      "target_pct": 0.15,
+      "sl_pct": 0.05,
+      "fixed_target_inr": 750.0,
+      "timeout_sec": 1800.0,
+      "breakeven_trigger_pct": 0.025,
+      "capital": 250000.0
+    },
+    "composite": {
+      "capital": 250000.0
+    }
+  }
+}

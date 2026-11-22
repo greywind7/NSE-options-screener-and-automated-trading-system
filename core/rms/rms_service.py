@@ -147,17 +147,23 @@ class RMSService:
             atm_strike = round(trigger_price / step) * step
             if opt_type == "CE":
                 itm_strike = atm_strike - step
+                itm2_strike = atm_strike - 2 * step
                 otm_strike = atm_strike + step
+                otm2_strike = atm_strike + 2 * step
             else:
                 itm_strike = atm_strike + step
+                itm2_strike = atm_strike + 2 * step
                 otm_strike = atm_strike - step
+                otm2_strike = atm_strike - 2 * step
 
         expiry_tag = "26NOV"
 
         token_roles = {
             "ATM": atm_strike,
             "ITM1": itm_strike,
+            "ITM2": itm2_strike,
             "OTM1": otm_strike,
+            "OTM2": otm2_strike,
         }
 
         query_tokens = []
@@ -220,6 +226,11 @@ class RMSService:
                 "lot_size": lot_size,
             }
 
+        if "ITM1" in resolved and "ITM" not in resolved:
+            resolved["ITM"] = resolved["ITM1"]
+        if "OTM1" in resolved and "OTM" not in resolved:
+            resolved["OTM"] = resolved["OTM1"]
+
         return resolved
 
     def process_alert(self, alert: SetupAlert) -> Optional[ActionableOpportunity]:
@@ -240,6 +251,13 @@ class RMSService:
             trigger_price=alert.trigger_price,
             strikes=strikes,
             timestamp=time.time(),
+            flag_high=alert.flag_high,
+            flag_low=alert.flag_low,
+            pole_high=getattr(alert, "pole_high", None),
+            pole_low=getattr(alert, "pole_low", None),
+            atr=alert.atr,
+            rvol=alert.rvol,
+            clv=alert.clv,
         )
 
         topic = b"OPP." + alert.symbol.encode("utf-8")

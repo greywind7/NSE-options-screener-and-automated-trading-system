@@ -114,8 +114,12 @@ class BaseTrack(ABC):
                 return opp.strikes.get("ATM")
             elif m in ("ITM", "ITM1"):
                 return opp.strikes.get("ITM1") or opp.strikes.get("ITM")
+            elif m == "ITM2":
+                return opp.strikes.get("ITM2") or opp.strikes.get("ITM1") or opp.strikes.get("ITM")
             elif m in ("OTM", "OTM1"):
                 return opp.strikes.get("OTM1") or opp.strikes.get("OTM")
+            elif m == "OTM2":
+                return opp.strikes.get("OTM2") or opp.strikes.get("OTM1") or opp.strikes.get("OTM")
             return opp.strikes.get(m)
         return None
 
@@ -209,6 +213,15 @@ class BaseTrack(ABC):
                 "required_capital": required_capital,
                 "underlying_entry_price": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
                 "trigger_price": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
+                "flag_high": getattr(opp, "flag_high", None),
+                "flag_low": getattr(opp, "flag_low", None),
+                "pole_high": getattr(opp, "pole_high", None),
+                "pole_low": getattr(opp, "pole_low", None),
+                "direction": getattr(opp, "direction", "BULL"),
+                "atr": getattr(opp, "atr", None),
+                "rvol": getattr(opp, "rvol", None),
+                "clv": getattr(opp, "clv", None),
+                "underlying_ltp": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
             },
         )
 
@@ -216,8 +229,10 @@ class BaseTrack(ABC):
         self.active_trades[trade_id] = trade
         self._pending_orders[order_id] = trade_id
 
-        # Subscribe to QuotesBroker for live depth streaming
+        # Subscribe to QuotesBroker for live depth streaming (both option contract and underlying equity)
         self.context.subscribe_quotes([token])
+        if opp.symbol:
+            self.context.subscribe_quotes([opp.symbol, f"NSE:{opp.symbol}"])
 
         # Submit entry BUY order
         req = OrderRequest(
@@ -252,9 +267,29 @@ class BaseTrack(ABC):
         norm_topic = normalize_instrument_token(topic_token) if topic_token else ""
         norm_sym = normalize_instrument_token(symbol) if symbol else ""
 
-        # Match trades by token, topic token, symbol, or normalized contract attributes
+        # 1. Check if tick corresponds to underlying equity for active trades
+        for t in list(self.active_trades.values()):
+            if t.status != "OPEN":
+                continue
+            und_sym = (t.metadata.get("underlying_symbol") or "").upper().replace(" ", "").replace("NSE:", "")
+            und_norm = normalize_instrument_token(t.metadata.get("underlying_symbol", "")) if t.metadata.get("underlying_symbol") else ""
+            is_underlying = False
+            if und_sym:
+                is_underlying = (
+                    (symbol and symbol.upper().replace(" ", "").replace("NSE:", "") == und_sym)
+                    or (token and token.upper().replace(" ", "").replace("NSE:", "") == und_sym)
+                    or (norm_sym and und_norm and norm_sym == und_norm)
+                    or (norm_token and und_norm and norm_token == und_norm)
+                )
+            if is_underlying and ltp > 0.0:
+                t.metadata["underlying_ltp"] = ltp
+                t.metadata["underlying_last_ts"] = ts
+                if hasattr(self, "on_underlying_tick"):
+                    self.on_underlying_tick(t, ltp=ltp, ts=ts)
+
+        # 2. Match trades by option contract token, topic token, symbol, or normalized contract attributes
         trades_to_eval = []
-        for t in self.active_trades.values():
+        for t in list(self.active_trades.values()):
             if t.status != "OPEN":
                 continue
             if self.context.mode == "paper_delayed" and t.trade_id in self._pending_orders.values():
@@ -276,6 +311,8 @@ class BaseTrack(ABC):
                     trades_to_eval.append(t)
                     continue
         for trade in trades_to_eval:
+            if trade.status != "OPEN":
+                continue
             trade.current_bid = bid
             trade.highest_price = max(trade.highest_price, bid)
 

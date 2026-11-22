@@ -260,8 +260,48 @@ class SimulationService:
         unique_dates.sort(key=lambda d: d["date"])
         return unique_dates
 
-    def get_default_config(self) -> Dict[str, Any]:
-        """Load default parameters from config/strategies.json and system.json."""
+    def get_available_track_profiles(self) -> List[Dict[str, Any]]:
+        """Return list of available track profile presets from config/tracks/."""
+        tracks_dir = "config/tracks"
+        profiles = []
+        order = ["default", "v2", "v1"]
+        seen = set()
+
+        for pid in order:
+            pfile = os.path.join(tracks_dir, f"{pid}.json")
+            if os.path.exists(pfile):
+                try:
+                    with open(pfile, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    profiles.append({
+                        "id": pid,
+                        "name": data.get("display_name") or data.get("name") or pid,
+                        "description": data.get("description", ""),
+                    })
+                    seen.add(pid)
+                except Exception:
+                    pass
+
+        if os.path.exists(tracks_dir):
+            for fname in sorted(os.listdir(tracks_dir)):
+                if fname.endswith(".json"):
+                    pid = fname[:-5]
+                    if pid not in seen:
+                        try:
+                            with open(os.path.join(tracks_dir, fname), "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            profiles.append({
+                                "id": pid,
+                                "name": data.get("display_name") or data.get("name") or pid,
+                                "description": data.get("description", ""),
+                            })
+                            seen.add(pid)
+                        except Exception:
+                            pass
+        return profiles
+
+    def get_default_config(self, profile: str = "default") -> Dict[str, Any]:
+        """Load default parameters from config/tracks/{profile}.json or fallback to config/strategies.json."""
         strat_path = "config/strategies.json"
         raw_cfg = {}
         if os.path.exists(strat_path):
@@ -269,57 +309,48 @@ class SimulationService:
                 raw_cfg = json.load(f)
 
         momentum = raw_cfg.get("strategies", {}).get("momentum", {})
-        tracks_cfg = momentum.get("tracks", {})
-        enabled_list = momentum.get("enabled_tracks", [])
+        
+        # Load from config/tracks/{profile}.json if available
+        profile_path = os.path.join("config", "tracks", f"{profile}.json")
+        prof_data = {}
+        if os.path.exists(profile_path):
+            try:
+                with open(profile_path, "r", encoding="utf-8") as f:
+                    prof_data = json.load(f)
+            except Exception:
+                pass
 
-        # Extract base tracks configuration
-        base_tracks = {
-            "fast_momentum": {
-                "target_pct": float(tracks_cfg.get("fast_momentum", {}).get("target_pct", 0.15)),
-                "sl_pct": float(tracks_cfg.get("fast_momentum", {}).get("sl_pct", 0.05)),
-                "target_decay_sec": int(tracks_cfg.get("fast_momentum", {}).get("target_decay_sec", 900)),
-                "decay_floor_pct": float(tracks_cfg.get("fast_momentum", {}).get("decay_floor_pct", 0.025)),
-                "stagnation_timeout_sec": int(tracks_cfg.get("fast_momentum", {}).get("stagnation_timeout_sec", 1800)),
-                "breakeven_trigger_pct": float(tracks_cfg.get("fast_momentum", {}).get("breakeven_trigger_pct", 0.025)),
-                "min_pole_pct": float(tracks_cfg.get("fast_momentum", {}).get("min_pole_pct", 0.005)),
-                "modes": ["ITM", "ATM", "OTM"],
-                "enabled": True,
-            },
-            "trend_pullback": {
-                "target_pct": float(tracks_cfg.get("trend_pullback", {}).get("target_pct", 0.25)),
-                "sl_pct": float(tracks_cfg.get("trend_pullback", {}).get("sl_pct", 0.05)),
-                "trailing_step_pct": float(tracks_cfg.get("trend_pullback", {}).get("trailing_step_pct", 0.01)),
-                "timeout_sec": float(tracks_cfg.get("trend_pullback", {}).get("timeout_sec", 3600.0)),
-                "breakeven_trigger_pct": float(tracks_cfg.get("trend_pullback", {}).get("breakeven_trigger_pct", 0.025)),
-                "modes": ["ITM", "ATM", "OTM"],
-                "enabled": True,
-            },
-            "fixed_target": {
-                "target_pct": float(tracks_cfg.get("fixed_target", {}).get("target_pct", 0.15)),
-                "sl_pct": float(tracks_cfg.get("fixed_target", {}).get("sl_pct", 0.05)),
-                "fixed_target_inr": float(tracks_cfg.get("fixed_target", {}).get("fixed_target_inr", 750.0)),
-                "timeout_sec": float(tracks_cfg.get("fixed_target", {}).get("timeout_sec", 1800.0)),
-                "breakeven_trigger_pct": float(tracks_cfg.get("fixed_target", {}).get("breakeven_trigger_pct", 0.025)),
-                "modes": ["ITM", "ATM", "OTM"],
-                "enabled": True,
-            },
-        }
+        enabled_list = prof_data.get("enabled_tracks", []) if prof_data else momentum.get("enabled_tracks", [])
+        tracks_cfg = prof_data.get("tracks", {}) if prof_data else momentum.get("tracks", {})
 
-        # Extract composite tracks
+        base_tracks = {}
         composite_tracks = []
         for entry in enabled_list:
-            if isinstance(entry, dict) and entry.get("type") == "composite":
+            if not isinstance(entry, dict):
+                continue
+            t_type = entry.get("type", "base")
+            t_name = entry.get("name")
+            if not t_name:
+                continue
+            if t_type == "base":
+                p = dict(tracks_cfg.get(t_name, {}))
+                p["modes"] = entry.get("modes", ["ATM"])
+                p["enabled"] = True
+                base_tracks[t_name] = p
+            elif t_type == "composite":
                 composite_tracks.append({
-                    "name": entry.get("name"),
+                    "name": t_name,
                     "shared_pool": bool(entry.get("shared_pool", True)),
                     "composition": entry.get("composition", []),
                     "enabled": True,
                 })
 
         available_dates = self.get_simulation_dates()
-        default_date = available_dates[0]["date"] if available_dates else "2026-11-19"
+        default_date = available_dates[-1]["date"] if available_dates else "2026-11-19"
 
         return {
+            "active_profile": profile,
+            "available_profiles": self.get_available_track_profiles(),
             "selected_date": default_date,
             "cached_date": self.cached_date,
             "available_dates": available_dates,
@@ -801,6 +832,7 @@ class SimulationService:
                 "momentum": {
                     "enabled_tracks": enabled_spec,
                     "tracks": track_params_dict,
+                    "track_profile": params.get("track_profile", "default"),
                     "brokerage_per_order": float(glob.get("brokerage_per_order", 30.0)),
                     "entry_freeze_time": glob.get("entry_freeze_time", "15:00"),
                     "eod_squareoff_time": glob.get("eod_squareoff_time", "15:15"),

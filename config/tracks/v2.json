@@ -1,0 +1,118 @@
+{
+  "name": "v2",
+  "display_name": "v2 Tracks (New Multi-Regime)",
+  "description": "Next-generation 8 execution tracks across all four Risk-Reward quadrants",
+  "enabled_tracks": [
+    {
+      "type": "base",
+      "name": "structural_convexity",
+      "modes": [
+        "ATM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "opening_thrust_convex",
+      "modes": [
+        "ATM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "delta_scalp",
+      "modes": [
+        "ITM2"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "micro_chandelier",
+      "modes": [
+        "ITM1"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "gamma_runner",
+      "modes": [
+        "OTM2"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "volatility_expansion",
+      "modes": [
+        "ATM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "adaptive_regime",
+      "modes": [
+        "ATM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "trend_pullback_v2",
+      "modes": [
+        "ITM1"
+      ]
+    }
+  ],
+  "tracks": {
+    "structural_convexity": {
+      "target_pct": 1.0,
+      "sl_pct": 0.12,
+      "breakeven_trigger_pct": 0.08,
+      "profit_trail_threshold_pct": 0.15,
+      "profit_trail_ratio": 0.50,
+      "capital": 250000.0
+    },
+    "opening_thrust_convex": {
+      "target_pct": 0.35,
+      "sl_pct": 0.06,
+      "breakeven_trigger_pct": 0.15,
+      "cutoff_time": "10:45",
+      "capital": 250000.0
+    },
+    "delta_scalp": {
+      "target_pct": 0.07,
+      "sl_pct": 0.04,
+      "velocity_timeout_sec": 180.0,
+      "capital": 250000.0
+    },
+    "micro_chandelier": {
+      "target_pct": 0.10,
+      "sl_pct": 0.05,
+      "stagnation_timeout_sec": 300.0,
+      "capital": 250000.0
+    },
+    "gamma_runner": {
+      "target_pct": 0.75,
+      "sl_pct": 0.15,
+      "capital": 250000.0
+    },
+    "volatility_expansion": {
+      "target_pct": 0.25,
+      "sl_pct": 0.08,
+      "breakeven_trigger_pct": 0.10,
+      "deceleration_timeout_sec": 300.0,
+      "capital": 250000.0
+    },
+    "adaptive_regime": {
+      "target_pct": 0.18,
+      "sl_pct": 0.07,
+      "breakeven_trigger_pct": 0.07,
+      "capital": 250000.0
+    },
+    "trend_pullback_v2": {
+      "target_pct": 0.25,
+      "sl_pct": 0.06,
+      "breakeven_trigger_pct": 0.04,
+      "trailing_step_pct": 0.008,
+      "timeout_sec": 3600.0,
+      "capital": 250000.0
+    }
+  }
+}

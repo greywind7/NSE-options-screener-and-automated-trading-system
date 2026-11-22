@@ -5,6 +5,8 @@ Supports:
 - Base tracks with explicit strike modes (e.g. fast_momentum_ATM, fast_momentum_ITM)
 - Composite tracks with sub-track compositions and shared vs equal-share pools.
 """
+import json
+import os
 from typing import Any, Dict, List, Optional
 from common.interfaces import ExecutionContext
 from common.tracks.base_track import BaseTrack
@@ -12,23 +14,92 @@ from common.tracks.fast_momentum import FastMomentumTrack
 from common.tracks.trend_pullback import TrendPullbackTrack
 from common.tracks.fixed_target import FixedTargetTrack
 from common.tracks.composite_track import CompositeTrack
+from common.tracks.structural_convexity import StructuralConvexityTrack
+from common.tracks.opening_thrust_convex import OpeningThrustConvexityTrack
+from common.tracks.delta_scalp import DeltaScalpTrack
+from common.tracks.micro_chandelier import MicroChandelierTrack
+from common.tracks.gamma_runner import GammaRunnerTrack
+from common.tracks.volatility_expansion import VolatilityExpansionTrack
+from common.tracks.adaptive_regime import AdaptiveRegimeTrack
+from common.tracks.trend_pullback_v2 import TrendPullbackV2Track
 from core.config.config_loader import get_config_manager
 
 TRACK_CLASS_MAP = {
+    # v1 baseline tracks
     "fast_momentum": FastMomentumTrack,
     "trend_pullback": TrendPullbackTrack,
     "fixed_target": FixedTargetTrack,
     "composite": CompositeTrack,
+    # v2 multi-regime tracks
+    "structural_convexity": StructuralConvexityTrack,
+    "opening_thrust_convex": OpeningThrustConvexityTrack,
+    "delta_scalp": DeltaScalpTrack,
+    "micro_chandelier": MicroChandelierTrack,
+    "gamma_runner": GammaRunnerTrack,
+    "volatility_expansion": VolatilityExpansionTrack,
+    "adaptive_regime": AdaptiveRegimeTrack,
+    "trend_pullback_v2": TrendPullbackV2Track,
 }
 
 
-def _get_momentum_config(strategy_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def load_track_profile(profile_name_or_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Load a track configuration profile from config/tracks/{name}.json or direct path.
+    Supported presets: 'default', 'v1', 'v2', or custom profile filename.
+    """
+    if not profile_name_or_path:
+        profile_name_or_path = "default"
+
+    # If direct path
+    if os.path.exists(profile_name_or_path) and os.path.isfile(profile_name_or_path):
+        with open(profile_name_or_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    # Check config/tracks/ directory
+    cand_path = os.path.join("config", "tracks", f"{profile_name_or_path}.json")
+    if os.path.exists(cand_path):
+        with open(cand_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    if profile_name_or_path.endswith(".json"):
+        cand_path2 = os.path.join("config", "tracks", profile_name_or_path)
+        if os.path.exists(cand_path2):
+            with open(cand_path2, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+    return None
+
+
+def _get_momentum_config(
+    strategy_cfg: Optional[Dict[str, Any]] = None,
+    track_profile: Optional[str] = None,
+) -> Dict[str, Any]:
     if strategy_cfg is not None:
+        prof = track_profile or strategy_cfg.get("track_profile") or strategy_cfg.get("profile")
+        if prof:
+            loaded = load_track_profile(prof)
+            if loaded:
+                res = dict(strategy_cfg)
+                res["enabled_tracks"] = loaded.get("enabled_tracks", [])
+                t_dict = dict(res.get("tracks", {}))
+                t_dict.update(loaded.get("tracks", {}))
+                res["tracks"] = t_dict
+                return res
+
         if "strategies" in strategy_cfg and "momentum" in strategy_cfg["strategies"]:
             return strategy_cfg["strategies"]["momentum"]
         elif "momentum" in strategy_cfg:
             return strategy_cfg["momentum"]
         return strategy_cfg
+
+    if track_profile:
+        loaded = load_track_profile(track_profile)
+        if loaded:
+            return loaded
+
+    default_prof = load_track_profile("default")
+    if default_prof:
+        return default_prof
 
     cfg = get_config_manager()
     return cfg.strategy.get("strategies", {}).get("momentum", {})
@@ -43,13 +114,16 @@ def _get_enabled_tracks_spec(momentum_cfg: Dict[str, Any]) -> Optional[List[Dict
     )
 
 
-def get_enabled_track_names(strategy_cfg: Optional[Dict[str, Any]] = None) -> List[str]:
+def get_enabled_track_names(
+    strategy_cfg: Optional[Dict[str, Any]] = None,
+    track_profile: Optional[str] = None,
+) -> List[str]:
     """
-    Extract top-level executable track names from strategy configuration.
+    Extract top-level executable track names from strategy configuration or profile.
     Example output for standard config:
         ['fast_momentum_ATM', 'fast_momentum_ITM', 'combination']
     """
-    momentum_cfg = _get_momentum_config(strategy_cfg)
+    momentum_cfg = _get_momentum_config(strategy_cfg, track_profile=track_profile)
     spec = _get_enabled_tracks_spec(momentum_cfg)
 
     if not spec:
@@ -179,6 +253,113 @@ def _instantiate_base_track(
             entry_freeze_time=frz_time,
             eod_squareoff_time=eod_time,
         )
+    elif base_type == "structural_convexity":
+        return cls(
+            context=context,
+            track_name=track_name,
+            target_pct=float(p.get("target_pct", 1.0)),
+            sl_pct=float(p.get("sl_pct", 0.12)),
+            breakeven_trigger_pct=float(p.get("breakeven_trigger_pct", 0.08)),
+            profit_trail_threshold_pct=float(p.get("profit_trail_threshold_pct", 0.15)),
+            profit_trail_ratio=float(p.get("profit_trail_ratio", 0.50)),
+            preferred_mode=preferred_mode or "ATM",
+            parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
+        )
+    elif base_type == "opening_thrust_convex":
+        return cls(
+            context=context,
+            track_name=track_name,
+            target_pct=float(p.get("target_pct", 0.35)),
+            sl_pct=float(p.get("sl_pct", 0.06)),
+            breakeven_trigger_pct=float(p.get("breakeven_trigger_pct", 0.15)),
+            cutoff_time=str(p.get("cutoff_time", "10:45")),
+            preferred_mode=preferred_mode or "ATM",
+            parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
+        )
+    elif base_type == "delta_scalp":
+        return cls(
+            context=context,
+            track_name=track_name,
+            target_pct=float(p.get("target_pct", 0.07)),
+            sl_pct=float(p.get("sl_pct", 0.04)),
+            velocity_timeout_sec=float(p.get("velocity_timeout_sec", 180.0)),
+            preferred_mode=preferred_mode or "ITM2",
+            parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
+        )
+    elif base_type == "micro_chandelier":
+        return cls(
+            context=context,
+            track_name=track_name,
+            target_pct=float(p.get("target_pct", 0.10)),
+            sl_pct=float(p.get("sl_pct", 0.05)),
+            stagnation_timeout_sec=float(p.get("stagnation_timeout_sec", 300.0)),
+            preferred_mode=preferred_mode or "ITM1",
+            parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
+        )
+    elif base_type == "gamma_runner":
+        return cls(
+            context=context,
+            track_name=track_name,
+            target_pct=float(p.get("target_pct", 0.75)),
+            sl_pct=float(p.get("sl_pct", 0.15)),
+            preferred_mode=preferred_mode or "OTM2",
+            parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
+        )
+    elif base_type == "volatility_expansion":
+        return cls(
+            context=context,
+            track_name=track_name,
+            target_pct=float(p.get("target_pct", 0.25)),
+            sl_pct=float(p.get("sl_pct", 0.08)),
+            breakeven_trigger_pct=float(p.get("breakeven_trigger_pct", 0.10)),
+            deceleration_timeout_sec=float(p.get("deceleration_timeout_sec", 300.0)),
+            preferred_mode=preferred_mode or "ATM",
+            parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
+        )
+    elif base_type == "adaptive_regime":
+        return cls(
+            context=context,
+            track_name=track_name,
+            target_pct=float(p.get("target_pct", 0.18)),
+            sl_pct=float(p.get("sl_pct", 0.07)),
+            parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
+        )
+    elif base_type == "trend_pullback_v2":
+        return cls(
+            context=context,
+            track_name=track_name,
+            target_pct=float(p.get("target_pct", 0.25)),
+            sl_pct=float(p.get("sl_pct", 0.06)),
+            breakeven_trigger_pct=float(p.get("breakeven_trigger_pct", 0.04)),
+            trailing_step_pct=float(p.get("trailing_step_pct", 0.008)),
+            timeout_sec=float(p.get("timeout_sec", 3600.0)),
+            preferred_mode=preferred_mode or "ITM1",
+            parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
+        )
     else:
         return cls(
             context=context,
@@ -198,12 +379,20 @@ def create_tracks(
     strategy_cfg: Optional[Dict[str, Any]] = None,
     entry_freeze_time: Optional[str] = None,
     eod_squareoff_time: Optional[str] = None,
+    track_profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Construct track instances based on configuration and optional track_filter.
     Returns: Dict[str, Union[BaseTrack, CompositeTrack]] mapping track_name -> instance.
     """
-    momentum_cfg = _get_momentum_config(strategy_cfg)
+    eff_profile = track_profile
+    if track_filter and len(track_filter) == 1:
+        cand_prof = track_filter[0].strip().lower()
+        if cand_prof in ("v1", "v2", "default") or os.path.exists(os.path.join("config", "tracks", f"{cand_prof}.json")):
+            eff_profile = cand_prof
+            track_filter = None
+
+    momentum_cfg = _get_momentum_config(strategy_cfg, track_profile=eff_profile)
     spec = _get_enabled_tracks_spec(momentum_cfg)
     track_params_dict = momentum_cfg.get("tracks", {})
 
