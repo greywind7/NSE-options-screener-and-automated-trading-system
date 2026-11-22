@@ -198,6 +198,7 @@ class BaseTrack(ABC):
             status="OPEN",
             entry_reason=entry_reason,
             origin_track=origin_track,
+            underlying_entry_price=float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
             metadata={
                 "opp_id": opp.opp_id,
                 "archetype": opp.archetype,
@@ -206,6 +207,8 @@ class BaseTrack(ABC):
                 "entry_reason": entry_reason,
                 "preferred_mode": self.preferred_mode,
                 "required_capital": required_capital,
+                "underlying_entry_price": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
+                "trigger_price": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
             },
         )
 

@@ -21,13 +21,30 @@ class IntradayChart {
   }
 
   _setupCanvas() {
-    const rect = this.canvas.getBoundingClientRect();
+    const isSquare = this.canvas.classList.contains("chart-square") || !!this.canvas.closest(".chart-square-wrapper");
     const dpr = window.devicePixelRatio || 1;
-    this.width = rect.width || 600;
-    this.height = rect.height || 220;
+    const rect = this.canvas.getBoundingClientRect();
 
-    this.canvas.width = this.width * dpr;
-    this.canvas.height = this.height * dpr;
+    let w = rect.width;
+    if (!w || w <= 0) {
+      w = this.canvas.clientWidth || 600;
+    }
+    this.width = Math.round(w);
+
+    if (isSquare) {
+      // 1:1 square: height matches width exactly
+      this.height = this.width;
+      this.canvas.style.height = `${this.width}px`;
+    } else {
+      let h = rect.height;
+      if (!h || h <= 0) {
+        h = this.canvas.clientHeight || 440;
+      }
+      this.height = Math.round(h);
+    }
+
+    this.canvas.width = Math.round(this.width * dpr);
+    this.canvas.height = Math.round(this.height * dpr);
     this.ctx.scale(dpr, dpr);
   }
 
@@ -78,6 +95,15 @@ class IntradayChart {
     this.isHovering = false;
     this._setupCanvas();
     this.render();
+    if (typeof window !== "undefined" && window.requestAnimationFrame) {
+      window.requestAnimationFrame(() => {
+        const r = this.canvas.getBoundingClientRect();
+        if (r.width > 0 && (Math.abs(r.width - this.width) > 2 || Math.abs(r.height - this.height) > 2)) {
+          this._setupCanvas();
+          this.render();
+        }
+      });
+    }
   }
 
   _getPnl(pt) {
@@ -251,7 +277,11 @@ class IntradayChart {
       ctx.strokeStyle = "rgba(0, 240, 255, 0.5)";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.roundRect(boxX, boxY, boxW, boxH, 4);
+      if (typeof ctx.roundRect === "function") {
+        ctx.roundRect(boxX, boxY, boxW, boxH, 4);
+      } else {
+        ctx.rect(boxX, boxY, boxW, boxH);
+      }
       ctx.fill();
       ctx.stroke();
 
@@ -283,13 +313,30 @@ class CandleChart {
   }
 
   _setupCanvas() {
-    const rect = this.canvas.getBoundingClientRect();
+    const isSquare = this.canvas.classList.contains("chart-square") || !!this.canvas.closest(".tam-chart-section") || !!this.canvas.closest(".chart-square-wrapper");
     const dpr = window.devicePixelRatio || 1;
-    this.width = rect.width || 600;
-    this.height = rect.height || 260;
+    const rect = this.canvas.getBoundingClientRect();
 
-    this.canvas.width = this.width * dpr;
-    this.canvas.height = this.height * dpr;
+    let w = rect.width;
+    if (!w || w <= 0) {
+      w = this.canvas.clientWidth || 500;
+    }
+    this.width = Math.round(w);
+
+    if (isSquare) {
+      // Guaranteed 1:1 square: height matches width exactly
+      this.height = this.width;
+      this.canvas.style.height = `${this.width}px`;
+    } else {
+      let h = rect.height;
+      if (!h || h <= 0) {
+        h = this.canvas.clientHeight || 440;
+      }
+      this.height = Math.round(h);
+    }
+
+    this.canvas.width = Math.round(this.width * dpr);
+    this.canvas.height = Math.round(this.height * dpr);
     this.ctx.scale(dpr, dpr);
   }
 
@@ -328,12 +375,42 @@ class CandleChart {
 
   setData(candles, markers = [], mode = "candle") {
     this.candles = candles || [];
-    this.markers = markers || [];
+    if (markers && !Array.isArray(markers)) {
+      const arr = [];
+      if (markers.entryPrice && markers.entryTime) {
+        arr.push({
+          timestamp: markers.entryTime,
+          price: markers.entryPrice,
+          type: "ENTRY",
+          reason: markers.entryReason || markers.text || "Entry",
+        });
+      }
+      if (markers.exitPrice && markers.exitTime) {
+        arr.push({
+          timestamp: markers.exitTime,
+          price: markers.exitPrice,
+          type: "EXIT",
+          reason: markers.exitReason || markers.text || "Exit",
+        });
+      }
+      this.markers = arr;
+    } else {
+      this.markers = markers || [];
+    }
     this.mode = mode || "candle";
     this.hoverIndex = -1;
     this.isHovering = false;
     this._setupCanvas();
     this.render();
+    if (typeof window !== "undefined" && window.requestAnimationFrame) {
+      window.requestAnimationFrame(() => {
+        const r = this.canvas.getBoundingClientRect();
+        if (r.width > 0 && (Math.abs(r.width - this.width) > 2 || Math.abs(r.height - this.height) > 2)) {
+          this._setupCanvas();
+          this.render();
+        }
+      });
+    }
   }
 
   setMode(mode) {
@@ -359,8 +436,8 @@ class CandleChart {
 
     const totalPlotH = h - p.top - p.bottom;
     const gap = 12;
-    // 72% for price, 28% for volume
-    const pricePlotH = Math.floor((totalPlotH - gap) * 0.72);
+    // 80% for price action, 20% for volume
+    const pricePlotH = Math.floor((totalPlotH - gap) * 0.80);
     const volPlotH = totalPlotH - gap - pricePlotH;
 
     const priceTop = p.top;
@@ -395,7 +472,7 @@ class CandleChart {
     const getX = (idx) => p.left + (idx / Math.max(1, this.candles.length - 1)) * plotW;
 
     // Dynamic bar width
-    const barW = Math.max(3, Math.min(18, (plotW / Math.max(1, this.candles.length)) * 0.72));
+    const barW = Math.max(4, Math.min(24, (plotW / Math.max(1, this.candles.length)) * 0.72));
 
     // 2. Draw Price Grid & Y-Axis Labels
     ctx.lineWidth = 1;
@@ -516,14 +593,20 @@ class CandleChart {
     const markerDetails = [];
     for (const m of this.markers) {
       if (!m.timestamp || !m.price) continue;
-      // Find closest candle index
+      // Find candle containing marker timestamp (range containment)
       let bestIdx = 0;
-      let minDiff = Infinity;
-      for (let i = 0; i < this.candles.length; i++) {
-        const diff = Math.abs(this.candles[i].timestamp - m.timestamp);
-        if (diff < minDiff) {
-          minDiff = diff;
-          bestIdx = i;
+      if (this.candles.length > 0) {
+        if (m.timestamp <= this.candles[0].timestamp) {
+          bestIdx = 0;
+        } else if (m.timestamp >= this.candles[this.candles.length - 1].timestamp) {
+          bestIdx = this.candles.length - 1;
+        } else {
+          for (let i = 0; i < this.candles.length - 1; i++) {
+            if (m.timestamp >= this.candles[i].timestamp && m.timestamp < this.candles[i + 1].timestamp) {
+              bestIdx = i;
+              break;
+            }
+          }
         }
       }
 
@@ -538,6 +621,7 @@ class CandleChart {
         price: m.price,
         time: candleTime,
         color: markerColor,
+        reason: m.reason || (isEntry ? "Entry" : "Exit"),
       });
 
       // Subtle vertical guide line across price plot
@@ -573,9 +657,9 @@ class CandleChart {
       let cornerY = priceTop + 8;
 
       for (const md of markerDetails) {
-        const labelText = md.type === "ENTRY"
-          ? `▲ Entry: ₹${md.price.toFixed(2)}${md.time ? ' (' + md.time + ')' : ''}`
-          : `▼ Exit: ₹${md.price.toFixed(2)}${md.time ? ' (' + md.time + ')' : ''}`;
+        const symbol = md.type === "ENTRY" ? "▲" : "▼";
+        const reasonStr = md.reason ? md.reason : (md.type === "ENTRY" ? "Entry" : "Exit");
+        const labelText = `${symbol} ${reasonStr}: ₹${md.price.toFixed(2)}${md.time ? ' (' + md.time + ')' : ''}`;
 
         ctx.font = "bold 10px monospace";
         const textW = ctx.measureText(labelText).width;
@@ -586,7 +670,11 @@ class CandleChart {
         ctx.strokeStyle = md.color;
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.roundRect(cornerX, cornerY, bW, bH, 3);
+        if (typeof ctx.roundRect === "function") {
+          ctx.roundRect(cornerX, cornerY, bW, bH, 3);
+        } else {
+          ctx.rect(cornerX, cornerY, bW, bH);
+        }
         ctx.fill();
         ctx.stroke();
 

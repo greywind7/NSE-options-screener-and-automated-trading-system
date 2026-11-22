@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Antigravity // Simulation Report</title>
-  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="stylesheet" href="/static/css/style.css?v=2.0.2" />
   <style>
     body {
       background: var(--bg-body);
@@ -173,12 +173,20 @@
       <div class="chart-box">
         <div class="chart-header">
           <span class="chart-title">Simulated Intraday Cumulative P&L Curve</span>
-          <label class="chart-checkbox-label">
-            <input type="checkbox" id="srp-brokerage-toggle" checked />
-            <span>Include Brokerage</span>
-          </label>
+          <div style="display:flex; align-items:center; gap:12px;">
+            <div class="pill-group">
+              <button type="button" id="srp-aspect-square" class="pill-btn active">1:1 Square</button>
+              <button type="button" id="srp-aspect-wide" class="pill-btn">Wide</button>
+            </div>
+            <label class="chart-checkbox-label">
+              <input type="checkbox" id="srp-brokerage-toggle" checked />
+              <span>Include Brokerage</span>
+            </label>
+          </div>
         </div>
-        <canvas id="srp-chart-canvas" class="chart-canvas" style="height:260px;"></canvas>
+        <div id="srp-curve-wrapper" class="chart-square-wrapper">
+          <canvas id="srp-chart-canvas" class="chart-canvas chart-square"></canvas>
+        </div>
       </div>
 
       <!-- Simulated Trade Log Table -->
@@ -196,6 +204,7 @@
                 <th>Symbol</th>
                 <th>Contract</th>
                 <th class="text-center">Qty</th>
+                <th class="text-center">Entry Reason</th>
                 <th class="text-right">Entry Price</th>
                 <th class="text-center">Entry Time</th>
                 <th class="text-right">Exit Price</th>
@@ -244,31 +253,31 @@
 
       <!-- SECTION 1: Localized Trade Execution Window (±10 Candles @ 5m) -->
       <div id="tam-section-local" class="tam-chart-section">
-        <div class="chart-box" style="margin-bottom:12px;">
+        <div class="chart-box">
           <div class="chart-header">
             <span id="tam-underlying-local-title" class="chart-title">Underlying Equity — Localized Trade Setup (±10 Bars @ 5m)</span>
             <span class="chart-subtext">Source: equity_ticks.parquet (NSE Cash)</span>
           </div>
-          <canvas id="tam-underlying-local-canvas" class="chart-canvas" style="height:250px;"></canvas>
+          <canvas id="tam-underlying-local-canvas" class="chart-canvas chart-square"></canvas>
         </div>
 
-        <div class="chart-box" style="margin-bottom:12px;">
+        <div class="chart-box">
           <div class="chart-header">
             <span id="tam-option-local-title" class="chart-title">Option Contract — Localized Trade Execution (±10 Bars @ 5m)</span>
             <span class="chart-subtext">Source: option_depth.parquet (NSE FO Depth)</span>
           </div>
-          <canvas id="tam-option-local-canvas" class="chart-canvas" style="height:250px;"></canvas>
+          <canvas id="tam-option-local-canvas" class="chart-canvas chart-square"></canvas>
         </div>
       </div>
 
       <!-- SECTION 2: Full Day Macro Session (5m) -->
       <div id="tam-section-fullday" class="tam-chart-section" style="display:none;">
-        <div class="chart-box" style="margin-bottom:12px;">
+        <div class="chart-box">
           <div class="chart-header">
             <span id="tam-underlying-title" class="chart-title">Underlying Equity — Full Day Macro Session (5m)</span>
             <span class="chart-subtext">Source: equity_ticks.parquet (NSE Cash)</span>
           </div>
-          <canvas id="tam-underlying-canvas" class="chart-canvas" style="height:250px;"></canvas>
+          <canvas id="tam-underlying-canvas" class="chart-canvas chart-square"></canvas>
         </div>
 
         <div class="chart-box">
@@ -276,7 +285,7 @@
             <span id="tam-option-title" class="chart-title">Option Contract — Full Day Intraday (5m)</span>
             <span class="chart-subtext">Source: option_depth.parquet (NSE FO Depth)</span>
           </div>
-          <canvas id="tam-option-canvas" class="chart-canvas" style="height:250px;"></canvas>
+          <canvas id="tam-option-canvas" class="chart-canvas chart-square"></canvas>
         </div>
       </div>
     </div>
@@ -285,7 +294,7 @@
   <div id="toast-container" class="toast-container"></div>
 
   <!-- Scripts -->
-  <script src="/static/js/chart_engine.js"></script>
-  <script src="/static/js/sim_results_page.js"></script>
+  <script src="/static/js/chart_engine.js?v=2.0.3"></script>
+  <script src="/static/js/sim_results_page.js?v=2.0.3"></script>
 </body>
 </html>

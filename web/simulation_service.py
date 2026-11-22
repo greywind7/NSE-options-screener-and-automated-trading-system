@@ -80,6 +80,7 @@ class SimulationService:
         self.recordings_dir = recordings_dir
         self.executor = ThreadPoolExecutor(max_workers=2)
         self._current_process: Optional[mp.Process] = None
+        self._current_task: Optional[asyncio.Task] = None
         self.candle_service = CandleService(recordings_dir=recordings_dir)
 
         # In-memory parquet cache
@@ -88,7 +89,7 @@ class SimulationService:
         self.cached_options_df: Optional[pl.DataFrame] = None
 
         # Execution state
-        self.is_running: bool = False
+        self._is_running: bool = False
         self.current_job_id: str = ""
         self.progress_status: str = "Idle"
         self.last_run_time: float = 0.0
@@ -98,6 +99,20 @@ class SimulationService:
         self.runs_history: Dict[str, Dict[str, Any]] = {}
         # Parameter hash deduplication cache: param_hash -> results dict
         self.cache_by_param_hash: Dict[str, Dict[str, Any]] = {}
+
+    @property
+    def is_running(self) -> bool:
+        if self._is_running:
+            # Auto-heal stale is_running state if task has finished and worker process is no longer alive
+            task_done = self._current_task is not None and self._current_task.done()
+            proc_dead = self._current_process is None or not self._current_process.is_alive()
+            if task_done and proc_dead:
+                self._is_running = False
+        return self._is_running
+
+    @is_running.setter
+    def is_running(self, val: bool) -> None:
+        self._is_running = bool(val)
 
     def cleanup(self) -> None:
         """
@@ -111,6 +126,10 @@ class SimulationService:
         self.latest_params = None
         self.latest_error = None
         self.last_run_time = 0.0
+
+        if self._current_task and not self._current_task.done():
+            self._current_task.cancel()
+        self._current_task = None
 
         # Terminate running worker process if active
         if self._current_process and self._current_process.is_alive():
@@ -354,31 +373,40 @@ class SimulationService:
         Process isolation guarantees 0% GIL contention with the web server event loop.
         Supports instant parameter-hash deduplication for identical configurations.
         """
-        if self.is_running:
-            raise RuntimeError("A simulation is already in progress.")
+        cur_task = asyncio.current_task()
+        if self._is_running:
+            # Check if another task or worker process is actively running
+            other_task_active = (
+                self._current_task is not None
+                and not self._current_task.done()
+                and self._current_task is not cur_task
+            )
+            proc_active = self._current_process is not None and self._current_process.is_alive()
+            if other_task_active or proc_active:
+                raise RuntimeError("A simulation is already in progress.")
 
-        # Canonicalize target date to YYYY-MM-DD
-        raw_date = params.get("date") or "2026-11-19"
-        if len(raw_date) == 8 and raw_date.isdigit():
-            target_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
-        else:
-            target_date = raw_date
-
+        self._current_task = cur_task
         self.is_running = True
-        self.latest_error = None
-        # Use passed run_id if available, else sequential RUN-N
-        req_id = params.get("run_id")
-        job_id = req_id if req_id else f"RUN-{len(self.runs_history) + 1}"
-        self.current_job_id = job_id
-        self.latest_results = None
-        self.progress_status = "Initializing simulation..."
-        start_ts = time.time()
-
         result_file = None
         process = None
         queue = None
 
         try:
+            # Canonicalize target date to YYYY-MM-DD
+            raw_date = params.get("date") or "2026-11-19"
+            if len(raw_date) == 8 and raw_date.isdigit():
+                target_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+            else:
+                target_date = raw_date
+
+            self.latest_error = None
+            # Use passed run_id if available, else sequential RUN-N
+            req_id = params.get("run_id")
+            job_id = req_id if req_id else f"RUN-{len(self.runs_history) + 1}"
+            self.current_job_id = job_id
+            self.latest_results = None
+            self.progress_status = "Initializing simulation..."
+            start_ts = time.time()
             param_hash = self.compute_param_hash(target_date, params)
 
             # Check parameter-hash deduplication cache
@@ -504,6 +532,8 @@ class SimulationService:
                 except Exception:
                     pass
             self.is_running = False
+            if self._current_task is cur_task:
+                self._current_task = None
 
     def _execute_simulation_sync(
         self,
@@ -640,6 +670,40 @@ class SimulationService:
                     tr_copy["brokerage"] = round(fee, 2)
                     tr_copy["net_pnl"] = round(pnl - fee, 2)
                     tr_copy["date"] = target_date
+
+                    u_entry = (
+                        tr.get("underlying_entry_price")
+                        or tr_meta.get("underlying_entry_price")
+                        or tr_meta.get("trigger_price")
+                        or tr.get("trigger_price")
+                    )
+                    if u_entry is not None:
+                        tr_copy["underlying_entry_price"] = float(u_entry)
+                        tr_copy["trigger_price"] = float(u_entry)
+
+                    # Format clean entry reason / archetype
+                    raw_entry = (
+                        tr.get("entry_reason")
+                        or tr_meta.get("archetype")
+                        or tr_meta.get("entry_reason")
+                        or tr.get("trigger")
+                        or "Breakout"
+                    )
+                    arch_map = {
+                        "FLAG_BULL_BREAKOUT": "Flag Breakout",
+                        "FLAG_BEAR_BREAKDOWN": "Flag Breakdown",
+                        "PURE_BULL_BREAKOUT": "Pure Breakout",
+                        "PURE_BEAR_BREAKDOWN": "Pure Breakdown",
+                        "BULL_FLAG": "Flag Breakout",
+                        "BEAR_FLAG": "Flag Breakdown",
+                        "PURE_BREAKOUT": "Pure Breakout",
+                        "PURE_BREAKDOWN": "Pure Breakdown",
+                        "MOMENTUM_BREAKOUT": "Breakout",
+                    }
+                    disp_entry = arch_map.get(str(raw_entry), str(raw_entry))
+                    tr_copy["entry_reason"] = disp_entry
+                    tr_copy["raw_entry_reason"] = str(raw_entry)
+                    tr_copy["trigger"] = disp_entry
 
                     # Attach pre-built 5-minute candles
                     tr_sym = str(tr.get("symbol", "")).strip()

@@ -26,6 +26,7 @@ from core.candles.shm_layout import (
 )
 from core.common.ipc_schemas import SetupAlert
 from core.common.symbol_utils import normalize_instrument_token
+from core.common.time_utils import IST
 from strategies.momentum.opportunity_pool import OpportunityPool
 
 
@@ -151,7 +152,7 @@ class ScoringEngine3:
         self.symbol_to_index = {sym: idx for idx, sym in enumerate(symbols)}
 
     def _get_bar_index(self, ts: float) -> Tuple[int, int, int]:
-        dt = datetime.fromtimestamp(ts)
+        dt = datetime.fromtimestamp(ts, tz=IST)
         market_start_sec = (9 * 3600) + (15 * 60)
         curr_sec = (dt.hour * 3600) + (dt.minute * 60) + dt.second
         elapsed = curr_sec - market_start_sec

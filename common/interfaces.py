@@ -36,6 +36,8 @@ class TradeState:
     exit_reason: Optional[str] = None
     realized_pnl: float = 0.0
     ratchet_level: int = 0
+    underlying_entry_price: Optional[float] = None
+    underlying_exit_price: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:

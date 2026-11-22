@@ -1019,10 +1019,15 @@ class ColumnarSimEngine:
     def print_journal(self, mode: Optional[str] = None) -> str:
         """Print detailed trade-by-trade log for closed trades and persist to disk."""
         ARCHETYPE_LABELS = {
-            "FLAG_BULL_BREAKOUT": "BULL_FLAG",
-            "FLAG_BEAR_BREAKDOWN": "BEAR_FLAG",
-            "PURE_BULL_BREAKOUT": "PURE_BREAKOUT",
-            "PURE_BEAR_BREAKDOWN": "PURE_BREAKDOWN",
+            "FLAG_BULL_BREAKOUT": "Flag Breakout",
+            "FLAG_BEAR_BREAKDOWN": "Flag Breakdown",
+            "PURE_BULL_BREAKOUT": "Pure Breakout",
+            "PURE_BEAR_BREAKDOWN": "Pure Breakdown",
+            "BULL_FLAG": "Flag Breakout",
+            "BEAR_FLAG": "Flag Breakdown",
+            "PURE_BREAKOUT": "Pure Breakout",
+            "PURE_BREAKDOWN": "Pure Breakdown",
+            "MOMENTUM_BREAKOUT": "Breakout",
         }
         lines = []
         modes_to_show = [mode] if mode else self.modes
@@ -1115,7 +1120,9 @@ class ColumnarSimEngine:
                         t_dict["brokerage"] = t.metadata.get("brokerage", round_trip_brokerage)
                         t_dict["net_pnl"] = t.realized_pnl - t_dict["brokerage"]
                         t_dict["gross_pnl"] = t.realized_pnl
-                        t_dict["trigger"] = ARCHETYPE_LABELS.get(str(t.metadata.get("archetype") or "UNKNOWN"), str(t.metadata.get("archetype") or "UNKNOWN"))
+                        trigger_label = ARCHETYPE_LABELS.get(str(t.metadata.get("archetype") or t.entry_reason or "UNKNOWN"), str(t.metadata.get("archetype") or t.entry_reason or "UNKNOWN"))
+                        t_dict["trigger"] = trigger_label
+                        t_dict["entry_reason"] = trigger_label
                         jf.write(json.dumps(t_dict) + "\n")
                 lines.append(f"  ✓ Exported journal to '{journal_path}'")
             except Exception as e:

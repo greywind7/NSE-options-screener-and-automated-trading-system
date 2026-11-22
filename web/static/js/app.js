@@ -249,51 +249,44 @@ window.App = {
     const secFull = document.getElementById("tam-section-fullday");
 
     if (secLocal) {
-      secLocal.style.display = (range === "local" || range === "both") ? "block" : "none";
+      secLocal.style.display = (range === "local" || range === "both") ? "grid" : "none";
     }
     if (secFull) {
-      secFull.style.display = (range === "fullday" || range === "both") ? "block" : "none";
+      secFull.style.display = (range === "fullday" || range === "both") ? "grid" : "none";
     }
 
     // Trigger re-render so canvases compute visible dimensions accurately
     setTimeout(() => {
       if ((range === "local" || range === "both")) {
-        if (this.tamUnderlyingLocalChart) this.tamUnderlyingLocalChart.render();
-        if (this.tamOptionLocalChart) this.tamOptionLocalChart.render();
+        if (this.tamUnderlyingLocalChart) { this.tamUnderlyingLocalChart._setupCanvas(); this.tamUnderlyingLocalChart.render(); }
+        if (this.tamOptionLocalChart) { this.tamOptionLocalChart._setupCanvas(); this.tamOptionLocalChart.render(); }
       }
       if ((range === "fullday" || range === "both")) {
-        if (this.tamUnderlyingFullChart) this.tamUnderlyingFullChart.render();
-        if (this.tamOptionFullChart) this.tamOptionFullChart.render();
+        if (this.tamUnderlyingFullChart) { this.tamUnderlyingFullChart._setupCanvas(); this.tamUnderlyingFullChart.render(); }
+        if (this.tamOptionFullChart) { this.tamOptionFullChart._setupCanvas(); this.tamOptionFullChart.render(); }
       }
     }, 50);
+  },
+
+  findCandleIdx(candles, ts) {
+    if (!candles || candles.length === 0 || !ts) return 0;
+    if (ts <= candles[0].timestamp) return 0;
+    for (let i = 0; i < candles.length - 1; i++) {
+      if (ts >= candles[i].timestamp && ts < candles[i + 1].timestamp) {
+        return i;
+      }
+    }
+    return candles.length - 1;
   },
 
   getLocalizedCandles(allCandles, entryTs, exitTs, pad = 10) {
     if (!allCandles || allCandles.length === 0) return [];
     if (!entryTs) return allCandles;
 
-    // Find closest candle index to entry timestamp
-    let entryIdx = 0;
-    let minEntryDiff = Infinity;
-    for (let i = 0; i < allCandles.length; i++) {
-      const diff = Math.abs(allCandles[i].timestamp - entryTs);
-      if (diff < minEntryDiff) {
-        minEntryDiff = diff;
-        entryIdx = i;
-      }
-    }
-
-    // Find closest candle index to exit timestamp (or latest available)
+    const entryIdx = this.findCandleIdx(allCandles, entryTs);
     let exitIdx = allCandles.length - 1;
     if (exitTs && exitTs > entryTs) {
-      let minExitDiff = Infinity;
-      for (let i = 0; i < allCandles.length; i++) {
-        const diff = Math.abs(allCandles[i].timestamp - exitTs);
-        if (diff < minExitDiff) {
-          minExitDiff = diff;
-          exitIdx = i;
-        }
-      }
+      exitIdx = this.findCandleIdx(allCandles, exitTs);
     }
 
     // Window with +- pad candles
@@ -336,17 +329,19 @@ window.App = {
     }
 
     if (metaBar) {
+      const entryReasonStr = trade.entry_reason || trade.trigger || "Breakout";
       const exitPriceStr = isClosed ? `₹${Number(trade.exit_price || 0).toFixed(2)}` : `₹${Number(trade.current_bid || 0).toFixed(2)} (Bid)`;
       const exitTimeStr = isClosed ? (trade.exit_time_str || "-") : "Active";
-      const reasonStr = trade.exit_reason || (isClosed ? "Manual / Target" : "Live Holding");
+      const exitReasonStr = trade.exit_reason || (isClosed ? "Manual / Target" : "Live Holding");
       const bFee = trade.brokerage !== undefined ? `₹${Number(trade.brokerage).toFixed(2)}` : "₹60.00";
 
       metaBar.innerHTML = `
         <div class="meta-item"><span class="meta-label">Contract:</span> <span class="meta-val">${symbol} ${contractDesc}</span></div>
         <div class="meta-item"><span class="meta-label">Qty:</span> <span class="meta-val">${trade.quantity || 0}</span></div>
+        <div class="meta-item"><span class="meta-label">Entry Reason:</span> <span class="meta-val badge badge-entry">${entryReasonStr}</span></div>
         <div class="meta-item"><span class="meta-label">Entry:</span> <span class="meta-val">₹${Number(trade.entry_price || 0).toFixed(2)} @ ${trade.entry_time_str || '-'}</span></div>
         <div class="meta-item"><span class="meta-label">Exit/Bid:</span> <span class="meta-val">${exitPriceStr} @ ${exitTimeStr}</span></div>
-        <div class="meta-item"><span class="meta-label">Reason:</span> <span class="meta-val" style="color:var(--accent-amber);">${reasonStr}</span></div>
+        <div class="meta-item"><span class="meta-label">Exit Reason:</span> <span class="meta-val badge badge-reason">${exitReasonStr}</span></div>
         <div class="meta-item"><span class="meta-label">Brokerage:</span> <span class="meta-val">${bFee}</span></div>
         <div class="meta-item"><span class="meta-label">Timeframe:</span> <span class="meta-val" style="color:var(--accent-cyan);">5-Minute Bars</span></div>
       `;
@@ -377,13 +372,15 @@ window.App = {
     const markers = [];
     const entryTs = Number(trade.entry_time || 0);
     const entryP = Number(trade.entry_price || 0);
+    const entryReasonStr = trade.entry_reason || trade.trigger || "Breakout";
+    const exitReasonStr = trade.exit_reason || (isClosed ? "Manual / Target" : "Live Holding");
     if (entryTs > 0) {
-      markers.push({ timestamp: entryTs, price: entryP, type: "ENTRY" });
+      markers.push({ timestamp: entryTs, price: entryP, type: "ENTRY", reason: entryReasonStr });
     }
     const exitTs = Number(trade.exit_time || 0);
     const exitP = Number(trade.exit_price || 0);
     if (exitTs > 0 && exitP > 0) {
-      markers.push({ timestamp: exitTs, price: exitP, type: "EXIT" });
+      markers.push({ timestamp: exitTs, price: exitP, type: "EXIT", reason: exitReasonStr });
     }
 
     const tradeDate = trade.date || "";
@@ -408,20 +405,22 @@ window.App = {
 
     if (uCandles.length > 0) {
       for (const m of markers) {
-        let closest = null;
-        let minDiff = Infinity;
-        for (const c of uCandles) {
-          const diff = Math.abs(c.timestamp - m.timestamp);
-          if (diff < minDiff) {
-            minDiff = diff;
-            closest = c;
-          }
-        }
+        const cIdx = this.findCandleIdx(uCandles, m.timestamp);
+        const closest = uCandles[cIdx];
         if (closest) {
+          let uPrice = null;
+          if (m.type === "ENTRY") {
+            const rawP = trade.underlying_entry_price || trade.trigger_price || (trade.metadata && (trade.metadata.underlying_entry_price || trade.metadata.trigger_price));
+            uPrice = rawP ? Number(rawP) : closest.open;
+          } else {
+            const rawExit = trade.underlying_exit_price || (trade.metadata && trade.metadata.underlying_exit_price);
+            uPrice = rawExit ? Number(rawExit) : closest.close;
+          }
           uMarkers.push({
             timestamp: m.timestamp,
-            price: closest.close,
+            price: uPrice,
             type: m.type,
+            reason: m.reason,
           });
         }
       }

@@ -43,7 +43,16 @@ class AnalyticsWebServer:
         self.candle_service = CandleService(recordings_dir=recordings_dir)
         self.alert_service = AlertService(recordings_dir=recordings_dir)
 
-        self.app = web.Application()
+        @web.middleware
+        async def no_cache_middleware(request: web.Request, handler):
+            response = await handler(request)
+            if request.path.startswith("/static/") or request.path in ("/", "/sim_results"):
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+            return response
+
+        self.app = web.Application(middlewares=[no_cache_middleware])
         self.ws_clients: Set[web.WebSocketResponse] = set()
         self._ws_broadcast_task: Optional[asyncio.Task] = None
 
@@ -243,12 +252,27 @@ class AnalyticsWebServer:
             return web.json_response({"error": "Simulation already running"}, status=409)
 
         run_id = body.get("run_id") or f"RUN-{len(self.simulation_service.runs_history) + 1}"
+        body["run_id"] = run_id
         self.simulation_service.current_job_id = run_id
-        self.simulation_service.is_running = True
         self.simulation_service.progress_status = "Initializing simulation..."
 
-        # Launch background task and yield once so run_simulation_job initializes state
+        # Launch background task and attach completion handler to safely retrieve any unhandled exception
         task = asyncio.create_task(self.simulation_service.run_simulation_job(body))
+        self.simulation_service._current_task = task
+
+        def _on_sim_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                self.simulation_service.is_running = False
+                self.simulation_service.progress_status = "Cancelled"
+                return
+            exc = t.exception()
+            if exc:
+                self.simulation_service.is_running = False
+                self.simulation_service.latest_error = str(exc)
+                self.simulation_service.progress_status = f"Failed: {exc}"
+                print(f"[SERVER] Simulation background task error: {exc}", file=sys.stderr)
+
+        task.add_done_callback(_on_sim_done)
         await asyncio.sleep(0)
 
         return web.json_response({

@@ -340,6 +340,10 @@ window.HistoricalTab = {
       const pnlClass = tr.net_pnl >= 0 ? "val-profit" : "val-loss";
       const retClass = tr.return_pct >= 0 ? "val-profit" : "val-loss";
 
+      const entryReasonBadge = (tr.entry_reason || tr.trigger)
+        ? `<span class="badge badge-entry">${tr.entry_reason || tr.trigger}</span>`
+        : `<span style="color:var(--text-dim);">-</span>`;
+
       const exitReasonBadge = tr.exit_reason
         ? `<span class="badge badge-reason">${tr.exit_reason}</span>`
         : `<span style="color:var(--text-dim);">-</span>`;
@@ -349,6 +353,7 @@ window.HistoricalTab = {
         <td style="font-weight:600; color:#fff;">${tr.symbol}</td>
         <td class="font-mono">${tr.strike} ${tr.option_type}</td>
         <td class="font-mono text-center">${tr.quantity}</td>
+        <td class="text-center">${entryReasonBadge}</td>
         <td class="font-mono text-right">₹${tr.entry_price.toFixed(2)}</td>
         <td class="font-mono text-center">${tr.entry_time_str}</td>
         <td class="font-mono text-right">₹${tr.exit_price ? tr.exit_price.toFixed(2) : '-'}</td>
@@ -367,7 +372,7 @@ window.HistoricalTab = {
     }
 
     if (trades.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="12" class="text-center" style="padding:24px; color:var(--text-dim);">No individual trade logs found.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="13" class="text-center" style="padding:24px; color:var(--text-dim);">No individual trade logs found.</td></tr>`;
     }
   },
 };

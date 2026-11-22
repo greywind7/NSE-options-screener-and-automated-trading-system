@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Antigravity Analytics // 2.0</title>
-  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="stylesheet" href="/static/css/style.css?v=2.0.2" />
 </head>
+
 <body>
 
   <!-- =========================================================================
@@ -131,7 +133,10 @@
               </tr>
             </thead>
             <tbody id="live-track-tbody">
-              <tr><td colspan="14" class="text-center" style="padding:24px; color:var(--text-dim);">Loading active sessions...</td></tr>
+              <tr>
+                <td colspan="14" class="text-center" style="padding:24px; color:var(--text-dim);">Loading active
+                  sessions...</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -211,7 +216,8 @@
           </div>
         </div>
         <div class="filter-group" style="flex:1; max-width:300px;">
-          <input type="text" id="alerts-search-input" class="form-input" placeholder="Search symbol or archetype..." style="width:100%;" />
+          <input type="text" id="alerts-search-input" class="form-input" placeholder="Search symbol or archetype..."
+            style="width:100%;" />
         </div>
         <button id="alerts-refresh-btn" class="btn btn-secondary btn-sm" style="margin-left:auto;">
           <span>🔄 Refresh</span>
@@ -224,7 +230,8 @@
           <div class="panel-header" style="background:transparent; padding:0 0 8px 0; border:none;">
             <div class="panel-title">
               <span style="color:var(--accent-red);">🚨 Top 5 Latest Alerts</span>
-              <span class="chart-subtext" style="margin-left:8px;">(Click any card to inspect 5m candlestick chart with trigger point)</span>
+              <span class="chart-subtext" style="margin-left:8px;">(Click any card to inspect 5m candlestick chart with
+                trigger point)</span>
             </div>
             <span id="alerts-live-status" class="badge">Scanner Active</span>
           </div>
@@ -260,7 +267,8 @@
               </thead>
               <tbody id="alerts-table-tbody">
                 <tr>
-                  <td colspan="9" class="text-center text-dim" style="padding:24px;">No alerts logged for this date.</td>
+                  <td colspan="9" class="text-center text-dim" style="padding:24px;">No alerts logged for this date.
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -341,7 +349,10 @@
               </tr>
             </thead>
             <tbody id="hist-track-tbody">
-              <tr><td colspan="12" class="text-center" style="padding:24px; color:var(--text-dim);">Select a date above to inspect historical performance.</td></tr>
+              <tr>
+                <td colspan="12" class="text-center" style="padding:24px; color:var(--text-dim);">Select a date above to
+                  inspect historical performance.</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -385,6 +396,7 @@
                   <th>Symbol</th>
                   <th>Contract</th>
                   <th class="text-center">Qty</th>
+                  <th class="text-center">Entry Reason</th>
                   <th class="text-right">Entry Price</th>
                   <th class="text-center">Entry Time</th>
                   <th class="text-right">Exit Price</th>
@@ -498,7 +510,8 @@
                 <label class="form-label">Custom Composed Tracks</label>
                 <button type="button" id="sim-add-track-btn" class="btn btn-secondary btn-sm">+ Add Track</button>
               </div>
-              <div id="sim-custom-tracks-container" style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
+              <div id="sim-custom-tracks-container"
+                style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
                 <span style="color:var(--text-dim); font-size:11px;">No custom tracks composed yet.</span>
               </div>
             </div>
@@ -532,12 +545,15 @@
               <span>📋 Simulation Runs</span>
               <div style="display:flex; align-items:center; gap:8px;">
                 <span id="sim-runs-count" class="badge">0 Runs</span>
-                <button type="button" id="sim-clear-runs-btn" class="btn btn-secondary btn-xs" style="padding:2px 8px; font-size:10px; cursor:pointer;" title="Clear simulation runs and temporary files">Clear Queue</button>
+                <button type="button" id="sim-clear-runs-btn" class="btn btn-secondary btn-xs"
+                  style="padding:2px 8px; font-size:10px; cursor:pointer;"
+                  title="Clear simulation runs and temporary files">Clear Queue</button>
               </div>
             </div>
             <div id="sim-runs-list" class="sim-runs-list">
               <div class="text-dim" style="font-size:11px; padding:12px 0; text-align:center;">
-                No simulations launched in this session yet.<br/>Configure parameters and click "Run Historical Simulation" above.
+                No simulations launched in this session yet.<br />Configure parameters and click "Run Historical
+                Simulation" above.
               </div>
             </div>
           </div>
@@ -704,7 +720,8 @@
           <span id="sr-runtime-badge" class="chart-subtext">Elapsed: -</span>
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
-          <button type="button" id="sr-open-new-tab-btn" class="btn btn-primary btn-sm" title="Open this report in a new clean browser tab">
+          <button type="button" id="sr-open-new-tab-btn" class="btn btn-primary btn-sm"
+            title="Open this report in a new clean browser tab">
             <span>↗ Open in New Browser Tab</span>
           </button>
           <button type="button" id="sr-back-to-sim-btn" class="btn btn-secondary btn-sm">
@@ -716,10 +733,12 @@
       <!-- Parameters Used Hero Drawer -->
       <div class="form-card srm-params-card">
         <div style="display:flex; justify-content:space-between; align-items:center;">
-          <span style="font-size:11px; font-weight:700; text-transform:uppercase; color:var(--accent-cyan); letter-spacing:0.5px;">
+          <span
+            style="font-size:11px; font-weight:700; text-transform:uppercase; color:var(--accent-cyan); letter-spacing:0.5px;">
             ⚙️ Strategy Parameters Used in This Run
           </span>
-          <button type="button" id="sr-params-toggle" class="btn btn-secondary btn-sm" style="font-size:10px; padding:2px 8px;">
+          <button type="button" id="sr-params-toggle" class="btn btn-secondary btn-sm"
+            style="font-size:10px; padding:2px 8px;">
             Collapse Parameters ▲
           </button>
         </div>
@@ -816,12 +835,20 @@
         <div class="chart-box">
           <div class="chart-header">
             <span class="chart-title">Simulated Intraday Cumulative P&L Curve</span>
-            <label class="chart-checkbox-label">
-              <input type="checkbox" id="sr-brokerage-toggle" checked />
-              <span>Include Brokerage</span>
-            </label>
+            <div style="display:flex; align-items:center; gap:12px;">
+              <div class="pill-group">
+                <button type="button" id="sr-aspect-square" class="pill-btn active">1:1 Square</button>
+                <button type="button" id="sr-aspect-wide" class="pill-btn">Wide</button>
+              </div>
+              <label class="chart-checkbox-label">
+                <input type="checkbox" id="sr-brokerage-toggle" checked />
+                <span>Include Brokerage</span>
+              </label>
+            </div>
           </div>
-          <canvas id="sr-chart-canvas" class="chart-canvas" style="height:250px;"></canvas>
+          <div id="sr-curve-wrapper" class="chart-square-wrapper">
+            <canvas id="sr-chart-canvas" class="chart-canvas chart-square"></canvas>
+          </div>
         </div>
 
         <!-- Simulated Trade Log Table -->
@@ -839,6 +866,7 @@
                   <th>Symbol</th>
                   <th>Contract</th>
                   <th class="text-center">Qty</th>
+                  <th class="text-center">Entry Reason</th>
                   <th class="text-right">Entry Price</th>
                   <th class="text-center">Entry Time</th>
                   <th class="text-right">Exit Price</th>
@@ -941,31 +969,33 @@
 
       <!-- SECTION 1: Localized Trade Execution Window (±10 Candles @ 5m) -->
       <div id="tam-section-local" class="tam-chart-section">
-        <div class="chart-box" style="margin-bottom:12px;">
+        <div class="chart-box">
           <div class="chart-header">
-            <span id="tam-underlying-local-title" class="chart-title">Underlying Equity — Localized Trade Setup (±10 Bars @ 5m)</span>
+            <span id="tam-underlying-local-title" class="chart-title">Underlying Equity — Localized Trade Setup (±10
+              Bars @ 5m)</span>
             <span class="chart-subtext">Source: equity_ticks.parquet (NSE Cash)</span>
           </div>
-          <canvas id="tam-underlying-local-canvas" class="chart-canvas" style="height:250px;"></canvas>
+          <canvas id="tam-underlying-local-canvas" class="chart-canvas chart-square"></canvas>
         </div>
 
-        <div class="chart-box" style="margin-bottom:12px;">
+        <div class="chart-box">
           <div class="chart-header">
-            <span id="tam-option-local-title" class="chart-title">Option Contract — Localized Trade Execution (±10 Bars @ 5m)</span>
+            <span id="tam-option-local-title" class="chart-title">Option Contract — Localized Trade Execution (±10 Bars
+              @ 5m)</span>
             <span class="chart-subtext">Source: option_depth.parquet (NSE FO Depth)</span>
           </div>
-          <canvas id="tam-option-local-canvas" class="chart-canvas" style="height:250px;"></canvas>
+          <canvas id="tam-option-local-canvas" class="chart-canvas chart-square"></canvas>
         </div>
       </div>
 
       <!-- SECTION 2: Full Day Macro Session (5m) -->
       <div id="tam-section-fullday" class="tam-chart-section" style="display:none;">
-        <div class="chart-box" style="margin-bottom:12px;">
+        <div class="chart-box">
           <div class="chart-header">
             <span id="tam-underlying-title" class="chart-title">Underlying Equity — Full Day Macro Session (5m)</span>
             <span class="chart-subtext">Source: equity_ticks.parquet (NSE Cash)</span>
           </div>
-          <canvas id="tam-underlying-canvas" class="chart-canvas" style="height:250px;"></canvas>
+          <canvas id="tam-underlying-canvas" class="chart-canvas chart-square"></canvas>
         </div>
 
         <div class="chart-box">
@@ -973,7 +1003,7 @@
             <span id="tam-option-title" class="chart-title">Option Contract — Full Day Intraday (5m)</span>
             <span class="chart-subtext">Source: option_depth.parquet (NSE FO Depth)</span>
           </div>
-          <canvas id="tam-option-canvas" class="chart-canvas" style="height:250px;"></canvas>
+          <canvas id="tam-option-canvas" class="chart-canvas chart-square"></canvas>
         </div>
       </div>
     </div>
@@ -988,7 +1018,8 @@
         <div class="modal-title-group">
           <span id="acm-title" class="modal-title">Setup Alert Chart</span>
           <span id="acm-dir-badge" class="badge">BULL</span>
-          <span id="acm-arch-badge" class="badge" style="background:rgba(0,229,255,0.15); color:var(--accent-cyan); border-color:var(--accent-cyan);">FLAG_BREAKOUT</span>
+          <span id="acm-arch-badge" class="badge"
+            style="background:rgba(0,229,255,0.15); color:var(--accent-cyan); border-color:var(--accent-cyan);">FLAG_BREAKOUT</span>
         </div>
         <div class="modal-header-actions">
           <div class="pill-group" style="margin-right:12px;">
@@ -1017,11 +1048,18 @@
   <div id="toast-container" class="toast-container"></div>
 
   <!-- Scripts -->
-  <script src="/static/js/chart_engine.js"></script>
-  <script src="/static/js/live_tab.js"></script>
-  <script src="/static/js/alerts_tab.js"></script>
-  <script src="/static/js/historical_tab.js"></script>
-  <script src="/static/js/simulation_tab.js"></script>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/chart_engine.js?v=2.0.2"></script>
+  <script src="/static/js/live_tab.js?v=2.0.2"></script>
+  <script src="/static/js/alerts_tab.js?v=2.0.2"></script>
+  <script src="/static/js/historical_tab.js?v=2.0.2"></script>
+  <script src="/static/js/simulation_tab.js?v=2.0.2"></script>
+  <script src="/static/js/app.js?v=2.0.2"></script>
+  <script src="/static/js/chart_engine.js?v=2.0.3"></script>
+  <script src="/static/js/live_tab.js?v=2.0.3"></script>
+  <script src="/static/js/alerts_tab.js?v=2.0.3"></script>
+  <script src="/static/js/historical_tab.js?v=2.0.3"></script>
+  <script src="/static/js/simulation_tab.js?v=2.0.3"></script>
+  <script src="/static/js/app.js?v=2.0.3"></script>
 </body>
+
 </html>

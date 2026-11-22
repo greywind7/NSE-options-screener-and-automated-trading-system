@@ -30,6 +30,7 @@ from core.candles.shm_layout import (
 )
 from core.common.symbol_utils import normalize_instrument_token
 from core.common.ipc_schemas import unpack_message
+from core.common.time_utils import IST
 from core.config.trading_schedule import get_trading_schedule, NSE_SCHEDULE
 
 DEFAULT_FEED_SUB_IPC = "ipc:///tmp/feed_equity.ipc"
@@ -197,7 +198,7 @@ class CandleManager:
         Calculate bar index (0..74), minute offset within bar (0..4), and second in minute (0..59).
         Aligned to 09:15 IST opening.
         """
-        dt = datetime.fromtimestamp(ts)
+        dt = datetime.fromtimestamp(ts, tz=IST)
         market_start_sec = (9 * 3600) + (15 * 60)
         curr_sec = (dt.hour * 3600) + (dt.minute * 60) + dt.second
         elapsed = curr_sec - market_start_sec

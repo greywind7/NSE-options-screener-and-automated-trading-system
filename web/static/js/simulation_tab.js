@@ -33,6 +33,33 @@ window.SimulationTab = {
       });
     }
 
+    const btnSquare = document.getElementById("sr-aspect-square");
+    const btnWide = document.getElementById("sr-aspect-wide");
+    const curveWrapper = document.getElementById("sr-curve-wrapper");
+    if (btnSquare && btnWide && canvas) {
+      btnSquare.addEventListener("click", () => {
+        btnSquare.classList.add("active");
+        btnWide.classList.remove("active");
+        canvas.classList.add("chart-square");
+        if (curveWrapper) curveWrapper.classList.remove("wide");
+        if (this.chart) {
+          this.chart._setupCanvas();
+          this.chart.render();
+        }
+      });
+      btnWide.addEventListener("click", () => {
+        btnWide.classList.add("active");
+        btnSquare.classList.remove("active");
+        canvas.classList.remove("chart-square");
+        if (curveWrapper) curveWrapper.classList.add("wide");
+        if (this.chart) {
+          canvas.style.height = "440px";
+          this.chart._setupCanvas();
+          this.chart.render();
+        }
+      });
+    }
+
     // Synchronize simulation runs with active server session (clears queue if server restarted)
     this.syncWithServerSession();
   },
@@ -1264,6 +1291,10 @@ window.SimulationTab = {
       const pnlClass = tr.net_pnl >= 0 ? "val-profit" : "val-loss";
       const retClass = tr.return_pct >= 0 ? "val-profit" : "val-loss";
 
+      const entryReasonBadge = (tr.entry_reason || tr.trigger)
+        ? `<span class="badge badge-entry">${tr.entry_reason || tr.trigger}</span>`
+        : `<span style="color:var(--text-dim);">-</span>`;
+
       const exitReasonBadge = tr.exit_reason
         ? `<span class="badge badge-reason">${tr.exit_reason}</span>`
         : `<span style="color:var(--text-dim);">-</span>`;
@@ -1273,6 +1304,7 @@ window.SimulationTab = {
         <td style="font-weight:600; color:#fff;">${tr.symbol}</td>
         <td class="font-mono">${tr.strike} ${tr.option_type}</td>
         <td class="font-mono text-center">${tr.quantity}</td>
+        <td class="text-center">${entryReasonBadge}</td>
         <td class="font-mono text-right">₹${tr.entry_price ? tr.entry_price.toFixed(2) : '-'}</td>
         <td class="font-mono text-center">${tr.entry_time_str || '-'}</td>
         <td class="font-mono text-right">₹${tr.exit_price ? tr.exit_price.toFixed(2) : '-'}</td>
@@ -1297,7 +1329,7 @@ window.SimulationTab = {
     }
 
     if (trades.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="12" class="text-center" style="padding:24px; color:var(--text-dim);">No simulated trades triggered for this track.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="13" class="text-center" style="padding:24px; color:var(--text-dim);">No simulated trades triggered for this track.</td></tr>`;
     }
 
     detailPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });

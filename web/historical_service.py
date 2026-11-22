@@ -182,6 +182,17 @@ class HistoricalService:
             tr_copy["brokerage"] = round(fee, 2)
             tr_copy["net_pnl"] = round(pnl - fee, 2)
             tr_copy["date"] = canonical_date
+
+            u_entry = (
+                tr.get("underlying_entry_price")
+                or tr.get("metadata", {}).get("underlying_entry_price")
+                or tr.get("metadata", {}).get("trigger_price")
+                or tr.get("trigger_price")
+            )
+            if u_entry is not None:
+                tr_copy["underlying_entry_price"] = float(u_entry)
+                tr_copy["trigger_price"] = float(u_entry)
+
             formatted.append(tr_copy)
 
         # Performance curve across the session

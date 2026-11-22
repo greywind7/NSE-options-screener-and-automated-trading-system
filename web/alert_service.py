@@ -191,9 +191,14 @@ class AlertService:
         if trigger_ts and float(trigger_ts) > 0:
             t_price = float(trigger_price or 0.0)
             if t_price <= 0 and candles:
-                # Find closest candle close
-                closest = min(candles, key=lambda c: abs(c["timestamp"] - trigger_ts))
-                t_price = closest["close"]
+                matching = None
+                for i in range(len(candles) - 1):
+                    if candles[i]["timestamp"] <= trigger_ts < candles[i + 1]["timestamp"]:
+                        matching = candles[i]
+                        break
+                if not matching and len(candles) > 0:
+                    matching = candles[-1] if trigger_ts >= candles[-1]["timestamp"] else candles[0]
+                t_price = matching["open"] if matching else 0.0
 
             markers.append({
                 "timestamp": float(trigger_ts),

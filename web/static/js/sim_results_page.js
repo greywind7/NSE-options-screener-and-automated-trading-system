@@ -66,6 +66,33 @@ window.SimResultsPage = {
     if (canvas && window.IntradayChart) {
       this.chart = new window.IntradayChart(canvas);
     }
+
+    const btnSquare = document.getElementById("srp-aspect-square");
+    const btnWide = document.getElementById("srp-aspect-wide");
+    const curveWrapper = document.getElementById("srp-curve-wrapper");
+    if (btnSquare && btnWide && canvas) {
+      btnSquare.addEventListener("click", () => {
+        btnSquare.classList.add("active");
+        btnWide.classList.remove("active");
+        canvas.classList.add("chart-square");
+        if (curveWrapper) curveWrapper.classList.remove("wide");
+        if (this.chart) {
+          this.chart._setupCanvas();
+          this.chart.render();
+        }
+      });
+      btnWide.addEventListener("click", () => {
+        btnWide.classList.add("active");
+        btnSquare.classList.remove("active");
+        canvas.classList.remove("chart-square");
+        if (curveWrapper) curveWrapper.classList.add("wide");
+        if (this.chart) {
+          canvas.style.height = "440px";
+          this.chart._setupCanvas();
+          this.chart.render();
+        }
+      });
+    }
   },
 
   async loadRunData(forceServer = false) {
@@ -465,6 +492,10 @@ window.SimResultsPage = {
       const pnlClass = tr.net_pnl >= 0 ? "val-profit" : "val-loss";
       const retClass = tr.return_pct >= 0 ? "val-profit" : "val-loss";
 
+      const entryReasonBadge = (tr.entry_reason || tr.trigger)
+        ? `<span class="badge badge-entry">${tr.entry_reason || tr.trigger}</span>`
+        : `<span style="color:var(--text-dim);">-</span>`;
+
       const exitReasonBadge = tr.exit_reason
         ? `<span class="badge badge-reason">${tr.exit_reason}</span>`
         : `<span style="color:var(--text-dim);">-</span>`;
@@ -474,6 +505,7 @@ window.SimResultsPage = {
         <td style="font-weight:600; color:#fff;">${tr.symbol}</td>
         <td class="font-mono">${tr.strike} ${tr.option_type}</td>
         <td class="font-mono text-center">${tr.quantity}</td>
+        <td class="text-center">${entryReasonBadge}</td>
         <td class="font-mono text-right">₹${tr.entry_price ? tr.entry_price.toFixed(2) : '-'}</td>
         <td class="font-mono text-center">${tr.entry_time_str || '-'}</td>
         <td class="font-mono text-right">₹${tr.exit_price ? tr.exit_price.toFixed(2) : '-'}</td>
@@ -498,7 +530,7 @@ window.SimResultsPage = {
     }
 
     if (trades.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="12" class="text-center" style="padding:24px; color:var(--text-dim);">No simulated trades triggered for this track.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="13" class="text-center" style="padding:24px; color:var(--text-dim);">No simulated trades triggered for this track.</td></tr>`;
     }
 
     detailPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -560,17 +592,17 @@ window.SimResultsPage = {
 
     const secLocal = document.getElementById("tam-section-local");
     const secFull = document.getElementById("tam-section-fullday");
-    if (secLocal) secLocal.style.display = (range === "local" || range === "both") ? "block" : "none";
-    if (secFull) secFull.style.display = (range === "fullday" || range === "both") ? "block" : "none";
+    if (secLocal) secLocal.style.display = (range === "local" || range === "both") ? "grid" : "none";
+    if (secFull) secFull.style.display = (range === "fullday" || range === "both") ? "grid" : "none";
 
     setTimeout(() => {
       if (range === "local" || range === "both") {
-        if (this.tamUnderlyingLocalChart) this.tamUnderlyingLocalChart.render();
-        if (this.tamOptionLocalChart) this.tamOptionLocalChart.render();
+        if (this.tamUnderlyingLocalChart) { this.tamUnderlyingLocalChart._setupCanvas(); this.tamUnderlyingLocalChart.render(); }
+        if (this.tamOptionLocalChart) { this.tamOptionLocalChart._setupCanvas(); this.tamOptionLocalChart.render(); }
       }
       if (range === "fullday" || range === "both") {
-        if (this.tamUnderlyingFullChart) this.tamUnderlyingFullChart.render();
-        if (this.tamOptionFullChart) this.tamOptionFullChart.render();
+        if (this.tamUnderlyingFullChart) { this.tamUnderlyingFullChart._setupCanvas(); this.tamUnderlyingFullChart.render(); }
+        if (this.tamOptionFullChart) { this.tamOptionFullChart._setupCanvas(); this.tamOptionFullChart.render(); }
       }
     }, 50);
   },
@@ -587,6 +619,8 @@ window.SimResultsPage = {
     const strike = trade.strike || "";
     const optType = trade.option_type || "";
     const contractDesc = `${strike} ${optType}`.trim();
+    const entryReasonStr = trade.entry_reason || trade.trigger || "Breakout";
+    const exitReasonStr = trade.exit_reason || "-";
 
     if (titleEl) titleEl.innerText = `${symbol} ${contractDesc} (Trade #${(trade.trade_id || "").replace("TRD_", "")})`;
     if (pnlBadge) {
@@ -598,8 +632,10 @@ window.SimResultsPage = {
       metaBar.innerHTML = `
         <div class="meta-item"><span class="meta-label">Contract:</span><span class="meta-val">${symbol} ${contractDesc}</span></div>
         <div class="meta-item"><span class="meta-label">Qty:</span><span class="meta-val">${trade.quantity}</span></div>
+        <div class="meta-item"><span class="meta-label">Entry Reason:</span><span class="meta-val badge badge-entry">${entryReasonStr}</span></div>
         <div class="meta-item"><span class="meta-label">Entry:</span><span class="meta-val">₹${(trade.entry_price || 0).toFixed(2)} (${trade.entry_time_str || '-'})</span></div>
         <div class="meta-item"><span class="meta-label">Exit:</span><span class="meta-val">₹${(trade.exit_price || 0).toFixed(2)} (${trade.exit_time_str || '-'})</span></div>
+        <div class="meta-item"><span class="meta-label">Exit Reason:</span><span class="meta-val badge badge-reason">${exitReasonStr}</span></div>
         <div class="meta-item"><span class="meta-label">Net Return:</span><span class="meta-val">${this.formatPct(trade.return_pct || 0)}</span></div>
       `;
     }
@@ -643,36 +679,73 @@ window.SimResultsPage = {
     const entryTs = trade.entry_time || 0;
     const exitTs = trade.exit_time || 0;
 
-      const getLocalized = (candles, pad = 10) => {
-        if (!candles || candles.length === 0 || !entryTs) return candles;
-        let eIdx = 0, minD = Infinity;
-        for (let i = 0; i < candles.length; i++) {
-          const d = Math.abs(candles[i].timestamp - entryTs);
-          if (d < minD) { minD = d; eIdx = i; }
-        }
-        let xIdx = candles.length - 1;
-        if (exitTs && exitTs > entryTs) {
-          let minXD = Infinity;
-          for (let i = 0; i < candles.length; i++) {
-            const d = Math.abs(candles[i].timestamp - exitTs);
-            if (d < minXD) { minXD = d; xIdx = i; }
-          }
-        }
-        return candles.slice(Math.max(0, eIdx - pad), Math.min(candles.length, xIdx + pad + 1));
-      };
+    const optMarkers = [];
+    if (entryTs > 0 && trade.entry_price) {
+      optMarkers.push({ timestamp: entryTs, price: trade.entry_price, type: "ENTRY", reason: entryReasonStr });
+    }
+    if (exitTs > 0 && trade.exit_price) {
+      optMarkers.push({ timestamp: exitTs, price: trade.exit_price, type: "EXIT", reason: exitReasonStr });
+    }
 
-      if (this.tamUnderlyingLocalChart) {
-        this.tamUnderlyingLocalChart.setData(getLocalized(eqAll), { entryPrice: trade.entry_price, exitPrice: trade.exit_price, entryTime: trade.entry_time, exitTime: trade.exit_time });
+    const findCandleIndex = (candles, ts) => {
+      if (!candles || candles.length === 0 || !ts) return 0;
+      if (ts <= candles[0].timestamp) return 0;
+      for (let i = 0; i < candles.length - 1; i++) {
+        if (ts >= candles[i].timestamp && ts < candles[i + 1].timestamp) {
+          return i;
+        }
       }
-      if (this.tamOptionLocalChart) {
-        this.tamOptionLocalChart.setData(getLocalized(optAll), { entryPrice: trade.entry_price, exitPrice: trade.exit_price, entryTime: trade.entry_time, exitTime: trade.exit_time });
+      return candles.length - 1;
+    };
+
+    const uMarkers = [];
+    if (eqAll.length > 0) {
+      for (const m of optMarkers) {
+        const cIdx = findCandleIndex(eqAll, m.timestamp);
+        const candle = eqAll[cIdx];
+        if (candle) {
+          let uPrice = null;
+          if (m.type === "ENTRY") {
+            const rawP = trade.underlying_entry_price || trade.trigger_price || (trade.metadata && (trade.metadata.underlying_entry_price || trade.metadata.trigger_price));
+            uPrice = rawP ? Number(rawP) : candle.open;
+          } else {
+            const rawExit = trade.underlying_exit_price || (trade.metadata && trade.metadata.underlying_exit_price);
+            uPrice = rawExit ? Number(rawExit) : candle.close;
+          }
+          uMarkers.push({
+            timestamp: m.timestamp,
+            price: uPrice,
+            type: m.type,
+            reason: m.reason,
+          });
+        }
       }
-      if (this.tamUnderlyingFullChart) {
-        this.tamUnderlyingFullChart.setData(eqAll, { entryPrice: trade.entry_price, exitPrice: trade.exit_price, entryTime: trade.entry_time, exitTime: trade.exit_time });
+    }
+
+    const getLocalized = (candles, pad = 10) => {
+      if (!candles || candles.length === 0 || !entryTs) return candles;
+      const eIdx = findCandleIndex(candles, entryTs);
+      let xIdx = candles.length - 1;
+      if (exitTs && exitTs > entryTs) {
+        xIdx = findCandleIndex(candles, exitTs);
       }
-      if (this.tamOptionFullChart) {
-        this.tamOptionFullChart.setData(optAll, { entryPrice: trade.entry_price, exitPrice: trade.exit_price, entryTime: trade.entry_time, exitTime: trade.exit_time });
-      }
+      return candles.slice(Math.max(0, eIdx - pad), Math.min(candles.length, xIdx + pad + 1));
+    };
+
+    if (this.tamUnderlyingLocalChart) {
+      this.tamUnderlyingLocalChart.setData(getLocalized(eqAll), uMarkers);
+    }
+    if (this.tamOptionLocalChart) {
+      this.tamOptionLocalChart.setData(getLocalized(optAll), optMarkers);
+    }
+    if (this.tamUnderlyingFullChart) {
+      this.tamUnderlyingFullChart.setData(eqAll, uMarkers);
+    }
+    if (this.tamOptionFullChart) {
+      this.tamOptionFullChart.setData(optAll, optMarkers);
+    }
+
+    this.setTamRange(this.tamCurrentRange);
     } catch (e) {
       console.error("Candle fetch error in sim results page:", e);
     }

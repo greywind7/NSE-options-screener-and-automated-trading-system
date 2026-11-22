@@ -487,6 +487,56 @@ class TestWebServerEndpoints(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data_clear["status"], "cleared")
         self.assertEqual(len(self.server_inst.simulation_service.runs_history), 0)
 
+    async def test_api_sim_run_lifecycle_and_concurrency(self):
+        """Verify that starting a simulation from the web endpoint does not trigger self-lockout,
+        safely reports concurrency, and recovers is_running on completion."""
+        from aiohttp.test_utils import make_mocked_request
+        from unittest.mock import patch
+
+        sim_svc = self.server_inst.simulation_service
+
+        # Pre-populate deduplication cache so worker process is mocked/cached instantly
+        p = {"date": "2026-11-19"}
+        param_hash = sim_svc.compute_param_hash("2026-11-19", p)
+        sim_svc.cache_by_param_hash[param_hash] = {
+            "matrix": {"paper": {"trades": 5, "pnl": 1200.0}},
+            "details": {},
+        }
+
+        # 1. Start simulation via POST /api/sim/run
+        req1 = make_mocked_request("POST", "/api/sim/run", app=self.server_inst.app)
+        req1._read_bytes = json.dumps({"date": "2026-11-19", "run_id": "RUN-1"}).encode("utf-8")
+        resp1 = await self.server_inst.handle_sim_run(req1)
+        self.assertEqual(resp1.status, 200)
+        data1 = json.loads(resp1.text)
+        self.assertEqual(data1["status"], "started")
+        self.assertEqual(data1["run_id"], "RUN-1")
+
+        # 2. Wait for background task to complete and assert no exceptions occurred
+        if sim_svc._current_task:
+            await sim_svc._current_task
+        self.assertFalse(sim_svc.is_running)
+        self.assertIsNone(sim_svc.latest_error)
+
+        # 3. Test concurrency guard: when is_running is True, second request returns 409
+        sim_svc.is_running = True
+        req2 = make_mocked_request("POST", "/api/sim/run", app=self.server_inst.app)
+        req2._read_bytes = json.dumps({"date": "2026-11-19", "run_id": "RUN-2"}).encode("utf-8")
+        resp2 = await self.server_inst.handle_sim_run(req2)
+        self.assertEqual(resp2.status, 409)
+        data2 = json.loads(resp2.text)
+        self.assertIn("error", data2)
+
+        # Reset is_running and verify clean next start
+        sim_svc.is_running = False
+        req3 = make_mocked_request("POST", "/api/sim/run", app=self.server_inst.app)
+        req3._read_bytes = json.dumps({"date": "2026-11-19", "run_id": "RUN-3"}).encode("utf-8")
+        resp3 = await self.server_inst.handle_sim_run(req3)
+        self.assertEqual(resp3.status, 200)
+        if sim_svc._current_task:
+            await sim_svc._current_task
+        self.assertFalse(sim_svc.is_running)
+
     async def test_server_teardown_lifecycle(self):
         # Verify teardown cleans up simulation and live services safely
         self.server_inst.teardown()

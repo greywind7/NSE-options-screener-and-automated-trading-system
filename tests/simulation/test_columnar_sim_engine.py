@@ -256,9 +256,9 @@ class TestColumnarSimEngine(unittest.TestCase):
         # Verify journal output
         journal_out = sim.print_journal()
         self.assertIn("TRIGGER", journal_out)
-        self.assertIn("BULL_FLAG", journal_out)
-        self.assertIn("PURE_BREAKDOWN", journal_out)
-        self.assertIn("BEAR_FLAG", journal_out)
+        self.assertIn("Flag Breakout", journal_out)
+        self.assertIn("Pure Breakdown", journal_out)
+        self.assertIn("Flag Breakdown", journal_out)
 
         # Verify chronological sorting by entry_time:
         # T2 (entry 1010, index 1 in table) must appear before T3 (entry 1030, index 2), which is before T1 (entry 1050, index 3)
@@ -267,6 +267,62 @@ class TestColumnarSimEngine(unittest.TestCase):
         pos_t1 = journal_out.find("S1")
         self.assertGreater(pos_t3, pos_t2, "T2 (entry 1010) must appear before T3 (entry 1030)")
         self.assertGreater(pos_t1, pos_t3, "T3 (entry 1030) must appear before T1 (entry 1050)")
+
+    def test_trade_underlying_entry_price_captured(self):
+        """Verify TradeState captures underlying_entry_price from opportunity trigger_price."""
+        from common.tracks.base_track import BaseTrack
+        from common.interfaces import ExecutionContext, OrderRequest
+        from core.common.ipc_schemas import ActionableOpportunity
+
+        class MockCtx(ExecutionContext):
+            @property
+            def mode(self) -> str:
+                return "paper"
+            def is_frozen(self) -> bool:
+                return False
+            def submit_order(self, request: OrderRequest) -> None:
+                pass
+            def cancel_order(self, order_id: str) -> None:
+                pass
+            def record_trade_event(self, event_type: str, data: dict) -> None:
+                pass
+
+        class DummyTrack(BaseTrack):
+            def evaluate_exit_rules(self, trade):
+                pass
+
+        track = DummyTrack("test_track", MockCtx(), target_pct=0.15, sl_pct=0.05, preferred_mode="ATM")
+        track.allocated_capital = 100000.0
+
+        opp = ActionableOpportunity(
+            opp_id="OPP_TEST_1",
+            alert_id="ALT_TEST_1",
+            symbol="ANGELONE",
+            direction="BULL",
+            archetype="FLAG_BULL_BREAKOUT",
+            trigger_price=352.65,
+            strikes={
+                "ATM": {
+                    "token": "NSE:70289",
+                    "strike": 360.0,
+                    "option_type": "CE",
+                    "bid": 5.0,
+                    "ask": 5.1,
+                    "lot_size": 100,
+                }
+            },
+            timestamp=1794888045.0,
+        )
+
+        trade = track.on_opportunity(opp)
+        self.assertIsNotNone(trade)
+        self.assertEqual(trade.underlying_entry_price, 352.65)
+        self.assertEqual(trade.metadata.get("underlying_entry_price"), 352.65)
+        self.assertEqual(trade.metadata.get("trigger_price"), 352.65)
+
+        # Check serialization
+        t_dict = trade.to_dict()
+        self.assertEqual(t_dict.get("underlying_entry_price"), 352.65)
 
 
 if __name__ == "__main__":
