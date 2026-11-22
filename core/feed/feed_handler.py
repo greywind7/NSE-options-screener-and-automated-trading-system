@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+from dataclasses import dataclass, field
 import json
 import math
 import os
@@ -59,10 +60,28 @@ DEFAULT_FEED_EQ_IPC = "ipc:///tmp/feed_equity.ipc"
 DEFAULT_FEED_OPT_IPC = "ipc:///tmp/feed_options.ipc"
 
 
+@dataclass
+class ConnectionState:
+    """State tracking for an individual WebSocket feed connection."""
+    conn_id: int
+    ws: Any = None
+    subscribed_keys: Set[str] = field(default_factory=set)
+    underlying_keys: Set[str] = field(default_factory=set)
+    underlying_symbols: Set[str] = field(default_factory=set)
+    active_option_keys: Set[str] = field(default_factory=set)
+    active_options_by_symbol: Dict[str, Set[str]] = field(default_factory=lambda: defaultdict(set))
+    last_atm_by_symbol: Dict[str, float] = field(default_factory=dict)
+    last_reval_time_by_symbol: Dict[str, float] = field(default_factory=dict)
+    max_contracts: int = 1800  # Upstox WS limit: 2000 keys per connection
+    total_ticks_received: int = 0
+    total_ticks_published: int = 0
+
+
 class FeedHandler:
     """
-    Centralized Market Ingestion Engine.
-    Routes Cash Equities to feed_equity_ipc and Options Depth to feed_options_ipc.
+    Centralized Market Ingestion Engine (Dual-Connection Spec 2.0).
+    Partitions Cash Equities and Options across parallel Upstox WebSockets (max 2,000 keys/connection).
+    Routes Cash Equities to feed_equity_ipc (TICK.EQ) and Options Depth to feed_options_ipc (TICK.OPT).
     """
 
     def __init__(
@@ -79,6 +98,7 @@ class FeedHandler:
         allow_rest_fallback: bool = False,
         poll_interval: float = 1.0,
         ctx: Optional[zmq.Context] = None,
+        num_connections: int = 2,
     ):
         cfg = get_config_manager()
         ipc_endpoints = cfg.get_ipc_endpoints()
@@ -130,6 +150,18 @@ class FeedHandler:
         self.pub_opt.setsockopt(zmq.SNDHWM, 200000)
         self.pub_opt.bind(self.feed_options_ipc)
 
+        # Thread-safe lock for strictly serialized, atomic ZeroMQ multipart publishing
+        self._publish_lock = threading.Lock()
+
+        # Multi-connection architecture (default 2 connections, partitioned by underlying)
+        self.num_connections = max(1, int(num_connections))
+        self.connections: List[ConnectionState] = [
+            ConnectionState(conn_id=i, max_contracts=self.max_stream_contracts)
+            for i in range(self.num_connections)
+        ]
+        self.symbol_to_conn: Dict[str, int] = {}
+        self.key_to_conn: Dict[str, int] = {}
+
         self.running = False
         self._running = False
         self.total_eq_published = 0
@@ -160,9 +192,120 @@ class FeedHandler:
         self.position_registry: ProtectedPositionRegistry = ProtectedPositionRegistry.get_instance()
         self.protected_logged_keys: Set[str] = set()
 
-        # Active websocket handle for dynamic subscription dispatch
-        self._active_ws = None
-        self._ws_loop = None
+        # WebSocket asyncio loop handle
+        self._ws_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    @property
+    def _active_ws(self) -> Any:
+        """Backwards compatibility accessor for active websocket connection."""
+        for c in self.connections:
+            if c.ws is not None:
+                return c.ws
+        return None
+
+    @_active_ws.setter
+    def _active_ws(self, val: Any) -> None:
+        if self.connections:
+            self.connections[0].ws = val
+
+    def _sync_global_option_keys(self) -> None:
+        """Synchronize feed-level sets from per-connection state for backwards compatibility."""
+        self.active_option_keys = set().union(*(c.active_option_keys for c in self.connections))
+        self.underlying_keys = set().union(*(c.underlying_keys for c in self.connections))
+        for c in self.connections:
+            for sym, opt_set in c.active_options_by_symbol.items():
+                self.active_options_by_symbol[sym] = set(opt_set)
+
+    def _register_key_to_conn(self, k: str, c_id: int) -> None:
+        """Register all variants of an instrument key to its connection."""
+        self.key_to_conn[k] = c_id
+        self.key_to_conn[k.replace(":", "|")] = c_id
+        self.key_to_conn[k.replace("|", ":")] = c_id
+        canon = normalize_instrument_token(k)
+        if canon:
+            self.key_to_conn[canon] = c_id
+            self.key_to_conn[canon.replace(":", "|")] = c_id
+            self.key_to_conn[canon.replace("|", ":")] = c_id
+
+    def _unregister_key_from_conn(self, k: str) -> None:
+        """Unregister all variants of an instrument key."""
+        self.key_to_conn.pop(k, None)
+        self.key_to_conn.pop(k.replace(":", "|"), None)
+        self.key_to_conn.pop(k.replace("|", ":"), None)
+        canon = normalize_instrument_token(k)
+        if canon:
+            self.key_to_conn.pop(canon, None)
+            self.key_to_conn.pop(canon.replace(":", "|"), None)
+            self.key_to_conn.pop(canon.replace("|", ":"), None)
+
+    def get_connection_for_symbol(self, symbol: str) -> int:
+        """Return the deterministic connection index (0..num_connections-1) for an underlying symbol."""
+        sym_clean = symbol.split()[0].upper() if symbol else ""
+        if sym_clean in self.symbol_to_conn:
+            return self.symbol_to_conn[sym_clean]
+        if not self.connections:
+            return 0
+        c_id = abs(hash(sym_clean)) % len(self.connections)
+        self.symbol_to_conn[sym_clean] = c_id
+        self.connections[c_id].underlying_symbols.add(sym_clean)
+        return c_id
+
+    def get_connection_for_key(self, key: str) -> int:
+        """Return the connection index owning a given underlying or derivative key."""
+        if key in self.key_to_conn:
+            return self.key_to_conn[key]
+        pipe_k = key.replace(":", "|")
+        if pipe_k in self.key_to_conn:
+            return self.key_to_conn[pipe_k]
+        colon_k = key.replace("|", ":")
+        if colon_k in self.key_to_conn:
+            return self.key_to_conn[colon_k]
+
+        canon = normalize_instrument_token(key)
+        if canon in self.key_to_conn:
+            return self.key_to_conn[canon]
+        if canon.replace(":", "|") in self.key_to_conn:
+            return self.key_to_conn[canon.replace(":", "|")]
+
+        sym = (
+            self.underlying_key_to_symbol.get(key)
+            or self.underlying_key_to_symbol.get(canon)
+            or self.symbol_map.get(key)
+            or self.symbol_map.get(canon)
+            or self.symbol_map.get(pipe_k)
+        )
+        if sym:
+            c_id = self.get_connection_for_symbol(sym)
+            self._register_key_to_conn(key, c_id)
+            return c_id
+
+        if not self.connections:
+            return 0
+        c_id = abs(hash(key)) % len(self.connections)
+        self._register_key_to_conn(key, c_id)
+        return c_id
+
+    def get_connection_keys(self, conn_id: int) -> Set[str]:
+        """Return the active set of subscribed keys on a specific connection."""
+        if 0 <= conn_id < len(self.connections):
+            return set(self.connections[conn_id].subscribed_keys)
+        return set()
+
+    def get_connection_stats(self) -> List[Dict[str, Any]]:
+        """Return runtime diagnostic telemetry for each connection."""
+        stats = []
+        for c in self.connections:
+            stats.append({
+                "conn_id": c.conn_id,
+                "connected": c.ws is not None,
+                "subscribed_keys_count": len(c.subscribed_keys),
+                "underlying_keys_count": len(c.underlying_keys),
+                "underlying_symbols_count": len(c.underlying_symbols),
+                "active_options_count": len(c.active_option_keys),
+                "ticks_received": c.total_ticks_received,
+                "ticks_published": c.total_ticks_published,
+            })
+        return stats
 
     def _log(self, msg: str, force: bool = False) -> None:
         if not self.silent or force:
@@ -176,12 +319,16 @@ class FeedHandler:
         return False
 
     def load_instruments(self) -> List[Dict[str, str]]:
-        """Load instrument universe to monitor from manifest or filtered CSV."""
+        """Load instrument universe to monitor from manifest or filtered CSV and partition across connections."""
         instruments: List[Dict[str, str]] = []
         if self.exchange == "NSE":
             instruments.append({"key": "NSE_INDEX|Nifty 50", "symbol": "Nifty 50"})
             self.symbol_map["NSE_INDEX|Nifty 50"] = "Nifty 50"
             self.symbol_map["NSE_INDEX:Nifty 50"] = "Nifty 50"
+            self.underlying_keys.add("NSE_INDEX|Nifty 50")
+            self.underlying_keys.add("NSE_INDEX:Nifty 50")
+            self.underlying_key_to_symbol["NSE_INDEX|Nifty 50"] = "Nifty 50"
+            self.underlying_key_to_symbol["NSE_INDEX:Nifty 50"] = "Nifty 50"
 
         filtered_map: Dict[str, str] = {}
         if os.path.exists(self.filtered_csv):
@@ -198,8 +345,12 @@ class FeedHandler:
                             self.underlying_keys.add(k)
                             self.underlying_keys.add(k.replace(":", "|"))
                             self.underlying_keys.add(k.replace("|", ":"))
+                            self.underlying_key_to_symbol[k.replace(":", "|")] = s
+                            self.underlying_key_to_symbol[k.replace("|", ":")] = s
             except Exception:
                 pass
+
+        popular_options_raw: List[Dict[str, Any]] = []
 
         if os.path.exists(self.manifest_path):
             try:
@@ -274,7 +425,7 @@ class FeedHandler:
                         opt_sym = pop.get("trading_symbol") or pop.get("symbol") or pop.get("name", k)
                         u_sym = pop.get("underlying", "")
                         if k and opt_sym:
-                            instruments.append({"key": k, "symbol": opt_sym})
+                            popular_options_raw.append({"key": k, "symbol": opt_sym, "underlying": u_sym})
                             self.symbol_map[k] = opt_sym
                             self.symbol_map[k.replace(":", "|")] = opt_sym
                             self.symbol_map[k.replace("|", ":")] = opt_sym
@@ -285,12 +436,12 @@ class FeedHandler:
                 elif isinstance(manifest.get("streamed_contracts", {}).get("popular_options"), dict):
                     for k, v in manifest["streamed_contracts"]["popular_options"].items():
                         opt_sym = v.get("symbol", k)
-                        instruments.append({"key": k, "symbol": opt_sym})
+                        u_sym = v.get("underlying", "")
+                        popular_options_raw.append({"key": k, "symbol": opt_sym, "underlying": u_sym})
                         self.symbol_map[k] = opt_sym
                         self.symbol_map[k.replace(":", "|")] = opt_sym
                         self.symbol_map[k.replace("|", ":")] = opt_sym
                         self.active_option_keys.add(k)
-                        u_sym = v.get("underlying")
                         if u_sym:
                             self.active_options_by_symbol[u_sym].add(k)
                             self.eligible_underlyings_for_options.add(u_sym.upper())
@@ -305,42 +456,122 @@ class FeedHandler:
                     self.symbol_map[k] = s
                     self.symbol_map[k.replace("|", ":")] = s
 
+        # Deterministic sharding of underlying equities across connections
+        all_und_symbols = set()
+        for inst in instruments:
+            k = inst.get("key", "")
+            s = inst.get("symbol", "")
+            if not is_option_contract(k) and not is_option_contract(s):
+                s_clean = s.split()[0].upper()
+                if s_clean:
+                    all_und_symbols.add(s_clean)
+        for s in self.underlying_key_to_symbol.values():
+            s_clean = s.split()[0].upper()
+            if s_clean:
+                all_und_symbols.add(s_clean)
+
+        sorted_symbols = sorted(list(all_und_symbols))
+        # Ensure NIFTY 50 is pinned to Connection 0
+        for n_variant in ("NIFTY 50", "NIFTY"):
+            if n_variant in sorted_symbols:
+                sorted_symbols.remove(n_variant)
+                sorted_symbols.insert(0, n_variant)
+
+        for idx, sym_u in enumerate(sorted_symbols):
+            c_id = idx % self.num_connections
+            self.symbol_to_conn[sym_u] = c_id
+            self.connections[c_id].underlying_symbols.add(sym_u)
+
+        # Assign underlying keys to connection
+        for k in list(self.underlying_keys):
+            k_clean = k.replace(":", "|")
+            s = self.underlying_key_to_symbol.get(k_clean) or self.underlying_key_to_symbol.get(k) or self.symbol_map.get(k_clean)
+            c_id = self.get_connection_for_symbol(s) if s else (abs(hash(k_clean)) % self.num_connections)
+            self._register_key_to_conn(k, c_id)
+            self.connections[c_id].underlying_keys.add(k)
+            self.connections[c_id].subscribed_keys.add(k)
+
+        # Assign popular options to their underlying's connection
+        for pop_item in popular_options_raw:
+            k = pop_item["key"]
+            opt_sym = pop_item["symbol"]
+            u_sym = pop_item.get("underlying", "")
+            c_id = self.get_connection_for_symbol(u_sym) if u_sym else (abs(hash(k)) % self.num_connections)
+            instruments.append({"key": k, "symbol": opt_sym, "conn_id": c_id})
+            self._register_key_to_conn(k, c_id)
+            self.connections[c_id].active_option_keys.add(k)
+            self.connections[c_id].subscribed_keys.add(k)
+            if u_sym:
+                self.connections[c_id].active_options_by_symbol[u_sym].add(k)
+
         # Include protected keys from active open positions into initial feed subscriptions
         protected_keys = self.position_registry.get_protected_keys()
         if protected_keys:
             existing_keys = {inst["key"].replace(":", "|") for inst in instruments}
             for pk in protected_keys:
                 pk_pipe = pk.replace(":", "|")
+                sym = self.option_name_map.get(pk, pk)
+                u_sym = None
+                for usym, opt_set in self.active_options_by_symbol.items():
+                    if pk in opt_set or pk_pipe in opt_set:
+                        u_sym = usym
+                        break
+                if not u_sym and " " in sym:
+                    u_sym = sym.split()[0]
+                c_id = self.get_connection_for_symbol(u_sym) if u_sym else (abs(hash(pk)) % self.num_connections)
+
                 if pk_pipe not in existing_keys:
-                    sym = self.option_name_map.get(pk, pk)
-                    instruments.append({"key": pk, "symbol": sym})
+                    instruments.append({"key": pk, "symbol": sym, "conn_id": c_id})
                     self.symbol_map[pk] = sym
                     self.symbol_map[pk.replace(":", "|")] = sym
                     self.symbol_map[pk.replace("|", ":")] = sym
-                    self.active_option_keys.add(pk)
-                    self._log(f"  🛡️ [PROTECTION ACTIVE] Subscribed to active open position on startup: '{sym}' ({pk})")
+                    self._log(f"  🛡️ [PROTECTION ACTIVE] Subscribed to active open position on startup [CONN-{c_id}]: '{sym}' ({pk})")
 
+                self._register_key_to_conn(pk, c_id)
+                self.connections[c_id].active_option_keys.add(pk)
+                self.connections[c_id].subscribed_keys.add(pk)
+                if u_sym:
+                    self.connections[c_id].active_options_by_symbol[u_sym].add(pk)
+
+        # Tag all instruments with their conn_id
+        for inst in instruments:
+            if "conn_id" not in inst:
+                inst["conn_id"] = self.get_connection_for_key(inst["key"])
+
+        self._sync_global_option_keys()
         self.instruments = instruments
         return instruments
 
     def _prune_dynamic_options_to_fit(
-        self, keys_to_add: Set[str], protected_keys: Set[str], current_symbol: str
+        self,
+        keys_to_add: Set[str],
+        protected_keys: Set[str],
+        current_symbol: str,
+        conn_id: Optional[int] = None,
     ) -> Set[str]:
         """Prune unheld dynamic options when stream capacity limit is reached."""
-        total_underlyings = len(self.underlying_keys)
-        current_options_count = len(self.active_option_keys)
-        total_current = total_underlyings + current_options_count
-        new_contracts_count = len(keys_to_add - self.active_option_keys)
-        projected_total = total_current + new_contracts_count
+        if conn_id is not None and 0 <= conn_id < len(self.connections):
+            conn = self.connections[conn_id]
+            total_current = len(conn.underlying_keys) + len(conn.active_option_keys)
+            new_contracts_count = len(keys_to_add - conn.active_option_keys)
+            projected_total = total_current + new_contracts_count
+            max_limit = conn.max_contracts
+            options_by_sym = conn.active_options_by_symbol
+        else:
+            total_current = len(self.underlying_keys) + len(self.active_option_keys)
+            new_contracts_count = len(keys_to_add - self.active_option_keys)
+            projected_total = total_current + new_contracts_count
+            max_limit = self.max_stream_contracts
+            options_by_sym = self.active_options_by_symbol
 
-        if projected_total <= self.max_stream_contracts:
+        if projected_total <= max_limit:
             return set()
 
-        contracts_to_prune_count = projected_total - self.max_stream_contracts
+        contracts_to_prune_count = projected_total - max_limit
         pruned_keys: Set[str] = set()
 
         # Candidate pool: active options across OTHER symbols that are not protected
-        for sym, opt_set in list(self.active_options_by_symbol.items()):
+        for sym, opt_set in list(options_by_sym.items()):
             if sym == current_symbol:
                 continue
             unheld = opt_set - protected_keys
@@ -353,7 +584,7 @@ class FeedHandler:
 
         # Fallback to current symbol if capacity still exceeded
         if len(pruned_keys) < contracts_to_prune_count:
-            curr_unheld = self.active_options_by_symbol.get(current_symbol, set()) - protected_keys
+            curr_unheld = options_by_sym.get(current_symbol, set()) - protected_keys
             for k in curr_unheld:
                 pruned_keys.add(k)
                 if len(pruned_keys) >= contracts_to_prune_count:
@@ -361,7 +592,12 @@ class FeedHandler:
 
         return pruned_keys
 
-    def evaluate_dynamic_options(self, underlying_key: str, ltp: float) -> Tuple[List[str], List[str]]:
+    def evaluate_dynamic_options(
+        self,
+        underlying_key: str,
+        ltp: float,
+        conn_id: Optional[int] = None,
+    ) -> Tuple[List[str], List[str]]:
         """
         Evaluate ATM shift for an underlying stock.
         Returns (keys_to_subscribe, keys_to_unsubscribe).
@@ -397,6 +633,15 @@ class FeedHandler:
         strikes_list = self.available_strikes_by_symbol[lookup_sym]
         if not strikes_list:
             return [], []
+
+        c_id = conn_id if conn_id is not None else self.get_connection_for_symbol(lookup_sym)
+        conn = self.connections[c_id] if 0 <= c_id < len(self.connections) else self.connections[0]
+
+        # Fallback sync for tests that set active_options_by_symbol directly
+        if lookup_sym in self.active_options_by_symbol and not conn.active_options_by_symbol[lookup_sym]:
+            conn.active_options_by_symbol[lookup_sym] = set(self.active_options_by_symbol[lookup_sym])
+            conn.active_option_keys |= conn.active_options_by_symbol[lookup_sym]
+            conn.subscribed_keys |= conn.active_options_by_symbol[lookup_sym]
 
         now = time.time()
         last_reval = self.last_reval_time_by_symbol.get(lookup_sym, 0.0)
@@ -437,7 +682,9 @@ class FeedHandler:
                         self.symbol_map[okey.replace(":", "|")] = disp
                         self.symbol_map[okey.replace("|", ":")] = disp
 
-        current_keys = self.active_options_by_symbol.get(lookup_sym, set())
+        current_keys = set(conn.active_options_by_symbol.get(lookup_sym, set()))
+        if not current_keys and lookup_sym in self.active_options_by_symbol:
+            current_keys = set(self.active_options_by_symbol[lookup_sym])
         keys_to_add = new_target_keys - current_keys
 
         # Retention window with hysteresis
@@ -463,7 +710,7 @@ class FeedHandler:
                     if sk not in self.protected_logged_keys:
                         self.protected_logged_keys.add(sk)
                         sym_disp = self.symbol_map.get(sk, sk)
-                        print(f"  🛡️ [PROTECTION ACTIVE] Retaining subscription for '{sym_disp}' ({sk}) - Active open position detected!")
+                        print(f"  🛡️ [PROTECTION ACTIVE] Retaining subscription [CONN-{c_id}] for '{sym_disp}' ({sk}) - Active open position detected!")
             keys_to_remove -= protected_keys
 
             # Guarantee any protected option for this symbol is active
@@ -475,23 +722,35 @@ class FeedHandler:
             keys_to_add |= (protected_for_sym - current_keys)
 
         if not keys_to_add and not keys_to_remove:
+            conn.last_atm_by_symbol[lookup_sym] = atm_strike
+            conn.last_reval_time_by_symbol[lookup_sym] = now
             self.last_atm_by_symbol[lookup_sym] = atm_strike
             self.last_reval_time_by_symbol[lookup_sym] = now
             return [], []
 
-        # Capacity limit enforcement
+        # Capacity limit enforcement per connection
         if keys_to_add:
-            capacity_pruned = self._prune_dynamic_options_to_fit(keys_to_add, protected_keys, lookup_sym)
+            capacity_pruned = self._prune_dynamic_options_to_fit(keys_to_add, protected_keys, lookup_sym, conn_id=c_id)
             if capacity_pruned:
                 keys_to_remove |= capacity_pruned
 
-        # Update in-memory sets
-        self.active_options_by_symbol[lookup_sym] = (current_keys - keys_to_remove) | keys_to_add
-        self.active_option_keys = (self.active_option_keys - keys_to_remove) | keys_to_add
+        # Update in-memory sets for connection
+        conn.active_options_by_symbol[lookup_sym] = (current_keys - keys_to_remove) | keys_to_add
+        conn.active_option_keys = (conn.active_option_keys - keys_to_remove) | keys_to_add
+        conn.subscribed_keys = (conn.subscribed_keys - keys_to_remove) | keys_to_add
+        conn.last_atm_by_symbol[lookup_sym] = atm_strike
+        conn.last_reval_time_by_symbol[lookup_sym] = now
+
+        for k in keys_to_add:
+            self._register_key_to_conn(k, c_id)
+        for k in keys_to_remove:
+            self._unregister_key_from_conn(k)
+
         self.last_atm_by_symbol[lookup_sym] = atm_strike
         self.last_reval_time_by_symbol[lookup_sym] = now
         self.total_dynamic_subscriptions += len(keys_to_add)
         self.total_dynamic_unsubscriptions += len(keys_to_remove)
+        self._sync_global_option_keys()
 
         return list(keys_to_add), list(keys_to_remove)
 
@@ -509,6 +768,7 @@ class FeedHandler:
         received_ts: float = 0.0,
         bids: Optional[List[List[float]]] = None,
         asks: Optional[List[List[float]]] = None,
+        conn_id: Optional[int] = None,
     ) -> None:
         """Publish a tick event over ZeroMQ to its dedicated IPC socket with full depth arrays."""
         canonical_token = normalize_instrument_token(token)
@@ -533,9 +793,12 @@ class FeedHandler:
                 asks=asks or [],
             )
             payload = pack_message(event)
-            # 1. Option depth tick -> publish strictly to Options socket (QuotesBroker)
-            self.pub_opt.send_multipart([b"TICK.OPT", payload])
-            self.total_opt_published += 1
+            # 1. Option depth tick -> publish strictly to Options socket (QuotesBroker) under lock
+            with self._publish_lock:
+                self.pub_opt.send_multipart([b"TICK.OPT", payload])
+                self.total_opt_published += 1
+                if conn_id is not None and 0 <= conn_id < len(self.connections):
+                    self.connections[conn_id].total_ticks_published += 1
         else:
             event = EquityTickEvent(
                 token=canonical_token,
@@ -550,31 +813,70 @@ class FeedHandler:
                 received_timestamp=float(received_ts or time.time()),
             )
             payload = pack_message(event)
-            # 2. Equity tick -> publish strictly to Equity socket (CandleManager)
-            self.pub_eq.send_multipart([b"TICK.EQ", payload])
-            self.total_eq_published += 1
+            # 2. Equity tick -> publish strictly to Equity socket (CandleManager) under lock
+            with self._publish_lock:
+                self.pub_eq.send_multipart([b"TICK.EQ", payload])
+                self.total_eq_published += 1
+                if conn_id is not None and 0 <= conn_id < len(self.connections):
+                    self.connections[conn_id].total_ticks_published += 1
 
             # 3. Dynamic popular strikes evaluation on price change
             if self.enable_dynamic_options:
-                to_add, to_remove = self.evaluate_dynamic_options(canonical_token, ltp)
-                if (to_add or to_remove) and self._active_ws and self._ws_loop:
-                    # Dispatch dynamic sub/unsub over live WebSocket
-                    asyncio.run_coroutine_threadsafe(
-                        self._dispatch_ws_subscription_update(to_add, to_remove), self._ws_loop
-                    )
+                c_id = conn_id if conn_id is not None else self.get_connection_for_key(canonical_token)
+                to_add, to_remove = self.evaluate_dynamic_options(canonical_token, ltp, conn_id=c_id)
+                if (to_add or to_remove) and self._ws_loop:
+                    conn = self.connections[c_id] if 0 <= c_id < len(self.connections) else None
+                    if conn and conn.ws:
+                        asyncio.run_coroutine_threadsafe(
+                            self._dispatch_ws_subscription_update(c_id, to_add, to_remove), self._ws_loop
+                        )
+                    elif self._active_ws:
+                        asyncio.run_coroutine_threadsafe(
+                            self._dispatch_ws_subscription_update(c_id, to_add, to_remove), self._ws_loop
+                        )
 
-    async def _dispatch_ws_subscription_update(self, to_add: List[str], to_remove: List[str]) -> None:
-        if not self._active_ws:
+    async def _dispatch_ws_subscription_update(
+        self,
+        conn_id_or_add: Any,
+        to_add_or_remove: Any = None,
+        to_remove_opt: Any = None,
+    ) -> None:
+        """Dispatch subscription/unsubscription updates to the appropriate connection WebSocket."""
+        if isinstance(conn_id_or_add, int):
+            conn_id = conn_id_or_add
+            to_add = to_add_or_remove or []
+            to_remove = to_remove_opt or []
+        else:
+            to_add = conn_id_or_add or []
+            to_remove = to_add_or_remove or []
+            conn_id = None
+
+        if conn_id is not None and 0 <= conn_id < len(self.connections):
+            target_ws = self.connections[conn_id].ws
+        else:
+            target_ws = self._active_ws
+
+        if not target_ws:
             return
+
         try:
+            guid_suffix = f"_c{conn_id}" if conn_id is not None else ""
             if to_add:
-                sub_msg = json.dumps({"guid": "dyn_sub", "method": "sub", "data": {"mode": "full", "instrumentKeys": to_add}}).encode("utf-8")
-                await self._active_ws.send(sub_msg)
+                sub_msg = json.dumps({
+                    "guid": f"dyn_sub{guid_suffix}",
+                    "method": "sub",
+                    "data": {"mode": "full", "instrumentKeys": list(to_add)},
+                }).encode("utf-8")
+                await target_ws.send(sub_msg)
             if to_remove:
-                unsub_msg = json.dumps({"guid": "dyn_unsub", "method": "unsub", "data": {"mode": "full", "instrumentKeys": to_remove}}).encode("utf-8")
-                await self._active_ws.send(unsub_msg)
+                unsub_msg = json.dumps({
+                    "guid": f"dyn_unsub{guid_suffix}",
+                    "method": "unsub",
+                    "data": {"mode": "full", "instrumentKeys": list(to_remove)},
+                }).encode("utf-8")
+                await target_ws.send(unsub_msg)
         except Exception as e:
-            log_debug(f"Error updating dynamic subscriptions on WebSocket: {e}", self.debug_log)
+            log_debug(f"[CONN-{conn_id}] Error updating dynamic subscriptions on WebSocket: {e}", self.debug_log)
 
     def start(self) -> None:
         """Start the market data ingestion engine according to configured mode."""
@@ -583,10 +885,13 @@ class FeedHandler:
         self.load_instruments()
 
         print("=" * 80)
-        print("📡 MARKET DATA FEED HANDLER SERVICE ACTIVE")
+        print("📡 MARKET DATA FEED HANDLER SERVICE ACTIVE (DUAL CONNECTION)")
         print(f"Equity IPC Socket  : {self.feed_equity_ipc} (Subscribed by CandleManager & Recorder)")
         print(f"Options IPC Socket : {self.feed_options_ipc} (Subscribed by QuotesBroker & Recorder)")
-        print(f"Monitored Assets   : {len(self.instruments):,} contracts [{self.exchange}]")
+        print(f"Connections        : {self.num_connections} Parallel WebSockets (Upstox limit: 2,000 keys/conn)")
+        for i, c in enumerate(self.connections):
+            print(f"  • Connection {i}   : {len(c.subscribed_keys):,} keys ({len(c.underlying_keys):,} underlyings, {len(c.active_option_keys):,} options)")
+        print(f"Monitored Assets   : {len(self.instruments):,} total contracts [{self.exchange}]")
         print(f"Ingestion Mode     : {self.mode.upper()}")
         print(f"Time               : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 80)
@@ -605,8 +910,8 @@ class FeedHandler:
             self._run_poll_stream()
 
     def _run_mock_stream(self) -> None:
-        """Simulate realistic moving ticks across monitored equities and options."""
-        print("📡 Ingestion Engine: SYNTHETIC MOCK MARKET TICK FEED")
+        """Simulate realistic moving ticks across monitored equities and options partitioned across dual connections."""
+        print("📡 Ingestion Engine: SYNTHETIC MOCK MARKET TICK FEED (DUAL CONNECTION)")
         print("✓ Simulation Mode: Generating live synthetic market ticks across monitored universe...")
         prices: Dict[str, float] = {}
         volumes: Dict[str, int] = {}
@@ -622,13 +927,13 @@ class FeedHandler:
 
         while self._running:
             now_ts = time.time()
-            # Pick a subset of instruments to update each tick
             sample_size = min(len(self.instruments), max(5, len(self.instruments) // 4))
             batch = random.sample(self.instruments, sample_size)
 
             for inst in batch:
                 k = inst["key"]
                 sym = inst["symbol"]
+                c_id = inst.get("conn_id") if inst.get("conn_id") is not None else self.get_connection_for_key(k)
                 curr_p = prices[k]
                 pct_chg = random.uniform(-0.002, 0.002)
                 new_p = max(0.50, round(curr_p * (1.0 + pct_chg), 2))
@@ -657,12 +962,13 @@ class FeedHandler:
                     received_ts=now_ts,
                     bids=bids,
                     asks=asks,
+                    conn_id=c_id,
                 )
 
             time.sleep(self.poll_interval)
 
     def _run_websocket_stream(self) -> None:
-        """Connect to Upstox V3 Market Data WebSocket and decode binary protobuf packets."""
+        """Connect to Upstox V3 Market Data WebSocket and decode binary protobuf packets across dual connections."""
         if pb is None:
             if self.is_rest_fallback_allowed():
                 self._run_poll_stream()
@@ -671,6 +977,7 @@ class FeedHandler:
             return
 
         auth_url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+
         def get_authorized_ws_url() -> Optional[str]:
             try:
                 res = http_get_json(auth_url, access_token=self.access_token, timeout=10, debug_file=self.debug_log)
@@ -680,120 +987,139 @@ class FeedHandler:
                 log_debug(f"Upstox WS auth error: {e}", self.debug_log)
             return None
 
-        ws_url = get_authorized_ws_url()
-        if not ws_url:
+        # Verify initial authorization
+        initial_url = get_authorized_ws_url()
+        if not initial_url:
             if self.is_rest_fallback_allowed():
                 self._run_poll_stream()
                 return
             print("❌ Failed to authorize WebSocket connection and REST fallback is disabled.", file=sys.stderr)
             return
 
-        async def ws_consumer():
-            self._ws_loop = asyncio.get_running_loop()
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
-            async with websockets.connect(ws_url, ssl=ssl_ctx, ping_interval=None, max_size=10 * 1024 * 1024) as ws:
-                self._active_ws = ws
-                keys = [inst["key"] for inst in self.instruments if inst.get("key")]
-                stream_keys = keys[:self.max_stream_contracts]
-                # Synchronize in-memory active option keys with the exact stream slice
-                subscribed_set = set(stream_keys)
-                self.active_option_keys = {k for k in self.active_option_keys if k in subscribed_set}
-                for sym in list(self.active_options_by_symbol.keys()):
-                    self.active_options_by_symbol[sym] = {k for k in self.active_options_by_symbol[sym] if k in subscribed_set}
+        async def ws_connection_worker(conn_id: int):
+            conn = self.connections[conn_id]
+            backoff = 1.0
 
-                sub_payload = {"guid": "feed_v2", "method": "sub", "data": {"mode": "full", "instrumentKeys": stream_keys}}
-                await ws.send(json.dumps(sub_payload).encode("utf-8"))
-                print(f"✓ Upstox V3 WebSocket connected. Subscribed to {len(stream_keys):,} contracts (Underlyings: {len(self.underlying_keys):,}, Options: {len(self.active_option_keys):,}).")
-
-                while self._running:
-                    msg = await ws.recv()
-                    now_ts = time.time()
-                    if isinstance(msg, bytes):
-                        try:
-                            feed_resp = pb.FeedResponse()
-                            feed_resp.ParseFromString(msg)
-                            for k, feed in feed_resp.feeds.items():
-                                canonical_key = k.replace(":", "|")
-                                sym = self.symbol_map.get(canonical_key) or canonical_key.split("|")[-1]
-                                ltp, bid, ask = 0.0, 0.0, 0.0
-                                bids, asks = [], []
-                                vol = 0
-                                feed_union = feed.WhichOneof("FeedUnion")
-                                if feed_union == "fullFeed":
-                                    ff = feed.fullFeed
-                                    which = ff.WhichOneof("FullFeedUnion")
-                                    if which == "marketFF":
-                                        m = ff.marketFF
-                                        ltp = float(m.ltpc.ltp or 0.0)
-                                        vol = int(m.vtt or (m.marketOHLC.ohlc[0].vol if m.marketOHLC and m.marketOHLC.ohlc else 0))
-                                        if m.marketLevel and m.marketLevel.bidAskQuote:
-                                            for ba in m.marketLevel.bidAskQuote:
-                                                bp, bq = float(ba.bidP or 0.0), int(ba.bidQ or 0)
-                                                ap, aq = float(ba.askP or 0.0), int(ba.askQ or 0)
-                                                if bp > 0: bids.append([bp, bq, 1])
-                                                if ap > 0: asks.append([ap, aq, 1])
-                                            bid = bids[0][0] if bids else ltp
-                                            ask = asks[0][0] if asks else ltp
-                                elif feed_union == "firstLevelWithGreeks":
-                                    fl = feed.firstLevelWithGreeks
-                                    ltp = float(fl.ltpc.ltp or 0.0)
-                                    vol = int(fl.vtt or 0)
-                                    if fl.firstDepth:
-                                        bid = float(fl.firstDepth.bidP or ltp)
-                                        ask = float(fl.firstDepth.askP or ltp)
-                                elif feed_union == "ltpc":
-                                    ltp = float(feed.ltpc.ltp or 0.0)
-                                    bid, ask = ltp, ltp
-
-                                if vol > 0:
-                                    self.last_seen_volume[canonical_key] = vol
-                                else:
-                                    vol = self.last_seen_volume.get(canonical_key, 0)
-
-                                if ltp > 0:
-                                    bid_q = int(bids[0][1]) if bids else 0
-                                    ask_q = int(asks[0][1]) if asks else 0
-                                    self.publish_tick(
-                                        token=canonical_key,
-                                        symbol=sym,
-                                        ltp=ltp,
-                                        volume=vol,
-                                        bid=bid or ltp,
-                                        ask=ask or ltp,
-                                        bid_qty=bid_q,
-                                        ask_qty=ask_q,
-                                        exchange_ts=now_ts,
-                                        received_ts=now_ts,
-                                        bids=bids,
-                                        asks=asks,
-                                    )
-                        except Exception as parse_err:
-                            log_debug(f"Protobuf parse error: {parse_err}", self.debug_log)
-
-        backoff = 1.0
-        while self._running:
-            try:
-                if not ws_url:
-                    ws_url = get_authorized_ws_url()
-                    if not ws_url:
+            while self._running:
+                try:
+                    conn_ws_url = get_authorized_ws_url()
+                    if not conn_ws_url:
                         ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        print(f"[{ts_str}] [FEED] ⚠️ Cannot obtain WebSocket authorization URL (possible network outage). Retrying in {backoff:.1f}s...", file=sys.stderr)
-                        time.sleep(backoff)
+                        print(f"[{ts_str}] [FEED-CONN-{conn_id}] ⚠️ Cannot obtain WebSocket authorization URL. Retrying in {backoff:.1f}s...", file=sys.stderr)
+                        await asyncio.sleep(backoff)
                         backoff = min(15.0, backoff * 1.5)
                         continue
 
-                asyncio.run(ws_consumer())
-                backoff = 1.0
+                    ssl_ctx = ssl.create_default_context()
+                    ssl_ctx.check_hostname = False
+                    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+                    async with websockets.connect(conn_ws_url, ssl=ssl_ctx, ping_interval=None, max_size=10 * 1024 * 1024) as ws:
+                        conn.ws = ws
+                        # Slice subscriptions to max_contracts limit
+                        stream_keys = sorted(list(conn.subscribed_keys))[:conn.max_contracts]
+                        conn.subscribed_keys = set(stream_keys)
+                        conn.active_option_keys = {k for k in conn.active_option_keys if k in conn.subscribed_keys}
+                        for sym in list(conn.active_options_by_symbol.keys()):
+                            conn.active_options_by_symbol[sym] = {k for k in conn.active_options_by_symbol[sym] if k in conn.subscribed_keys}
+                        self._sync_global_option_keys()
+
+                        sub_payload = {
+                            "guid": f"feed_v2_c{conn_id}",
+                            "method": "sub",
+                            "data": {"mode": "full", "instrumentKeys": stream_keys},
+                        }
+                        await ws.send(json.dumps(sub_payload).encode("utf-8"))
+                        print(f"✓ [CONN-{conn_id}] Upstox V3 WebSocket connected. Subscribed to {len(stream_keys):,} contracts (Underlyings: {len(conn.underlying_keys):,}, Options: {len(conn.active_option_keys):,}).")
+                        backoff = 1.0
+
+                        while self._running:
+                            msg = await ws.recv()
+                            conn.total_ticks_received += 1
+                            now_ts = time.time()
+                            if isinstance(msg, bytes):
+                                try:
+                                    feed_resp = pb.FeedResponse()
+                                    feed_resp.ParseFromString(msg)
+                                    for k, feed in feed_resp.feeds.items():
+                                        canonical_key = k.replace(":", "|")
+                                        sym = self.symbol_map.get(canonical_key) or canonical_key.split("|")[-1]
+                                        ltp, bid, ask = 0.0, 0.0, 0.0
+                                        bids, asks = [], []
+                                        vol = 0
+                                        feed_union = feed.WhichOneof("FeedUnion")
+                                        if feed_union == "fullFeed":
+                                            ff = feed.fullFeed
+                                            which = ff.WhichOneof("FullFeedUnion")
+                                            if which == "marketFF":
+                                                m = ff.marketFF
+                                                ltp = float(m.ltpc.ltp or 0.0)
+                                                vol = int(m.vtt or (m.marketOHLC.ohlc[0].vol if m.marketOHLC and m.marketOHLC.ohlc else 0))
+                                                if m.marketLevel and m.marketLevel.bidAskQuote:
+                                                    for ba in m.marketLevel.bidAskQuote:
+                                                        bp, bq = float(ba.bidP or 0.0), int(ba.bidQ or 0)
+                                                        ap, aq = float(ba.askP or 0.0), int(ba.askQ or 0)
+                                                        if bp > 0: bids.append([bp, bq, 1])
+                                                        if ap > 0: asks.append([ap, aq, 1])
+                                                    bid = bids[0][0] if bids else ltp
+                                                    ask = asks[0][0] if asks else ltp
+                                        elif feed_union == "firstLevelWithGreeks":
+                                            fl = feed.firstLevelWithGreeks
+                                            ltp = float(fl.ltpc.ltp or 0.0)
+                                            vol = int(fl.vtt or 0)
+                                            if fl.firstDepth:
+                                                bid = float(fl.firstDepth.bidP or ltp)
+                                                ask = float(fl.firstDepth.askP or ltp)
+                                        elif feed_union == "ltpc":
+                                            ltp = float(feed.ltpc.ltp or 0.0)
+                                            bid, ask = ltp, ltp
+
+                                        if vol > 0:
+                                            self.last_seen_volume[canonical_key] = vol
+                                        else:
+                                            vol = self.last_seen_volume.get(canonical_key, 0)
+
+                                        if ltp > 0:
+                                            bid_q = int(bids[0][1]) if bids else 0
+                                            ask_q = int(asks[0][1]) if asks else 0
+                                            self.publish_tick(
+                                                token=canonical_key,
+                                                symbol=sym,
+                                                ltp=ltp,
+                                                volume=vol,
+                                                bid=bid or ltp,
+                                                ask=ask or ltp,
+                                                bid_qty=bid_q,
+                                                ask_qty=ask_q,
+                                                exchange_ts=now_ts,
+                                                received_ts=now_ts,
+                                                bids=bids,
+                                                asks=asks,
+                                                conn_id=conn_id,
+                                            )
+                                except Exception as parse_err:
+                                    log_debug(f"[CONN-{conn_id}] Protobuf parse error: {parse_err}", self.debug_log)
+                except Exception as e:
+                    if not self._running:
+                        break
+                    conn.ws = None
+                    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    print(f"[{ts_str}] [FEED-CONN-{conn_id}] ⚠️ WebSocket disconnected/error: {e}. Retrying connection in {backoff:.1f}s...", file=sys.stderr)
+                    await asyncio.sleep(backoff)
+                    backoff = min(15.0, backoff * 1.5)
+
+        async def dual_runner():
+            self._ws_loop = asyncio.get_running_loop()
+            await asyncio.gather(*(ws_connection_worker(i) for i in range(self.num_connections)))
+
+        while self._running:
+            try:
+                asyncio.run(dual_runner())
             except Exception as e:
                 if not self._running:
                     break
-                ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{ts_str}] [FEED] ⚠️ WebSocket disconnected/error: {e}. Retrying connection in {backoff:.1f}s...", file=sys.stderr)
-                time.sleep(backoff)
-                backoff = min(15.0, backoff * 1.5)
-                ws_url = None
+                print(f"[FEED] Main dual runner exited: {e}. Restarting in 2s...", file=sys.stderr)
+                time.sleep(2.0)
 
     def _run_poll_stream(self) -> None:
         """Fallback REST poller in batches of 500 contracts."""
@@ -805,10 +1131,19 @@ class FeedHandler:
     def stop(self) -> None:
         self.running = False
         self._running = False
-        if hasattr(self, "pub_eq") and not self.pub_eq.closed:
-            self.pub_eq.close(0)
-        if hasattr(self, "pub_opt") and not self.pub_opt.closed:
-            self.pub_opt.close(0)
+        for conn in self.connections:
+            if conn.ws:
+                try:
+                    if self._ws_loop and self._ws_loop.is_running():
+                        asyncio.run_coroutine_threadsafe(conn.ws.close(), self._ws_loop)
+                except Exception:
+                    pass
+                conn.ws = None
+        with self._publish_lock:
+            if hasattr(self, "pub_eq") and not self.pub_eq.closed:
+                self.pub_eq.close(0)
+            if hasattr(self, "pub_opt") and not self.pub_opt.closed:
+                self.pub_opt.close(0)
         if self._owns_ctx and hasattr(self, "ctx") and not self.ctx.closed:
             self.ctx.term()
         print("[FEED] FeedHandler stopped cleanly.")
@@ -820,6 +1155,7 @@ def main():
     parser.add_argument("--exchange", default="NSE", choices=["NSE", "MCX"], help="Target exchange")
     parser.add_argument("--feed-equity-ipc", default=DEFAULT_FEED_EQ_IPC, help="ZeroMQ PUB socket for equity ticks")
     parser.add_argument("--feed-options-ipc", default=DEFAULT_FEED_OPT_IPC, help="ZeroMQ PUB socket for option depth ticks")
+    parser.add_argument("--num-connections", type=int, default=2, help="Number of parallel Upstox WebSocket connections (default: 2)")
     args = parser.parse_args()
 
     handler = FeedHandler(
@@ -827,6 +1163,7 @@ def main():
         exchange=args.exchange,
         feed_equity_ipc=args.feed_equity_ipc,
         feed_options_ipc=args.feed_options_ipc,
+        num_connections=args.num_connections,
     )
 
     def sig_handler(sig, frame):

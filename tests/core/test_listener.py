@@ -157,6 +157,163 @@ class TestFeedHandler(unittest.TestCase):
         self.assertNotIn("NSE_FO|2440CE", to_remove_2)
         self.assertIn("NSE_FO|2440CE", self.feed.active_options_by_symbol["TEST_STOCK"])
 
+    def test_dual_connection_partitioning_disjoint_sets(self):
+        """Verify deterministic underlying sharding across dual connections with 100% disjoint subscription sets."""
+        insts = self.feed.load_instruments()
+        self.assertEqual(self.feed.num_connections, 2)
+        self.assertEqual(len(self.feed.connections), 2)
+
+        conn0 = self.feed.connections[0]
+        conn1 = self.feed.connections[1]
+
+        # Both connections must have subscribed keys
+        self.assertGreater(len(conn0.subscribed_keys), 0)
+        self.assertGreater(len(conn1.subscribed_keys), 0)
+
+        # Invariant 1: Underlyings are 100% disjoint
+        und_intersection = conn0.underlying_symbols & conn1.underlying_symbols
+        self.assertEqual(und_intersection, set(), f"Underlyings overlap between connections: {und_intersection}")
+
+        # Invariant 2: Subscriptions are 100% disjoint (no cross-connection duplicates)
+        sub_intersection = conn0.subscribed_keys & conn1.subscribed_keys
+        self.assertEqual(sub_intersection, set(), f"Subscribed keys overlap between connections: {sub_intersection}")
+
+        # Invariant 3: Active options are 100% disjoint
+        opt_intersection = conn0.active_option_keys & conn1.active_option_keys
+        self.assertEqual(opt_intersection, set(), f"Option keys overlap between connections: {opt_intersection}")
+
+        # Invariant 4: Key routing matches assigned connection
+        for k in list(conn0.subscribed_keys)[:20]:
+            self.assertEqual(self.feed.get_connection_for_key(k), 0)
+        for k in list(conn1.subscribed_keys)[:20]:
+            self.assertEqual(self.feed.get_connection_for_key(k), 1)
+
+        # Diagnostic stats check
+        stats = self.feed.get_connection_stats()
+        self.assertEqual(len(stats), 2)
+        self.assertEqual(stats[0]["conn_id"], 0)
+        self.assertEqual(stats[1]["conn_id"], 1)
+
+    def test_dual_connection_dynamic_atm_shift_and_isolation(self):
+        """Verify dynamic ATM strikes (+-3 CE/PE) evaluate and isolate cleanly to their assigned connection."""
+        self.feed.symbol_to_conn["STOCK_C0"] = 0
+        self.feed.connections[0].underlying_symbols.add("STOCK_C0")
+        self.feed.symbol_to_conn["STOCK_C1"] = 1
+        self.feed.connections[1].underlying_symbols.add("STOCK_C1")
+
+        strikes = [100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0]
+        make_strikes_dict = lambda sym: {
+            f"{s:.1f}": {"CE": f"NSE_FO|{sym}_{int(s)}CE", "PE": f"NSE_FO|{sym}_{int(s)}PE"}
+            for s in strikes
+        }
+
+        self.feed.options_map["STOCK_C0"] = {"strikes": make_strikes_dict("STOCK_C0")}
+        self.feed.options_map["STOCK_C1"] = {"strikes": make_strikes_dict("STOCK_C1")}
+        self.feed.available_strikes_by_symbol["STOCK_C0"] = strikes
+        self.feed.available_strikes_by_symbol["STOCK_C1"] = strikes
+        self.feed.underlying_key_to_symbol["NSE_EQ|STOCK_C0"] = "STOCK_C0"
+        self.feed.underlying_key_to_symbol["NSE_EQ|STOCK_C1"] = "STOCK_C1"
+
+        # 1. Price of STOCK_C0 is 140 -> ATM is 140 -> +-3 strikes: 110..170 (7 strikes, 14 contracts)
+        to_add_0, to_remove_0 = self.feed.evaluate_dynamic_options("NSE_EQ|STOCK_C0", 140.0)
+        self.assertEqual(len(to_add_0), 14)  # 7 strikes * 2 (CE + PE)
+        self.assertEqual(len(to_remove_0), 0)
+
+        # Verify all added options are on Connection 0
+        for opt in to_add_0:
+            self.assertIn(opt, self.feed.connections[0].active_option_keys)
+            self.assertIn(opt, self.feed.connections[0].subscribed_keys)
+            self.assertEqual(self.feed.get_connection_for_key(opt), 0)
+            # Connection 1 must not have these
+            self.assertNotIn(opt, self.feed.connections[1].active_option_keys)
+
+        # 2. Price of STOCK_C1 is 150 -> ATM is 150 -> +-3 strikes: 120..180 (7 strikes, 14 contracts)
+        to_add_1, to_remove_1 = self.feed.evaluate_dynamic_options("NSE_EQ|STOCK_C1", 150.0)
+        self.assertEqual(len(to_add_1), 14)
+
+        # Verify all added options are on Connection 1
+        for opt in to_add_1:
+            self.assertIn(opt, self.feed.connections[1].active_option_keys)
+            self.assertIn(opt, self.feed.connections[1].subscribed_keys)
+            self.assertEqual(self.feed.get_connection_for_key(opt), 1)
+            # Connection 0 must not have these
+            self.assertNotIn(opt, self.feed.connections[0].active_option_keys)
+
+        # 3. Register open position for STOCK_C1 (150 CE)
+        opt_c1_150ce = "NSE_FO|STOCK_C1_150CE"
+        self.feed.position_registry.register_open_position(
+            contract_key=opt_c1_150ce,
+            symbol="STOCK_C1",
+            contract_symbol="STOCK_C1 150 CE",
+            mode="live",
+            track="ATM",
+            trade_id="TR_C1",
+        )
+
+        # 4. STOCK_C1 crashes to 100 -> ATM is 100 -> 150CE is way outside ATM+-3 and outside hysteresis
+        self.feed.last_reval_time_by_symbol["STOCK_C1"] = 0.0
+        to_add_crash, to_remove_crash = self.feed.evaluate_dynamic_options("NSE_EQ|STOCK_C1", 100.0)
+
+        # Protected position guard must prevent unsubscription of 150CE on Connection 1
+        self.assertNotIn(opt_c1_150ce, to_remove_crash)
+        self.assertIn(opt_c1_150ce, self.feed.connections[1].active_option_keys)
+
+    def test_thread_safe_concurrent_publishing(self):
+        """Verify thread-safe ZeroMQ publishing under concurrent multi-connection traffic."""
+        time.sleep(0.15)
+        published_eq = []
+        published_opt = []
+        num_threads = 4
+        ticks_per_thread = 25
+
+        def worker(thread_idx: int):
+            for i in range(ticks_per_thread):
+                now = time.time()
+                # Publish equity tick
+                self.feed.publish_tick(
+                    token=f"NSE_EQ|TEST_{thread_idx}_{i}",
+                    symbol=f"STOCK_{thread_idx}",
+                    ltp=100.0 + i,
+                    exchange_ts=now,
+                    received_ts=now,
+                    conn_id=thread_idx % 2,
+                )
+                # Publish option tick
+                self.feed.publish_tick(
+                    token=f"NSE_FO|OPT_{thread_idx}_{i}_CE",
+                    symbol=f"STOCK_{thread_idx} {100+i} CE",
+                    ltp=10.0 + i,
+                    bids=[[10.0, 50, 1]],
+                    asks=[[10.5, 50, 1]],
+                    exchange_ts=now,
+                    received_ts=now,
+                    conn_id=thread_idx % 2,
+                )
+
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        expected_total = num_threads * ticks_per_thread
+        self.assertEqual(self.feed.total_eq_published, expected_total)
+        self.assertEqual(self.feed.total_opt_published, expected_total)
+
+        # Receive all ticks and verify zero frame corruption
+        for _ in range(expected_total):
+            topic, payload = self.sub_eq.recv_multipart()
+            self.assertEqual(topic, b"TICK.EQ")
+            event = unpack_message(payload)
+            self.assertIn("STOCK_", event["symbol"])
+
+        for _ in range(expected_total):
+            topic, payload = self.sub_opt.recv_multipart()
+            self.assertEqual(topic, b"TICK.OPT")
+            event = unpack_message(payload)
+            self.assertIn("OPT_", event["token"])
+            self.assertEqual(len(event["bids"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,7 @@ class MarketDataListener(FeedHandler):
         max_stream_contracts: int = 1800,
         silent: bool = False,
         allow_rest_fallback: bool = False,
+        num_connections: int = 2,
     ):
         super().__init__(
             mode=mode,
@@ -39,6 +40,7 @@ class MarketDataListener(FeedHandler):
             silent=silent,
             allow_rest_fallback=allow_rest_fallback,
             poll_interval=poll_interval,
+            num_connections=num_connections,
         )
 
 
