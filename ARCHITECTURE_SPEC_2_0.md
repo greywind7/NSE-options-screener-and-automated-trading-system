@@ -60,9 +60,11 @@ flowchart TD
         SuperDelayed -.->|Imports| CommonTracks
     end
 
-    subgraph Observability ["Universal Monitoring Tier"]
-        SocketTrades --> Dashboard["Universal Terminal Dashboard Process"]
-        DelayedLedger & PaperLedger & LiveLedger -.->|Real-time Refresh| Dashboard
+    subgraph Observability ["Universal Monitoring & Web Tier"]
+        SocketTrades --> WebServer["Analytics Web Server (web/server.py:8080)"]
+        DelayedLedger & PaperLedger & LiveLedger -.->|Real-time Journals & MTM| WebServer
+        WebServer -->|WebSocket: /api/live/ws| WebUI["Analytics & Simulation Web UI (Browser)"]
+        WebServer -->|REST: /api/*| WebUI
     end
 ```
 
@@ -315,13 +317,17 @@ classDiagram
 - Writes compressed, chunked Parquet files into `recordings/YYYYMMDD/` for lossless tick storage.
 - Asynchronous, non-blocking zero-copy subscriber; zero impact on live execution latency.
 
-### 3.8 Universal Strategy Dashboard (`ui/dashboard.py`)
-- Independent, read-only terminal process displaying real-time platform telemetry.
-- Subscribes to `ipc:///tmp/rms_strike_pub.ipc` to display:
-  - Setup Alerts with scoring archetype flags (`FLAG_BULL_BREAKOUT`, `PURE_BULL_BREAKOUT`).
-  - Time Created and Time Elapsed tabs.
-  - Available resolved option strikes (ITM, ATM, OTM) with live spreads.
-- Reads mode trade journals from disk (`recordings/YYYYMMDD/trade_journal_<mode>.csv`) to refresh the live **Trackwise Performance Matrix per Mode** (Paper, Delayed, Live).
+### 3.8 Analytics & Simulation Web Server (`web/server.py`)
+- Modern browser-based command center succeeding the terminal dashboard:
+  - **Live Service (`web/live_service.py`)**: Subscribes to ZeroMQ option depth streams, maintains Latest Value Cache (LVC), computes live MTM across open positions, and streams updates over WebSockets (`/api/live/ws`).
+  - **Simulation Service (`web/simulation_service.py`)**: Spawns isolated worker processes (`multiprocessing.Process`) to bypass Python's GIL; caches parsed Parquet DataFrames (`cached_equity_df`, `cached_options_df`) for sub-second re-runs; manages single and batch simulation queues with persistent history.
+  - **Candle & Alert Services (`web/candle_service.py`, `web/alert_service.py`)**: Attaches directly to POSIX Shared Memory (`shm_ohlc_221`) in $< 2\ \mu\text{s}$ to render 5-minute candlestick charts with exact breakout trigger markers.
+  - **Historical Service (`web/historical_service.py`)**: Discovers and indexes past trading sessions from `recordings/` and `logs/`, parsing closed trade journals for drill-down performance analytics.
+- Full details documented in [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/WEB_VIEW_FLOW.md).
+
+### 3.9 Universal Strategy Dashboard (`ui/dashboard.py`)
+- Independent, read-only terminal process displaying real-time platform telemetry (retired in favor of Web UI, retained for headless/SSH environments).
+- Subscribes to `ipc:///tmp/rms_strike_pub.ipc` to display setup alerts, active strikes, and live trackwise P&L matrix.
 
 ---
 
@@ -382,6 +388,8 @@ sequenceDiagram
     Quotes-->>DelayedSuper: Tick 4 (09:30:05.350) -> Ask: 1047.00 (Ts >= TargetFillTs)
     
     Note over DelayedSuper: Fill Order at PREVAILING CACHED QUOTE: 1044.20!
+    Note over DelayedSuper: (If no new quote arrived during delay, falls back safely to setup price req.price)
+    Note over DelayedSuper: Capital Sufficiency Check: Delta cash required <= available_capital (PASS)
     Note over DelayedSuper: Check Slippage: 0.21% <= 3.5% (PASS)
     Note over DelayedSuper: Position Open! Continue receiving ticks to trail SL.
 ```
@@ -455,17 +463,26 @@ CANDLE_DTYPE = np.dtype([
   - If a heartbeat arrives with `heartbeat.timestamp >= target_fill_ts`: Evaluates the pending order against its prevailing `cached_quote` without waiting for future ticks!
 * **Result**: Completely lazy, event-driven execution with zero CPU churn during quiet market intervals.
 
-### 6.2 Dynamic Unsubscribe Garbage Collection with Multi-Client Reference Counting
-* When an active position hits its target or stop-loss, the superstructure sends an `UNSUBSCRIBE` request identifying its mode (`client_id="paper"`, `"paper_delayed"`, or `"live"`) to `QuotesBroker`.
-* The `QuotesBroker` manages subscriptions via reference counting (`subscribers_by_token[token] = set(client_ids)`).
-* When one superstructure exits a strike, its reference count decrements. Only when `ref_count == 0` (all concurrent modes have exited the contract) does the broker stop broadcasting ticks for that contract. This guarantees that concurrent modes (e.g. Paper and Paper Delayed) never prematurely truncate each other's live depth stream.
+### 6.2 Dynamic Unsubscribe Garbage Collection & Position Protection
+* **Per-Process Client Isolation**: When subscribing or unsubscribing, each superstructure generates a unique per-process client identifier:
+  $$\text{client\_id} = f"\{\text{mode}\}\_\{\text{track\_names}\}\_\{os.getpid()\}"$$
+  The `QuotesBroker` manages subscriptions via reference counting:
+  $$\text{subscribers\_by\_token}[\text{token}] = \text{set}(\text{client\_ids})$$
+  This guarantees that concurrent tracks or modes (e.g. `paper [fast_momentum]` and `paper [trend_pullback]`) never prematurely truncate each other's live depth stream when one track exits early.
+* **Active Position Protection Registry (`ProtectedPositionRegistry`)**:
+  - Global registry tracking open option contracts across `live`, `paper`, and `paper_delayed`.
+  - When an order fills (`TRADE_FILLED`), the contract is marked protected.
+  - Any intermediate or errant unsubscription requests for a protected token are ignored until the trade formally records an exit (`TRADE_EXIT`).
+  - Upon startup, `FeedHandler` queries the protected registry and includes active positions in its initial WebSocket subscriptions.
 
-### 6.3 Process Failure & Auto-Recovery
+### 6.3 Process Failure, Auto-Recovery & Mid-Day Continue (`--continue`)
 * Each process is managed by a lightweight supervisor (systemd / supervisord / launchd).
-* If `ScoringEngine` or a `Superstructure` restarts:
-  - It reconnects to existing ZeroMQ IPC sockets without disrupting other processes.
-  - It re-attaches to the existing POSIX Shared Memory segment in $< 1\text{ ms}$.
-  - Live open positions are recovered directly from the broker gateway REST API.
+* **State Recovery Protocol (`runner.py start/strat --continue`)**:
+  - When restarted mid-day, Superstructures scan today's trade journals in `recordings/YYYYMMDD/trade_journal_<mode>.csv`.
+  - Open positions are reconstituted with their original entry prices, targets, trailing stops, and timestamps.
+  - Superstructures immediately issue `subscribe_quotes(recovered_tokens)` to `QuotesBroker` using their isolated `client_id`.
+  - Prevailing snapshot quotes are returned to seed active trade states (`current_bid`, `highest_price`) before market streaming begins.
+  - Live open positions are concurrently reconciled against broker gateway REST API.
 
 ### 6.4 Execution Mode Freeze & Cutoff Control (`runner.py freeze / unfreeze`)
 * **Operator Freeze Control**:
@@ -477,6 +494,18 @@ CANDLE_DTYPE = np.dtype([
   - Superstructures toggle an in-memory atomic boolean `is_frozen = True`.
 * **Safe Exit Behavior**:
   - When frozen, open positions are **never abandoned**. Trailing stop-losses, dynamic targets, and EOD square-offs continue to run uninterrupted.
+
+### 6.5 Guaranteed Market Recorder Flush Architecture
+* **Lossless Tick Durability**:
+  - `MarketRecorder` registers `atexit.register(self.flush)` to guarantee data commitment even on unexpected process termination.
+  - The primary ZeroMQ ingestion loop in `start()` is protected with `try ... finally: self.flush()`.
+  - The `stop()` handler explicitly flushes all write buffers to Parquet on disk before destroying ZeroMQ contexts or sockets.
+
+### 6.6 Zero-Fabrication & Strict Quote Integrity Policy
+* **Absolute Ban on Synthetic/Nominal Quotes**:
+  - The entire pipeline operates strictly on genuine, executable market depth. Synthetic fallback quotes in RMS or execution are strictly prohibited.
+  - If a strike lacks executable liquidity or spread exceeds tolerance at setup creation time, RMS rejects the opportunity cleanly.
+  - In delayed execution, orders resolve against the latest cached depth or fall back to the setup order price (`req.price`). If market movement increases capital requirements beyond `available_capital`, the order is rejected. Real market depth or clean rejection only.
 
 ---
 

@@ -74,7 +74,7 @@ window.SimulationTab = {
       if (newBootId) {
         localStorage.setItem("sim_server_boot_id", newBootId);
       }
-    } catch (e) {}
+    } catch (e) { }
 
     const navTab = document.getElementById("nav-tab-sim-results");
     if (navTab) navTab.style.display = "none";
@@ -90,7 +90,7 @@ window.SimulationTab = {
     try {
       const raw = localStorage.getItem("sim_runs");
       if (raw) cachedRuns = JSON.parse(raw);
-    } catch (e) {}
+    } catch (e) { }
 
     const map = new Map();
     // 1. Keep any existing in-memory / completed runs first
@@ -591,7 +591,7 @@ window.SimulationTab = {
               this.renderRunsList();
             } else {
               // Ensure we do not resolve on stale idle state before the background worker sets up
-              if (pollCount <= 1 && st.current_job_id !== run.id && !st.has_results) {
+              if (st.current_job_id !== run.id && pollCount <= 15) {
                 return;
               }
               clearInterval(timer);
@@ -1381,6 +1381,6 @@ window.SimulationTab = {
           statusText.innerText = `Dataset for ${st.cached_date} is cached in memory ⚡`;
         }
       }
-    } catch (e) {}
+    } catch (e) { }
   },
 };

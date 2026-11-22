@@ -21,6 +21,16 @@ from simulation.columnar_sim_engine import ColumnarSimEngine
 from web.candle_service import CandleService
 
 
+def _safe_format_ts(ts: Optional[float]) -> str:
+    """Format Unix timestamp to HH:MM:SS string safely handling zeroes and invalid inputs."""
+    if ts is None or ts <= 0:
+        return "-"
+    try:
+        return datetime.fromtimestamp(float(ts), tz=IST).strftime("%H:%M:%S")
+    except Exception:
+        return "-"
+
+
 def _simulation_worker_process(
     queue: Any,
     result_file: str,
@@ -50,12 +60,17 @@ def _simulation_worker_process(
         with open(result_file, "wb") as f:
             pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        queue.put_nowait({"type": "done", "file": result_file})
+        try:
+            queue.put({"type": "done", "file": result_file}, timeout=2.0)
+            time.sleep(0.05)
+        except Exception:
+            pass
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         try:
-            queue.put_nowait({"type": "error", "error": str(e), "traceback": tb})
+            queue.put({"type": "error", "error": str(e), "traceback": tb}, timeout=2.0)
+            time.sleep(0.05)
         except Exception:
             pass
 
@@ -65,6 +80,7 @@ class SimulationService:
         self.recordings_dir = recordings_dir
         self.executor = ThreadPoolExecutor(max_workers=2)
         self._current_process: Optional[mp.Process] = None
+        self.candle_service = CandleService(recordings_dir=recordings_dir)
 
         # In-memory parquet cache
         self.cached_date: Optional[str] = None
@@ -134,15 +150,17 @@ class SimulationService:
             except Exception:
                 pass
 
-        # Clean up any lingering temporary shm files
+        # Clean up any lingering temporary shm files and result pickles
         try:
             import glob
             import tempfile
             patterns = [
                 os.path.join(tempfile.gettempdir(), "*sim*.shm"),
                 os.path.join(tempfile.gettempdir(), "*scoring*.shm"),
+                os.path.join(tempfile.gettempdir(), "sim_res_*.pkl"),
                 "/tmp/*sim*.shm",
                 "/tmp/*scoring*.shm",
+                "/tmp/sim_res_*.pkl",
             ]
             for pat in patterns:
                 for fpath in glob.glob(pat):
@@ -339,6 +357,13 @@ class SimulationService:
         if self.is_running:
             raise RuntimeError("A simulation is already in progress.")
 
+        # Canonicalize target date to YYYY-MM-DD
+        raw_date = params.get("date") or "2026-11-19"
+        if len(raw_date) == 8 and raw_date.isdigit():
+            target_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+        else:
+            target_date = raw_date
+
         self.is_running = True
         self.latest_error = None
         # Use passed run_id if available, else sequential RUN-N
@@ -351,9 +376,9 @@ class SimulationService:
 
         result_file = None
         process = None
+        queue = None
 
         try:
-            target_date = params.get("date") or "2026-11-19"
             param_hash = self.compute_param_hash(target_date, params)
 
             # Check parameter-hash deduplication cache
@@ -455,18 +480,27 @@ class SimulationService:
         except Exception as e:
             self.latest_error = str(e)
             self.progress_status = f"Failed: {e}"
-            raise e
+            print(f"[SIMULATION_SERVICE] Simulation job error for {job_id}: {e}")
+            return {"error": str(e), "status": "failed"}
         finally:
             if process and process.is_alive():
                 try:
                     process.terminate()
                     process.join(timeout=0.5)
+                    if process.is_alive():
+                        process.kill()
                 except Exception:
                     pass
             self._current_process = None
             if result_file and os.path.exists(result_file):
                 try:
                     os.remove(result_file)
+                except Exception:
+                    pass
+            if queue:
+                try:
+                    queue.close()
+                    queue.cancel_join_thread()
                 except Exception:
                     pass
             self.is_running = False
@@ -535,12 +569,15 @@ class SimulationService:
                 tr_dict = tr_obj.to_dict() if hasattr(tr_obj, "to_dict") else tr_obj
                 tr_sym = str(tr_dict.get("symbol", "")).strip()
                 tr_tok = str(tr_dict.get("token", "")).strip()
-                u_tok = str(tr_dict.get("metadata", {}).get("underlying_token", "") or f"NSE:{tr_sym}").strip()
-                opt_sym = str(tr_dict.get("metadata", {}).get("option_symbol", "") or tr_sym).strip()
+                meta = tr_dict.get("metadata") or {}
+                u_tok = str(meta.get("underlying_token", "") or f"NSE:{tr_sym}").strip()
+                opt_sym = str(meta.get("option_symbol", "") or tr_sym).strip()
                 if tr_sym:
                     unique_underlyings.add((u_tok, tr_sym))
                 if tr_tok:
                     unique_options.add((tr_tok, opt_sym))
+
+        candle_svc = CandleService(recordings_dir=self.recordings_dir)
 
         precomputed_underlyings: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for u_tok, tr_sym in unique_underlyings:
@@ -588,14 +625,15 @@ class SimulationService:
                     tr_copy = dict(tr)
                     e_ts = float(tr.get("entry_time") or 0.0)
                     x_ts = float(tr.get("exit_time") or 0.0)
-                    tr_copy["entry_time_str"] = datetime.fromtimestamp(e_ts, tz=IST).strftime("%H:%M:%S") if e_ts > 0 else "-"
-                    tr_copy["exit_time_str"] = datetime.fromtimestamp(x_ts, tz=IST).strftime("%H:%M:%S") if x_ts > 0 else "-"
+                    tr_copy["entry_time_str"] = _safe_format_ts(e_ts)
+                    tr_copy["exit_time_str"] = _safe_format_ts(x_ts)
 
                     entry_p = float(tr.get("entry_price", 0.0))
                     exit_p = float(tr.get("exit_price") or entry_p)
                     pnl = float(tr.get("realized_pnl", 0.0))
                     ret_pct = (exit_p - entry_p) / entry_p if entry_p > 0 else 0.0
-                    fee = float(tr.get("metadata", {}).get("brokerage", 2.0 * brokerage))
+                    tr_meta = tr.get("metadata") or {}
+                    fee = float(tr_meta.get("brokerage", 2.0 * brokerage))
 
                     tr_copy["pnl"] = round(pnl, 2)
                     tr_copy["return_pct"] = round(ret_pct * 100.0, 2)
@@ -606,8 +644,8 @@ class SimulationService:
                     # Attach pre-built 5-minute candles
                     tr_sym = str(tr.get("symbol", "")).strip()
                     tr_tok = str(tr.get("token", "")).strip()
-                    u_tok = str(tr.get("metadata", {}).get("underlying_token", "") or f"NSE:{tr_sym}").strip()
-                    opt_sym = str(tr.get("metadata", {}).get("option_symbol", "") or tr_sym).strip()
+                    u_tok = str(tr_meta.get("underlying_token", "") or f"NSE:{tr_sym}").strip()
+                    opt_sym = str(tr_meta.get("option_symbol", "") or tr_sym).strip()
 
                     tr_copy["underlying_candles"] = precomputed_underlyings.get((u_tok, tr_sym), [])
                     tr_copy["option_candles"] = precomputed_options.get((tr_tok, opt_sym), [])
@@ -715,14 +753,14 @@ class SimulationService:
         if not closed_trades:
             return []
 
-        closed_sorted = sorted(closed_trades, key=lambda t: float(t["exit_time"]))
+        closed_sorted = sorted(closed_trades, key=lambda t: float(t.get("exit_time") or 0.0))
         curve = []
         cum_net = 0.0
         cum_gross = 0.0
 
-        first_ts = float(closed_sorted[0]["exit_time"])
+        first_ts = float(closed_sorted[0].get("exit_time") or 0.0)
         curve.append({
-            "time": datetime.fromtimestamp(first_ts - 60.0, tz=IST).strftime("%H:%M:%S"),
+            "time": _safe_format_ts(first_ts - 60.0),
             "timestamp": round(first_ts - 60.0, 1),
             "net_pnl": 0.0,
             "gross_pnl": 0.0,
@@ -730,13 +768,13 @@ class SimulationService:
         })
 
         for tr in closed_sorted:
-            x_ts = float(tr["exit_time"])
+            x_ts = float(tr.get("exit_time") or 0.0)
             net_pnl = float(tr.get("net_pnl", 0.0))
             gross_pnl = float(tr.get("pnl", 0.0) or tr.get("realized_pnl", 0.0))
             cum_net += net_pnl
             cum_gross += gross_pnl
             curve.append({
-                "time": datetime.fromtimestamp(x_ts, tz=IST).strftime("%H:%M:%S"),
+                "time": _safe_format_ts(x_ts),
                 "timestamp": round(x_ts, 1),
                 "net_pnl": round(cum_net, 2),
                 "gross_pnl": round(cum_gross, 2),

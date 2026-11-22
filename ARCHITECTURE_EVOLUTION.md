@@ -27,6 +27,7 @@ flowchart LR
 | **Delayed Execution**| Manual / None | OS Thread Timers (`threading.Timer`) | Stream-Driven Prevailing Cached Quote Fills |
 | **Simulation** | N/A | Sequential CSV replay (15–25 mins/day) | Columnar Polars/Arrow ASOF join (3–5s/day) |
 | **Track Design** | Hardcoded logic | Hardcoded 33-track matrix in `strategy.py` | Decoupled Strategy / Core & Composite Tracks / Modes |
+| **Observability** | CLI print logs | ANSI/Rich terminal dashboard | Modern Browser SPA Web UI & WebSocket Server (`runner.py web`) |
 
 ---
 
@@ -148,6 +149,15 @@ flowchart TD
    - Strategies define alpha detection (e.g. Momentum 3.0).
    - Tracks define pure trading vehicles and state machines (ATM, ITM, Trailing SL, Composite).
    - Modes (Live, Paper, Delayed) provide the execution environment and order interfaces.
+7. **Modern Analytics & Simulation Web UI (`web/server.py`)**:
+   - Full browser Single-Page Application (SPA) with sub-second WebSocket MTM telemetry, open position tracking, and historical performance breakdowns.
+   - Heavy simulations run in isolated OS worker processes (`multiprocessing.Process`), completely freeing the Python GIL so charts and server responses remain 100% fluid.
+   - Direct connection to POSIX Shared Memory (`shm_ohlc_221`) renders real-time 5-minute candles with exact breakout trigger points.
+8. **Multi-Track Reference Isolation & State Recovery (`--continue`)**:
+   - QuotesBroker tracks unique per-process client IDs (`f"{mode}_{track}_{pid}"`), preventing cross-track unsubscription collision.
+   - `ProtectedPositionRegistry` prevents open option contracts from being unsubscribed until trade exit.
+   - Mid-day recovery via `--continue` reconstitutes open positions, resubscribes QuotesBroker, and seeds snapshot quotes.
+   - Market Recorder guarantees lossless tick durability with `atexit`, `try ... finally`, and flush-before-teardown.
 
 ---
 

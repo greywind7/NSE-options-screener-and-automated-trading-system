@@ -212,6 +212,98 @@ class TestSuperstructures20(unittest.TestCase):
         self.assertLessEqual(release_ts, now + 0.50)
         superstructure.stop()
 
+    def test_delayed_execution_capital_rejection_and_fallback(self):
+        superstructure = DelayedSuperstructure(
+            track_names=["fast_momentum"],
+            delay_sec=1.0,
+            rms_ipc="inproc://dummy_rms4",
+            feed_ipc="inproc://dummy_feed4",
+            hb_ipc="inproc://dummy_hb4",
+            quotes_router_ipc="inproc://dummy_quotes4",
+            recordings_dir=self.test_dir,
+            ctx=self.ctx,
+        )
+        track = superstructure.tracks["fast_momentum"]
+
+        now = 1000.0
+        req = OrderRequest(
+            order_id="TEST_DELAY_CAP",
+            mode="paper_delayed",
+            track="fast_momentum",
+            instrument_token="NSE:INFY",
+            symbol="INFY",
+            transaction_type="BUY",
+            order_type="MARKET",
+            quantity=100,
+            price=10.0,
+            trigger_price=10.0,
+            timestamp=now,
+        )
+        superstructure.submit_order(req)
+        self.assertEqual(len(superstructure._queue), 1)
+
+        # Starve track of available cash
+        track.allocated_capital = track.committed_capital + 10.0
+
+        # Mock quotes_client returning higher quote price (15.0 vs 10.0 -> capital delta = 500 > 10.0)
+        superstructure.quotes_client = type("MockClient", (), {
+            "get_quote": lambda self, tok: {"ask": 15.0, "bid": 14.8}
+        })()
+
+        # Heartbeat release triggers rejection due to insufficient cash
+        superstructure.on_heartbeat(now + 1.5)
+        self.assertEqual(len(superstructure._queue), 0)
+
+        superstructure.stop()
+
+    def test_continue_state_resubscription(self):
+        from core.common.time_utils import get_market_date_str
+        from execution.superstructures.paper import PaperSuperstructure
+
+        today_str = get_market_date_str()
+        session_dir = os.path.join(self.test_dir, today_str)
+        os.makedirs(session_dir, exist_ok=True)
+
+        journal_file = os.path.join(session_dir, "journal_paper_fast_momentum.jsonl")
+        open_trade_event = {
+            "timestamp": 1000.0,
+            "event": "TRADE_FILLED",
+            "data": {
+                "trade_id": "RECOVER_TEST_1",
+                "symbol": "TCS",
+                "token": "NSE:TCS26NOV4000CE",
+                "option_type": "CE",
+                "strike": 4000.0,
+                "lot_size": 175,
+                "quantity": 175,
+                "entry_price": 50.0,
+                "entry_ask": 50.0,
+                "entry_time": 1000.0,
+                "target_price": 55.0,
+                "stop_loss": 45.0,
+                "status": "OPEN",
+                "track": "fast_momentum",
+            }
+        }
+        with open(journal_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps(open_trade_event) + "\n")
+
+        superstructure = PaperSuperstructure(
+            track_names=["fast_momentum"],
+            rms_ipc="inproc://dummy_rms5",
+            feed_ipc="inproc://dummy_feed5",
+            hb_ipc="inproc://dummy_hb5",
+            quotes_router_ipc="inproc://dummy_quotes5",
+            recordings_dir=self.test_dir,
+            ctx=self.ctx,
+            continue_state=True,
+        )
+
+        track = superstructure.tracks["fast_momentum"]
+        self.assertIn("RECOVER_TEST_1", track.active_trades)
+        self.assertIn("NSE:TCS26NOV4000CE", superstructure._recovered_tokens)
+        superstructure.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

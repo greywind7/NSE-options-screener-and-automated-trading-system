@@ -59,9 +59,11 @@ flowchart TD
         SuperLive --> LiveLog["Live Trade Journal (CSV)"]
     end
 
-    subgraph Universal Monitoring Tier
-        ZMQ_RMS --> Dashboard["Universal Strategy Dashboard Process"]
-        DelayedLog & PaperLog & LiveLog -.->|Real-time Telemetry Refresh| Dashboard
+    subgraph Universal Monitoring Tier ["Universal Monitoring & Web Tier"]
+        ZMQ_RMS --> WebServer["Analytics Web Server (web/server.py)"]
+        DelayedLog & PaperLog & LiveLog -.->|Live Scans & MTM Stream| WebServer
+        WebServer -->|WebSocket: /api/live/ws| WebUI["Analytics & Simulation Web UI (Browser: 8080)"]
+        WebServer -->|REST: /api/*| WebUI
     end
 ```
 
@@ -84,10 +86,24 @@ All 221 F&O stocks across 75 five-minute bars per day ($221 \times 75 = 16,575\t
 
 ### 4. Quotes Broker Ticker Plant & Stream-Driven Delayed Fills
 - Quotes Broker maintains latest depth for traded options ($< 200\text{ KB}$ RAM) with REQ/REP snapshots and active subscription streams.
-- **Prevailing Cached Quote Semantics**: Delayed orders fill at the **cached quote established prior to target time $T_{\text{target}}$**, not the waking future tick. Eliminates ghost slippage and models physical exchange order matching with zero thread timers and zero locks.
+- **Prevailing Cached Quote Semantics**: Delayed orders fill at the **cached quote established prior to target time $T_{\text{target}}$**, not the waking future tick. If no new quote arrives during the delay window, it safely falls back to the original setup order price (`req.price`).
+- **Capital Sufficiency Gate**: If market moves against the buyer during the delay, the order is rejected only if the required cash delta exceeds `available_capital`.
+- **Zero Fabrication Policy**: Synthetic or nominal quotes are strictly banned across RMS and execution; real market depth or clean rejection only.
 
 ### 5. In-Process Columnar Simulation Engine
 Simulates an entire trading day across 221 stocks in **3 to 5 seconds** using memory-mapped **Polars / Apache Arrow** option depth tables and binary search `asof_join` fill matching.
+
+### 6. Modern Analytics & Simulation Web UI (`runner.py web`)
+- Comprehensive browser Single-Page Application (SPA) replacing legacy terminal dashboards.
+- Sub-second live telemetry, open positions tracking, and dynamic cash balance streaming via WebSockets.
+- Independent OS worker process (`multiprocessing.Process`) for single and batch simulations, completely bypassing the Python GIL to keep the web event loop and charts 100% fluid.
+- Direct read-only attachment to `shm_ohlc_221` for sub-microsecond candlestick charts with exact breakout trigger points.
+
+### 7. Isolated Multi-Process Quotes Tracking & State Recovery (`--continue`)
+- **Per-Process Client IDs**: Superstructures identify themselves uniquely (`f"{mode}_{track}_{pid}"`) to `QuotesBroker`, eliminating unsubscription collisions across concurrent tracks.
+- **Active Position Protection**: `ProtectedPositionRegistry` prevents open option contracts from being prematurely unsubscribed until physical trade exit.
+- **Durability on `--continue`**: Reconstitutes open positions from today's journals, resubscribes to QuotesBroker, seeds initial snapshot quotes, and includes open positions in initial WebSocket subscriptions.
+- **Recorder Guaranteed Flush**: Hardened with `atexit`, `try ... finally`, and flush-before-teardown to ensure zero tick data loss.
 
 ---
 
@@ -109,10 +125,12 @@ Trading Stuff/
 │   ├── tracks/         # Pluggable Core & Composite tracks (Composite Pattern for capital sharing)
 │   ├── models/         # MessagePack schemas, instrument database, dataclasses
 │   └── utils/          # Affinity pinning (Linux / macOS QoS), clock, structured logger
+├── web/                # Analytics & Simulation Web UI (aiohttp, WebSocket MTM, SPA, isolated workers)
 ├── simulation/         # Fast monolithic Polars/Arrow columnar option depth backtester
 ├── config/             # YAML configurations, market calendar (09:15-15:30 IST), instrument master
 ├── scripts/            # run_distributed.py (Process Supervisor with process group cleanup)
 ├── runner.py           # Central Operational Orchestrator (CLI Entry Point)
+├── WEB_VIEW_FLOW.md
 ├── ARCHITECTURE_SPEC_2_0.md
 ├── ARCHITECTURE_EVOLUTION.md
 ├── SCORING_ENGINE_3_0.md
@@ -144,11 +162,17 @@ python3 runner.py core --feed ws --candlemanager --quotesbroker --record
 #  python3 runner.py record)
 
 # 3. Launch Strategy & Execution Superstructures (09:15 AM IST)
-# Starts ScoringEngine3, RMS, all tracks per mode, and launches Dashboard implicitly:
+# Starts ScoringEngine3, RMS, and all tracks per mode:
 python3 runner.py start --strategy momentum_3_0 --mode paper,paper_delayed,live
 
-# 4. Universal Strategy Dashboard (Standalone command to reopen/reattach)
-python3 runner.py dashboard
+# (To restart or continue mid-day recovering active positions and state from journals):
+# python3 runner.py start --strategy momentum_3_0 --mode paper,paper_delayed,live --continue
+
+# 4. Modern Analytics & Simulation Web UI (Recommended Observability Hub)
+# Launches aiohttp web server with live WebSocket MTM telemetry, historical journals, and batch backtesting:
+python3 runner.py web --port 8080
+
+# (Legacy terminal dashboard remains available via: python3 runner.py dashboard)
 
 # 5. Fast Columnar Simulation (3–5 seconds per full session)
 # Runs monolithic Polars/Arrow option depth backtester:
@@ -187,11 +211,12 @@ python3 runner.py stop --all
 
 | Document | Purpose & Contents |
 | :--- | :--- |
+| [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/WEB_VIEW_FLOW.md) | Antigravity Analytics & Simulation Web UI (Architecture, REST/WS APIs, GIL bypass, UI flows, and caching). |
 | [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/ARCHITECTURE_SPEC_2_0.md) | High-Level Architecture 2.0 (ADRs, ZeroMQ IPC topology, POSIX SHM, Quotes Broker, Delayed execution). |
 | [`ARCHITECTURE_EVOLUTION.md`](file:///Users/yorha/Documents/Trading%20Stuff/ARCHITECTURE_EVOLUTION.md) | Historical progression: Version Alpha $\to$ Architecture 1.0 $\to$ Architecture 2.0 rationale. |
 | [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SCORING_ENGINE_3_0.md) | Signal & Quantitative Specification (Zero score, 50% retracement invariant, directional thrust, CLV). |
 | [`SCORING_EVOLUTION.md`](file:///Users/yorha/Documents/Trading%20Stuff/SCORING_EVOLUTION.md) | Historical progression: Alpha rVOL $\to$ 100-Point Linear Sum Trap $\to$ Scoring 3.0 invariants. |
 | [`LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/LOW_LEVEL_DESIGN_2_0.md) | Implementation-ready Low-Level Design (DTypes, msgpack schemas, Strategy-Track-Mode IoC, Runner CLI). |
-| [`IMPLEMENTATION_MANIFEST.md`](file:///Users/yorha/Documents/Trading%20Stuff/IMPLEMENTATION_MANIFEST.md) | Granular 28-step engineering manifest (reasons, effects, failure risks, and regression fixes). |
+| [`IMPLEMENTATION_MANIFEST.md`](file:///Users/yorha/Documents/Trading%20Stuff/IMPLEMENTATION_MANIFEST.md) | Granular engineering manifest (reasons, effects, failure risks, and regression fixes). |
 | [`SELF_AUDIT.md`](file:///Users/yorha/Documents/Trading%20Stuff/SELF_AUDIT.md) | Active bug registry, code reconnaissance, and architectural reconciliation matrix (CRIT-001 to MED-010). |
 | [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive) | Preserved historical brainstorms (`BRAINSTORM_A/B/C.md`), legacy audit, and scoring 1.0/2.0 specs. |

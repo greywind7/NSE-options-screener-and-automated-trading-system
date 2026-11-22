@@ -54,9 +54,11 @@ flowchart TD
         SuperLive --> LiveLog["Live Trade Journal (CSV)"]
     end
 
-    subgraph Universal Monitoring Tier
-        ZMQ_RMS --> Dashboard["Universal Strategy Dashboard Process"]
-        DelayedLog & PaperLog & LiveLog -.->|Real-time Telemetry Refresh| Dashboard
+    subgraph Universal Monitoring Tier ["Universal Monitoring & Web Tier"]
+        ZMQ_RMS --> WebServer["Analytics Web Server (web/server.py:8080)"]
+        DelayedLog & PaperLog & LiveLog -.->|Real-time MTM & Journals| WebServer
+        WebServer -->|WebSocket: /api/live/ws| WebUI["Analytics & Simulation Web UI (Browser)"]
+        WebServer -->|REST: /api/*| WebUI
     end
 ```
 
@@ -111,9 +113,18 @@ Trading Stuff/
 │       ├── __init__.py
 │       ├── groww_live_adapter.py      # Groww API SDK live execution adapter (TOTP, SL, reconciliation)
 │       └── mock_adapter.py            # Paper execution ledger adapter
+├── web/
+│   ├── __init__.py
+│   ├── server.py                      # AnalyticsWebServer (aiohttp, REST, WebSockets, teardown)
+│   ├── live_service.py                # LiveService (ZeroMQ LVC, real-time MTM, active cash)
+│   ├── simulation_service.py          # SimulationService (isolated worker process, batch queue, Parquet cache)
+│   ├── candle_service.py              # CandleService (OHLCV scanning & aggregation)
+│   ├── alert_service.py               # AlertService (direct POSIX SHM read & trigger overlays)
+│   ├── historical_service.py          # HistoricalService (multi-session discovery & journal parsing)
+│   └── static/                        # SPA web assets (HTML, CSS, ChartEngine, UI tabs)
 ├── ui/
 │   ├── __init__.py
-│   ├── dashboard.py                   # Universal Terminal Dashboard (ANSI / Rich live telemetry)
+│   ├── dashboard.py                   # Universal Terminal Dashboard (ANSI / Rich live telemetry, retired in favor of web)
 │   └── views/
 │       ├── alerts_view.py             # Active alerts, time created, elapsed counters, strikes
 │       └── performance_matrix.py      # Live trackwise P&L matrix per mode (Paper, Delayed, Live)
@@ -841,7 +852,13 @@ The Mode Superstructure is strictly the **Execution Host**:
 
 - **`LiveSuperstructure`**: Order placement calls live broker API; checks order status asynchronously.
 - **`PaperSuperstructure`**: Order placement fills immediately against `quotes_cache.ask` in local paper journal.
-- **`DelayedSuperstructure`**: Order placement queues order with $T_{\text{target}} = T_{\text{trigger}} + \Delta t$; on tick/heartbeat $\ge T_{\text{target}}$, fills immediately at **`cached_quote.ask`** with a $3.5\%$ maximum slippage guard.
+- **`DelayedSuperstructure`**: Order placement queues order with $T_{\text{target}} = T_{\text{trigger}} + \Delta t$; on tick/heartbeat $\ge T_{\text{target}}$:
+  - Resolves fill price from latest cached quote `quotes_client.get_quote()`, or falls back safely to original setup order price `req.price`.
+  - Performs **Capital Sufficiency Gate**: If market moved against buyer during delay, calculates `capital_delta = (fill_price - req.price) * qty`. If `capital_delta > 0` and `available_capital < capital_delta`, rejects order cleanly (`status="REJECTED"`).
+  - Checks slippage guard ($3.5\%$) and fills trade, updating committed capital.
+- **`Per-Process Quotes Client ID Isolation`**: Every superstructure uses `client_id = f"{self.mode}_{'_'.join(sorted(self.track_names))}_{os.getpid()}"` when registering or unsubscribing from `QuotesBroker`, preventing multi-track unsubscription collisions.
+- **`Active Position Protection Registry`**: `ProtectedPositionRegistry` protects open position tokens across all modes from unsubscription until explicit `TRADE_EXIT`.
+- **`State Recovery Protocol (--continue)`**: On startup with `--continue`, superstructures scan today's trade journals, reconstruct active open positions, resubscribe to QuotesBroker, and seed snapshot prices.
 
 ---
 
@@ -896,6 +913,23 @@ class MarketRecorder:
         pq.write_to_dataset(table, root_path=self.session_dir)
         self.buffer.clear()
 ```
+
+- **Guaranteed Flush Invariants**:
+  - `atexit.register(self.flush)` ensures buffers are flushed upon unexpected exit.
+  - Event loop in `start()` is wrapped in `try ... finally: self.flush()`.
+  - Graceful `stop()` flushes before ZeroMQ context termination.
+
+---
+
+### 4.9 Modern Analytics & Simulation Web UI (`web/server.py`)
+
+- **Objective**: Full-featured institutional browser observability and backtesting command center. Full details in [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/WEB_VIEW_FLOW.md).
+- **Core Architecture**:
+  - `AnalyticsWebServer`: `aiohttp` web server hosting static assets, REST APIs, and WebSockets.
+  - `LiveService`: Subscribes to `feed_options.ipc` and `quotes_stream.ipc`, updates Latest Value Cache (LVC), computes dynamic MTM, and streams updates every 1.0s over `/api/live/ws`.
+  - `SimulationService`: Spawns independent OS process (`multiprocessing.Process` executing `_simulation_worker_process`), completely bypassing the Python GIL to prevent UI freezing. Implements columnar DataFrame caching (`cached_equity_df`, `cached_options_df`) for sub-second re-runs, and manages batch simulation queues.
+  - `AlertService` & `CandleService`: Directly accesses `shm_ohlc_221` (POSIX Shared Memory) in $< 2\ \mu\text{s}$ to render live candlestick charts with alert breakout trigger overlays.
+  - `HistoricalService`: Scans historical directories, parses trade journals, and delivers closed-trade analytics.
 
 ---
 

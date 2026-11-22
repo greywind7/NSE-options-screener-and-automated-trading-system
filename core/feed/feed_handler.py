@@ -152,6 +152,7 @@ class FeedHandler:
         self.underlying_keys: Set[str] = set()
         self.active_option_keys: Set[str] = set()
         self.active_options_by_symbol: Dict[str, Set[str]] = defaultdict(set)
+        self.eligible_underlyings_for_options: Set[str] = set()
         self.last_atm_by_symbol: Dict[str, float] = {}
         self.last_reval_time_by_symbol: Dict[str, float] = {}
         self.total_dynamic_subscriptions: int = 0
@@ -223,6 +224,11 @@ class FeedHandler:
                             self.underlying_keys.add(k.replace("|", ":"))
                             self.underlying_key_to_symbol[k.replace(":", "|")] = sym
                             self.underlying_key_to_symbol[k.replace("|", ":")] = sym
+                            norm_k = normalize_instrument_token(k)
+                            self.underlying_key_to_symbol[norm_k] = sym
+                            self.underlying_key_to_symbol[norm_k.replace(":", "|")] = sym
+                            self.symbol_map[norm_k] = sym
+                            self.symbol_map[norm_k.replace(":", "|")] = sym
                 elif isinstance(manifest.get("streamed_contracts", {}).get("underlying_equities"), dict):
                     for k, v in manifest["streamed_contracts"]["underlying_equities"].items():
                         sym = v.get("symbol", k)
@@ -235,6 +241,11 @@ class FeedHandler:
                         self.underlying_keys.add(k.replace("|", ":"))
                         self.underlying_key_to_symbol[k.replace(":", "|")] = sym
                         self.underlying_key_to_symbol[k.replace("|", ":")] = sym
+                        norm_k = normalize_instrument_token(k)
+                        self.underlying_key_to_symbol[norm_k] = sym
+                        self.underlying_key_to_symbol[norm_k.replace(":", "|")] = sym
+                        self.symbol_map[norm_k] = sym
+                        self.symbol_map[norm_k.replace(":", "|")] = sym
 
                 self.options_map = manifest.get("options_map", {})
                 for sym, opt_info in self.options_map.items():
@@ -270,6 +281,7 @@ class FeedHandler:
                             self.active_option_keys.add(k)
                             if u_sym:
                                 self.active_options_by_symbol[u_sym].add(k)
+                                self.eligible_underlyings_for_options.add(u_sym.upper())
                 elif isinstance(manifest.get("streamed_contracts", {}).get("popular_options"), dict):
                     for k, v in manifest["streamed_contracts"]["popular_options"].items():
                         opt_sym = v.get("symbol", k)
@@ -281,6 +293,7 @@ class FeedHandler:
                         u_sym = v.get("underlying")
                         if u_sym:
                             self.active_options_by_symbol[u_sym].add(k)
+                            self.eligible_underlyings_for_options.add(u_sym.upper())
             except Exception as e:
                 self._log(f"Warning reading manifest {self.manifest_path}: {e}")
 
@@ -291,6 +304,21 @@ class FeedHandler:
                     instruments.append({"key": k, "symbol": s})
                     self.symbol_map[k] = s
                     self.symbol_map[k.replace("|", ":")] = s
+
+        # Include protected keys from active open positions into initial feed subscriptions
+        protected_keys = self.position_registry.get_protected_keys()
+        if protected_keys:
+            existing_keys = {inst["key"].replace(":", "|") for inst in instruments}
+            for pk in protected_keys:
+                pk_pipe = pk.replace(":", "|")
+                if pk_pipe not in existing_keys:
+                    sym = self.option_name_map.get(pk, pk)
+                    instruments.append({"key": pk, "symbol": sym})
+                    self.symbol_map[pk] = sym
+                    self.symbol_map[pk.replace(":", "|")] = sym
+                    self.symbol_map[pk.replace("|", ":")] = sym
+                    self.active_option_keys.add(pk)
+                    self._log(f"  🛡️ [PROTECTION ACTIVE] Subscribed to active open position on startup: '{sym}' ({pk})")
 
         self.instruments = instruments
         return instruments
@@ -343,7 +371,17 @@ class FeedHandler:
 
         canonical_key = underlying_key.replace(":", "|")
         sym = self.underlying_key_to_symbol.get(canonical_key) or self.underlying_key_to_symbol.get(underlying_key) or self.symbol_map.get(canonical_key)
+        if not sym and "|" in canonical_key:
+            base_id = canonical_key.split("|", 1)[1]
+            for mk, msym in self.underlying_key_to_symbol.items():
+                if base_id in mk:
+                    sym = msym
+                    break
         if not sym:
+            return [], []
+
+        # Restrict dynamic options evaluation strictly to the top liquid underlyings configured in manifest
+        if self.eligible_underlyings_for_options and sym.upper() not in self.eligible_underlyings_for_options:
             return [], []
 
         lookup_sym = sym

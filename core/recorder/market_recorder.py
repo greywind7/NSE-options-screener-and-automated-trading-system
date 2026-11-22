@@ -6,6 +6,7 @@ and flushes to two separate columnar Parquet files:
 - Option Depth Ticks: recordings/{date}/option_depth_{ts}_{part}.parquet
 """
 import argparse
+import atexit
 from datetime import datetime, timezone
 import json
 import os
@@ -95,6 +96,8 @@ class MarketRecorder:
         else:
             self.sub.connect(self.feed_eq_ipc)
             self.sub.connect(self.feed_opt_ipc)
+
+        atexit.register(self.flush)
 
     def _normalize_record(self, tick: Dict[str, Any], is_opt: bool = False) -> Dict[str, Any]:
         rec = {
@@ -234,28 +237,33 @@ class MarketRecorder:
         poller = zmq.Poller()
         poller.register(self.sub, zmq.POLLIN)
 
-        while self.running:
-            try:
-                events = dict(poller.poll(timeout=100))
-                if self.sub in events:
-                    topic, payload = self.sub.recv_multipart()
-                    tick = unpack_message(payload)
-                    self.record_tick(tick, topic=topic)
+        try:
+            while self.running:
+                try:
+                    events = dict(poller.poll(timeout=100))
+                    if self.sub in events:
+                        topic, payload = self.sub.recv_multipart()
+                        tick = unpack_message(payload)
+                        self.record_tick(tick, topic=topic)
 
-                # Time-based flush
-                if time.time() - self._last_flush_time >= self.flush_interval_sec:
-                    self.flush()
+                    # Time-based flush
+                    if time.time() - self._last_flush_time >= self.flush_interval_sec:
+                        self.flush()
 
-            except zmq.ZMQError:
-                break
-            except Exception as e:
-                print(f"[MARKET_RECORDER] Error: {e}", file=sys.stderr)
-
-        self.flush()
+                except zmq.ZMQError:
+                    break
+                except Exception as e:
+                    print(f"[MARKET_RECORDER] Error: {e}", file=sys.stderr)
+        finally:
+            self.flush()
 
     def stop(self) -> None:
         """Stop and flush both buffers cleanly."""
         self.running = False
+        try:
+            self.flush()
+        except Exception as e:
+            print(f"[MARKET_RECORDER] Error flushing on stop: {e}", file=sys.stderr)
         try:
             self.sub.close(linger=0)
             if self._owns_ctx:
@@ -268,7 +276,6 @@ class MarketRecorder:
             except Exception:
                 pass
             self._debug_file = None
-        self.flush()
         print("[MARKET_RECORDER] Stopped cleanly and flushed (Dual Streams).")
 
 

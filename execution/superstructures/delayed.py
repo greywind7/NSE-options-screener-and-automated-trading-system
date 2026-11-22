@@ -75,13 +75,41 @@ class DelayedSuperstructure(BaseSuperstructure):
         """Process all queued orders whose release_timestamp <= current_ts."""
         while self._queue and self._queue[0][0] <= current_ts:
             release_ts, _, req = heapq.heappop(self._queue)
+            track = self.tracks.get(req.track)
+            if not track:
+                continue
 
-            # Query executable quote at release time
-            q = self.quotes_client.get_quote(req.instrument_token)
-            if q:
-                fill_price = float(q.get("ask" if req.transaction_type == "BUY" else "bid") or req.price)
+            # Query executable quote at release time from QuotesBroker cache;
+            # if no updated quote is available in cache, take up the last cached value from order request
+            q = self.quotes_client.get_quote(req.instrument_token) if self.quotes_client else None
+            price_field = "ask" if req.transaction_type == "BUY" else "bid"
+
+            if q and float(q.get(price_field, 0.0)) > 0.0:
+                fill_price = float(q[price_field])
             else:
                 fill_price = req.price
+
+            new_required = fill_price * req.quantity
+            initial_committed = req.price * req.quantity
+            capital_delta = new_required - initial_committed
+
+            # If fill price rose, check if track has sufficient available cash for the difference
+            if capital_delta > 0 and track.available_capital < capital_delta:
+                result = OrderResult(
+                    order_id=req.order_id,
+                    status="REJECTED",
+                    fill_price=0.0,
+                    fill_quantity=0,
+                    fill_timestamp=release_ts,
+                )
+                track.on_order_result(result)
+                continue
+
+            # Adjust committed capital for the price delta
+            if capital_delta > 0:
+                track.commit_capital(capital_delta)
+            elif capital_delta < 0:
+                track.release_capital(abs(capital_delta), 0.0)
 
             result = OrderResult(
                 order_id=req.order_id,
@@ -90,10 +118,7 @@ class DelayedSuperstructure(BaseSuperstructure):
                 fill_quantity=req.quantity,
                 fill_timestamp=release_ts,
             )
-
-            track = self.tracks.get(req.track)
-            if track:
-                track.on_order_result(result)
+            track.on_order_result(result)
 
     def on_heartbeat(self, ts: float) -> None:
         """CRIT-007: QuotesBroker 1s heartbeat drives delayed release queue progression and trade timers."""

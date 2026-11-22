@@ -242,13 +242,18 @@ class AnalyticsWebServer:
         if self.simulation_service.is_running:
             return web.json_response({"error": "Simulation already running"}, status=409)
 
+        run_id = body.get("run_id") or f"RUN-{len(self.simulation_service.runs_history) + 1}"
+        self.simulation_service.current_job_id = run_id
+        self.simulation_service.is_running = True
+        self.simulation_service.progress_status = "Initializing simulation..."
+
         # Launch background task and yield once so run_simulation_job initializes state
         task = asyncio.create_task(self.simulation_service.run_simulation_job(body))
         await asyncio.sleep(0)
 
         return web.json_response({
             "status": "started",
-            "run_id": self.simulation_service.current_job_id,
+            "run_id": run_id,
             "message": "Simulation launched in background worker.",
         })
 

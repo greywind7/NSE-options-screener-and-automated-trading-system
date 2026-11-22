@@ -188,22 +188,16 @@ class RMSService:
             norm_token = normalize_instrument_token(token_str)
             q = raw_quotes.get(norm_token) or raw_quotes.get(normalize_instrument_token(fallback_sym))
 
-            # If no live quote in LVC (e.g. simulated or cold), synthesize a nominal quote
+            # Strictly require valid live quote from QuotesBroker LVC. Never fabricate synthetic values.
             if not q:
-                nominal_ltp = max(5.0, abs(trigger_price - strike_val) * 0.5)
-                q = {
-                    "token": norm_token,
-                    "symbol": symbol,
-                    "ltp": nominal_ltp,
-                    "bid": nominal_ltp - 0.10,
-                    "ask": nominal_ltp + 0.10,
-                    "bid_qty": 500,
-                    "ask_qty": 500,
-                    "timestamp": time.time(),
-                }
+                continue
 
             ask = float(q.get("ask", 0.0))
             bid = float(q.get("bid", 0.0))
+            ltp = float(q.get("ltp", 0.0))
+            if ask <= 0.0 or bid <= 0.0 or bid >= ask:
+                continue
+
             spread = ask - bid
 
             # Gap 1 / HIGH-004: Hybrid spread gate prevents ₹3.00 OTM starvation

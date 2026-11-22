@@ -193,6 +193,21 @@ class BaseSuperstructure(ExecutionContext, ABC):
                         track.active_trades[tid] = trade
                         tokens_to_sub.add(trade.token)
                         total_open_recovered += 1
+                        try:
+                            from core.feed.position_registry import ProtectedPositionRegistry
+                            ProtectedPositionRegistry.get_instance().register_open_position(
+                                contract_key=trade.token,
+                                symbol=trade.symbol,
+                                contract_symbol=trade.symbol,
+                                mode=self.mode,
+                                track=tr_name,
+                                trade_id=tid,
+                                quantity=trade.quantity,
+                                entry_price=trade.entry_price,
+                                entry_time=trade.entry_time,
+                            )
+                        except Exception:
+                            pass
                     else:
                         track.closed_trades.append(trade)
                         self.risk_mgr.update_pnl(trade.realized_pnl)
@@ -201,13 +216,28 @@ class BaseSuperstructure(ExecutionContext, ABC):
                     print(f"[{self.mode.upper()}_SUPERSTRUCTURE] ⚠️ Error recovering trade {tid}: {e}", file=sys.stderr)
 
         if tokens_to_sub:
-            self.subscribe_option_quotes(list(tokens_to_sub))
+            self._recovered_tokens = list(tokens_to_sub)
+            quotes = self.subscribe_quotes(self._recovered_tokens)
+            if quotes:
+                for tok, q in quotes.items():
+                    bid = float(q.get("bid", 0.0))
+                    if bid > 0:
+                        for tr in self.tracks.values():
+                            for trade in tr.active_trades.values():
+                                if trade.token == tok:
+                                    trade.current_bid = bid
+                                    trade.highest_price = max(trade.highest_price, bid)
 
         ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(
             f"[{ts_str}] [{self.mode.upper()}_SUPERSTRUCTURE] ✓ State recovered (--continue): "
             f"{total_open_recovered} open trades re-activated, {total_closed_recovered} closed trades restored."
         )
+
+    @property
+    def client_id(self) -> str:
+        track_str = "_".join(sorted(self.track_names)) if self.track_names else "all"
+        return f"{self.mode}_{track_str}_{os.getpid()}"
 
     @property
     def mode(self) -> str:
@@ -224,13 +254,14 @@ class BaseSuperstructure(ExecutionContext, ABC):
         self._is_frozen = False
         print(f"[{self.mode.upper()}_SUPERSTRUCTURE] In-memory execution UN-FROZEN.")
 
-    def subscribe_quotes(self, tokens: List[str]) -> None:
-        """Subscribe to live quotes stream from Quotes Broker with superstructure mode for reference counting."""
+    def subscribe_quotes(self, tokens: List[str]) -> Dict[str, Any]:
+        """Subscribe to live quotes stream from Quotes Broker with superstructure client_id for reference counting."""
         if self.quotes_client:
-            self.quotes_client.subscribe(tokens, client_id=self.mode)
+            return self.quotes_client.subscribe(tokens, client_id=self.client_id)
+        return {}
 
     def unsubscribe_quotes(self, tokens: List[str]) -> None:
-        """Unsubscribe from live quotes stream from Quotes Broker if contract no longer held in this mode."""
+        """Unsubscribe from live quotes stream from Quotes Broker if contract no longer held in this track process."""
         if not self.quotes_client:
             return
         tokens_to_unsub = []
@@ -242,7 +273,7 @@ class BaseSuperstructure(ExecutionContext, ABC):
             if not still_held:
                 tokens_to_unsub.append(t)
         if tokens_to_unsub:
-            self.quotes_client.unsubscribe(tokens_to_unsub, client_id=self.mode)
+            self.quotes_client.unsubscribe(tokens_to_unsub, client_id=self.client_id)
 
     def get_quote(self, token: str) -> Optional[Dict[str, Any]]:
         """Retrieve latest snapshot quote from QuotesBroker LVC."""
@@ -264,11 +295,38 @@ class BaseSuperstructure(ExecutionContext, ABC):
             self._journal_files[tr] = f
 
     def record_trade_event(self, event_type: str, data: Dict[str, Any]) -> None:
-        """Gap 3: Write atomic JSON line to track's single-owner journal."""
-        if event_type == "TRADE_EXIT" and "realized_pnl" in data:
-            self.risk_mgr.update_pnl(float(data["realized_pnl"]))
-            if self.risk_mgr.is_circuit_breaker_tripped():
-                self.freeze()
+        """Gap 3: Write atomic JSON line to track's single-owner journal and sync active position protection."""
+        if event_type == "TRADE_FILLED":
+            try:
+                from core.feed.position_registry import ProtectedPositionRegistry
+                ProtectedPositionRegistry.get_instance().register_open_position(
+                    contract_key=data.get("token", ""),
+                    symbol=data.get("symbol", ""),
+                    contract_symbol=data.get("symbol", ""),
+                    mode=self.mode,
+                    track=data.get("track", ""),
+                    trade_id=data.get("trade_id", ""),
+                    quantity=int(data.get("quantity", 1)),
+                    entry_price=float(data.get("entry_price", 0.0)),
+                    entry_time=float(data.get("entry_time") or time.time()),
+                )
+            except Exception:
+                pass
+        elif event_type == "TRADE_EXIT":
+            if "realized_pnl" in data:
+                self.risk_mgr.update_pnl(float(data["realized_pnl"]))
+                if self.risk_mgr.is_circuit_breaker_tripped():
+                    self.freeze()
+            try:
+                from core.feed.position_registry import ProtectedPositionRegistry
+                ProtectedPositionRegistry.get_instance().register_closed_position(
+                    contract_key=data.get("token", ""),
+                    mode=self.mode,
+                    track=data.get("track", ""),
+                    trade_id=data.get("trade_id", ""),
+                )
+            except Exception:
+                pass
 
         tr = data.get("track", "")
         f = self._journal_files.get(tr)
@@ -332,6 +390,19 @@ class BaseSuperstructure(ExecutionContext, ABC):
         """Main polling event loop."""
         self.running = True
         print(f"[{self.mode.upper()}_SUPERSTRUCTURE] Active | Tracks: {list(self.tracks.keys())}")
+
+        # Re-ensure subscriptions to QuotesBroker upon entering loop for recovered positions
+        if hasattr(self, "_recovered_tokens") and self._recovered_tokens:
+            quotes = self.subscribe_quotes(self._recovered_tokens)
+            if quotes:
+                for tok, q in quotes.items():
+                    bid = float(q.get("bid", 0.0))
+                    if bid > 0:
+                        for tr in self.tracks.values():
+                            for trade in tr.active_trades.values():
+                                if trade.token == tok:
+                                    trade.current_bid = bid
+                                    trade.highest_price = max(trade.highest_price, bid)
 
         poller = zmq.Poller()
         poller.register(self.rms_sub, zmq.POLLIN)

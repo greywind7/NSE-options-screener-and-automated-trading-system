@@ -406,23 +406,61 @@
 
 ---
 
+### Step 4.10: Per-Process Quotes Client ID Isolation & Protected Position Registry
+* **Reason Behind Step**: Concurrent track processes within the same mode (e.g. `fast_momentum` and `trend_pullback`) shared the generic client string `client_id="paper"`. When one track exited an option contract, `QuotesBroker` dropped the subscription, leaving the second track blind to price ticks.
+* **Effects of Step**:
+  - Assigns unique client IDs: `client_id = f"{self.mode}_{'_'.join(sorted(self.track_names))}_{os.getpid()}"`.
+  - Implements `ProtectedPositionRegistry` in `execution/superstructures/base_superstructure.py`: active open contracts cannot be unsubscribed until `TRADE_EXIT`.
+  - `FeedHandler` includes protected keys in initial WebSocket subscriptions.
+* **Possible Regressions**:
+  - Zombie subscriptions remaining in memory after unexpected crashes.
+* **Fix for Regression**:
+  - Unsubscribe sweeps trigger on process exit and journal cleanups. Tested in `tests/execution/test_superstructures_2_0.py`.
+
+---
+
+### Step 4.11: Mid-Day State Recovery Protocol (`--continue`)
+* **Reason Behind Step**: Restarting strategy processes mid-day wiped out active positions and disconnected QuotesBroker subscriptions.
+* **Effects of Step**:
+  - Passing `--continue` causes superstructures to scan `recordings/YYYYMMDD/trade_journal_<mode>.csv`.
+  - Open trades are reconstituted, QuotesBroker is resubscribed, snapshot quotes seed trade states, and FeedHandler protects the tokens.
+* **Possible Regressions**:
+  - Stale quotes or corrupted journals on restart.
+* **Fix for Regression**:
+  - Seeded quotes are fetched fresh via REQ/REP snapshots upon startup. Tested in `test_continue_state_resubscription`.
+
+---
+
+### Step 4.12: Zero-Fabrication Quote Fallback & Delayed Capital Sufficiency Gate
+* **Reason Behind Step**: Fabricating nominal option quotes caused artificial trades that drifted or never closed. In delayed execution, rejecting orders because no tick arrived during a quiet interval caused valid setups to be dropped.
+* **Effects of Step**:
+  - Completely bans synthetic quote generation across RMS and execution.
+  - Delayed execution resolves quotes from LVC cache; if no new tick arrived during the delay window, it safely falls back to setup price (`req.price`).
+  - Evaluates `capital_delta = (fill_price - req.price) * qty`. If `capital_delta > 0` and `available_capital < capital_delta`, order is rejected cleanly (`status="REJECTED"`).
+* **Possible Regressions**:
+  - Capital miscalculation.
+* **Fix for Regression**:
+  - Validated in `test_delayed_execution_capital_rejection_and_fallback`.
+
+---
+
 ## Phase 5: Universal Multi-Mode Dashboard & Columnar Sim Engine
 
-### Step 5.1: Multi-Mode Segmented Matrix Terminal Dashboard
-* **Reason Behind Step**: The operator requires continuous real-time comparative visibility across Paper, Delayed, and Live modes to monitor slippage, execution parity, and track-wise performance simultaneously.
+### Step 5.1: Modern Analytics & Simulation Web UI (`runner.py web`)
+* **Reason Behind Step**: Terminal ANSI/Rich rendering introduced CPU overhead, lacked interactive charting, and could not easily support multi-day batch simulations or drill-down trade views.
 * **Effects of Step**:
-  - Implements `ui/dashboard.py` as a detached terminal application (Rich/Textual):
-    - **Header**: Live session time, universe size, active modes.
-    - **Alerts Table**: Real-time incoming alerts from RMS (TS, Symbol, Direction, Archetype, Spot, rVOL, Created, Elapsed, Strikes).
-    - **Mode-Separated Performance Panels**:
-      - `[PAPER EXECUTION MATRIX]`: Displays all active tracks (Fast, Trend, Composite) $\to$ Trades, Win %, P&L, MTM, Max DD.
-      - `[PAPER-DELAYED EXECUTION MATRIX]`: Displays all active tracks $\to$ Delayed Trades, Win %, P&L, MTM, Slippage vs Paper.
-      - `[LIVE BROKER MATRIX]` (if live enabled): Displays Live Trades, Real P&L, Broker Order Status, Margin Used.
-    - Continuously tails today's trade journals in `recordings/{date}/` with zero disk contention.
+  - Implements `AnalyticsWebServer` (`web/server.py`) powered by `aiohttp`:
+    - **Live Dashboard**: WebSocket streaming (`/api/live/ws`) with real-time MTM, open positions, and dynamic available cash.
+    - **Historical Tab**: Multi-session date discovery, journal parsing, track matrices, and trade charts.
+    - **Simulation Tab**: Interactive parameter config, single & batch run queues, and isolated worker processes (`multiprocessing.Process`) bypassing Python's GIL.
+    - **Alerts Tab**: Direct read from `shm_ohlc_221` ($< 2\ \mu\text{s}$) with candlestick charts and exact breakout trigger overlays.
+    - **Standalone Results**: Pop-out results viewer (`/sim/results`) for distraction-free analysis.
+  - Legacy terminal dashboard preserved as fallback (`runner.py dashboard`).
+  - Full flow documented in [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/WEB_VIEW_FLOW.md).
 * **Possible Regressions**:
-  - High terminal redraw rate consuming excessive CPU.
+  - Event loop freezing during heavy Polars simulation queries.
 * **Fix for Regression**:
-  - Throttled UI refresh rate at 1.0s interval; CPU usage verified under $< 1\%$. Tested in `tests/ui/test_dashboard.py`.
+  - Heavy simulations run in isolated OS worker process (`_simulation_worker_process`) communicating via multiprocessing Queue. Tested in `tests/ui/test_web.py`.
 
 ---
 

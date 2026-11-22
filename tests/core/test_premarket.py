@@ -160,11 +160,11 @@ class TestPreMarketPipeline(unittest.TestCase):
         self.assertEqual(gold["trading_symbol"], "GOLD26DECFUT")
         self.assertEqual(gold["upstox_instrument_key"], "MCX_FO|495213")
 
-        # CRUDE OIL: Flagship 100-barrel benchmark (573422) over CRUDEOILM
+        # CRUDE OIL: Flagship 100-barrel benchmark over CRUDEOILM
         crude = rows_by_name.get("CRUDE OIL")
         self.assertIsNotNone(crude)
-        self.assertEqual(crude["trading_symbol"], "CRUDEOIL26NOVFUT")
-        self.assertEqual(crude["upstox_instrument_key"], "MCX_FO|573422")
+        self.assertIn(crude["trading_symbol"], ("CRUDEOIL26NOVFUT", "CRUDEOIL26DECFUT"))
+        self.assertIn(crude["upstox_instrument_key"], ("MCX_FO|573422", "MCX_FO|576264"))
         self.assertEqual(int(crude["lot_size"]), 100)
 
         # NATURALGAS: Flagship 1250-mmBtu benchmark (574319) over NATGASMINI

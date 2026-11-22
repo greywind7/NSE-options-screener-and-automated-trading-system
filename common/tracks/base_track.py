@@ -369,4 +369,5 @@ class BaseTrack(ABC):
                 committed = trade.entry_ask * trade.quantity
                 self.release_capital(committed, 0.0)
                 self.active_trades.pop(trade_id, None)
+                self.context.unsubscribe_quotes([trade.token])
                 self.context.record_trade_event("TRADE_REJECTED", trade.to_dict())

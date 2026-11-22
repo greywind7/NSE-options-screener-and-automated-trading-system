@@ -423,6 +423,7 @@ class LiveService:
         brokerage = 0.0
         mtm_pnl = 0.0
 
+        open_committed = 0.0
         for tr in trades:
             b_fee = float(tr.get("metadata", {}).get("brokerage", 60.0))
             if tr.get("status") == "OPEN":
@@ -439,6 +440,8 @@ class LiveService:
                 mtm_pnl += unrealized
                 # Single side brokerage for open
                 brokerage += (b_fee / 2.0)
+                # Premium paid for open position
+                open_committed += (entry_p * qty)
             else:
                 closed_count += 1
                 entry_p = float(tr.get("entry_price", 0.0))
@@ -458,7 +461,9 @@ class LiveService:
         win_rate = (wins / closed_count * 100.0) if closed_count > 0 else 0.0
         net_pnl = (gross_pnl - brokerage) + mtm_pnl
         start_budget = 250000.0
-        current_budget = round(start_budget + net_pnl, 2)
+        # Available Cash = starting budget + realized cash pnl - premium paid for open positions
+        current_budget = round(max(0.0, start_budget + (gross_pnl - brokerage) - open_committed), 2)
+        total_equity = round(start_budget + net_pnl, 2)
 
         return {
             "mode": mode,
@@ -476,6 +481,8 @@ class LiveService:
             "net_pnl": round(net_pnl, 2),
             "start_budget": start_budget,
             "current_budget": current_budget,
+            "total_equity": total_equity,
+            "committed_capital": round(open_committed, 2),
         }
 
     def get_track_detail(self, mode: str, track: str) -> Dict[str, Any]:
