@@ -27,8 +27,42 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore
+
+
+@contextmanager
+def _advisory_file_lock(target_file: Optional[str]):
+    if not target_file or fcntl is None:
+        yield
+        return
+    lock_path = f"{os.path.abspath(target_file)}.lock"
+    lf = None
+    try:
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        lf = open(lock_path, "a+")
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if lf is not None:
+            try:
+                lf.close()
+            except Exception:
+                pass
+            lf = None
+    try:
+        yield
+    finally:
+        if lf is not None:
+            try:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+                lf.close()
+            except Exception:
+                pass
 
 
 DEFAULT_REGISTRY_FILE = "logs/active_positions.json"
@@ -265,8 +299,9 @@ class ProtectedPositionRegistry:
         try:
             mtime = os.path.getmtime(target_file)
             if mtime > self._last_mtime:
-                with open(target_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                with _advisory_file_lock(target_file):
+                    with open(target_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
                 contracts = data.get("positions_by_contract", {})
                 self._positions_by_contract = contracts
                 self._last_mtime = mtime
@@ -311,11 +346,12 @@ class ProtectedPositionRegistry:
             try:
                 os.makedirs(os.path.dirname(os.path.abspath(fpath)), exist_ok=True)
                 dir_name = os.path.dirname(os.path.abspath(fpath))
-                with tempfile.NamedTemporaryFile("wb", dir=dir_name, delete=False) as tf:
-                    tf.write(json_bytes)
-                    tmp_name = tf.name
-                os.replace(tmp_name, fpath)
-                self._last_mtime = os.path.getmtime(fpath)
+                with _advisory_file_lock(fpath):
+                    with tempfile.NamedTemporaryFile("wb", dir=dir_name, delete=False) as tf:
+                        tf.write(json_bytes)
+                        tmp_name = tf.name
+                    os.replace(tmp_name, fpath)
+                    self._last_mtime = os.path.getmtime(fpath)
             except Exception:
                 pass
 

@@ -825,16 +825,20 @@ class FeedHandler:
             if self.enable_dynamic_options:
                 c_id = conn_id if conn_id is not None else self.get_connection_for_key(canonical_token)
                 to_add, to_remove = self.evaluate_dynamic_options(canonical_token, ltp, conn_id=c_id)
-                if (to_add or to_remove) and self._ws_loop:
-                    conn = self.connections[c_id] if 0 <= c_id < len(self.connections) else None
-                    if conn and conn.ws:
-                        asyncio.run_coroutine_threadsafe(
-                            self._dispatch_ws_subscription_update(c_id, to_add, to_remove), self._ws_loop
-                        )
-                    elif self._active_ws:
-                        asyncio.run_coroutine_threadsafe(
-                            self._dispatch_ws_subscription_update(c_id, to_add, to_remove), self._ws_loop
-                        )
+                if to_add or to_remove:
+                    if self._ws_loop:
+                        conn = self.connections[c_id] if 0 <= c_id < len(self.connections) else None
+                        if conn and conn.ws:
+                            asyncio.run_coroutine_threadsafe(
+                                self._dispatch_ws_subscription_update(c_id, to_add, to_remove), self._ws_loop
+                            )
+                        elif self._active_ws:
+                            asyncio.run_coroutine_threadsafe(
+                                self._dispatch_ws_subscription_update(c_id, to_add, to_remove), self._ws_loop
+                            )
+                    elif self.mode != "mock" and not getattr(self, "_warned_missing_ws_loop", False):
+                        self._warned_missing_ws_loop = True
+                        log_debug("[FEED] Dynamic option update computed without active _ws_loop; skipped WS dispatch.", self.debug_log)
 
     async def _dispatch_ws_subscription_update(
         self,

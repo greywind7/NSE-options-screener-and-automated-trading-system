@@ -275,6 +275,16 @@ class AnalyticsWebServer:
                 self.simulation_service.latest_error = str(exc)
                 self.simulation_service.progress_status = f"Failed: {exc}"
                 print(f"[SERVER] Simulation background task error: {exc}", file=sys.stderr)
+                return
+            try:
+                res = t.result()
+                if isinstance(res, dict) and res.get("status") == "failed":
+                    err_msg = str(res.get("error") or "Simulation failed")
+                    self.simulation_service.is_running = False
+                    self.simulation_service.latest_error = err_msg
+                    self.simulation_service.progress_status = f"Failed: {err_msg}"
+            except Exception:
+                pass
 
         task.add_done_callback(_on_sim_done)
         await asyncio.sleep(0)

@@ -775,7 +775,8 @@ window.SimulationTab = {
 
       const payload = JSON.parse(JSON.stringify(basePayload));
       payload.date = curDate;
-      payload.run_id = `RUN-${this.runs.length + 1}`;
+      this._batchRunSeq = (this._batchRunSeq || 0) + 1;
+      payload.run_id = `RUN-${Date.now()}-${this._batchRunSeq}`;
 
       await this.runSingleSimAsync(payload);
 
@@ -813,8 +814,22 @@ window.SimulationTab = {
 
   pollStatus(run) {
     if (this.pollTimer) clearInterval(this.pollTimer);
+    const pollStartedAt = Date.now();
+    const maxPollMs = 15 * 60 * 1000;
 
     this.pollTimer = setInterval(async () => {
+      if (Date.now() - pollStartedAt > maxPollMs) {
+        clearInterval(this.pollTimer);
+        this.pollTimer = null;
+        const btn = document.getElementById("sim-run-btn");
+        if (btn) btn.disabled = false;
+        run.status = "failed";
+        run.error = "Poll timeout exceeded";
+        const statusText = document.getElementById("sim-status-text");
+        if (statusText) statusText.innerText = "Error: Poll timeout exceeded";
+        this.renderRunsList();
+        return;
+      }
       try {
         const res = await fetch("/api/sim/status");
         if (res.ok) {

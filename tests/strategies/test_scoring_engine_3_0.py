@@ -39,6 +39,8 @@ class TestScoringEngine3(unittest.TestCase):
 
     def tearDown(self):
         self.engine.stop()
+        self.headers = None
+        self.candles = None
         self.shm.close()
         unlink_shm(self.shm_name)
         for p in ["logs/alerts_2026-11-15.jsonl"]:

@@ -29,6 +29,8 @@ class AlertService:
 
         # In-memory local cache: (date, symbol) -> List of candle dicts
         self._local_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        self._shm = None
+        self._candles_view = None
 
         # Universe mapping: symbol -> shm_idx
         self.symbol_to_idx: Dict[str, int] = {}
@@ -215,18 +217,30 @@ class AlertService:
             "trigger_ts": trigger_ts,
         }
 
+    def close(self) -> None:
+        self._candles_view = None
+        if self._shm is not None:
+            try:
+                self._shm.close()
+            except Exception:
+                pass
+            self._shm = None
+
+    def __del__(self) -> None:
+        self.close()
+
     def _read_shm_candles(self, symbol: str) -> List[Dict[str, Any]]:
         """Read 5-minute bars for symbol directly from live POSIX/mmap Shared Memory."""
         idx = self._get_symbol_shm_index(symbol)
         if idx is None or idx < 0 or idx >= NUM_SYMBOLS:
             return []
 
-        shm = None
         bars: List[Dict[str, Any]] = []
         try:
-            shm = create_or_attach_shm(name="shm_ohlc_221", create=False)
-            _, candles_view = get_shm_views(shm)
-            row = candles_view[idx]
+            if self._shm is None or self._candles_view is None:
+                self._shm = create_or_attach_shm(name="shm_ohlc_221", create=False)
+                _, self._candles_view = get_shm_views(self._shm)
+            row = self._candles_view[idx]
 
             for b in row:
                 ts = int(b["timestamp"])
@@ -244,14 +258,8 @@ class AlertService:
                     "atr": round(float(b["atr"]), 2),
                 })
         except Exception:
-            # SHM segment offline or inaccessible
-            pass
-        finally:
-            if shm:
-                try:
-                    shm.close()
-                except Exception:
-                    pass
+            # SHM segment offline or recreated: reset cached handle cleanly
+            self.close()
 
         return bars
 

@@ -98,9 +98,11 @@ class QuotesBroker:
         if not token:
             return
 
-        ltp = float(tick.get("ltp", 0.0))
-        bid = float(tick.get("bid", ltp))
-        ask = float(tick.get("ask", ltp))
+        ltp = float(tick.get("ltp") or 0.0)
+        raw_bid = tick.get("bid")
+        raw_ask = tick.get("ask")
+        bid = float(raw_bid) if raw_bid is not None else 0.0
+        ask = float(raw_ask) if raw_ask is not None else 0.0
         ts = float(tick.get("exchange_timestamp") or tick.get("received_timestamp") or time.time())
         bids = [[float(v) for v in lvl] for lvl in tick.get("bids", []) if isinstance(lvl, (list, tuple))]
         asks = [[float(v) for v in lvl] for lvl in tick.get("asks", []) if isinstance(lvl, (list, tuple))]
@@ -156,10 +158,10 @@ class QuotesBroker:
         """Handle incoming ROUTER snapshot or subscription request."""
         try:
             frames = self.router.recv_multipart(flags=zmq.NOBLOCK)
-            if len(frames) < 3:
+            if len(frames) < 3 or frames[1] != b"":
                 return
             client_id = frames[0]
-            # frame 1 is empty delimiter
+            # frame 1 is validated empty delimiter
             payload = unpack_message(frames[2])
             action = payload.get("action", "")
             best_depth = payload.get("best_depth", True)
@@ -206,15 +208,10 @@ class QuotesBroker:
                 for t in tokens:
                     norm = normalize_instrument_token(t)
                     if norm in self.subscribers_by_token:
-                        if sub_id and sub_id in self.subscribers_by_token[norm]:
+                        if sub_id:
                             self.subscribers_by_token[norm].discard(sub_id)
-                        elif not sub_id:
-                            # If no client_id was specified, decrement by popping one subscriber
-                            if self.subscribers_by_token[norm]:
-                                any_sub = next(iter(self.subscribers_by_token[norm]))
-                                self.subscribers_by_token[norm].discard(any_sub)
                         else:
-                            # sub_id specified but not in set, safely pop one subscriber to decrement
+                            # Legacy caller without client_id: decrement by popping one anonymous/first subscriber
                             if self.subscribers_by_token[norm]:
                                 any_sub = next(iter(self.subscribers_by_token[norm]))
                                 self.subscribers_by_token[norm].discard(any_sub)
@@ -253,7 +250,6 @@ class QuotesBroker:
                     "timestamp": now,
                     "active_quotes_count": len(self._lvc),
                     "subscribed_count": len(self.subscribed_tokens),
-                    "ref_counts": {t: len(subs) for t, subs in self.subscribers_by_token.items() if subs},
                 }
                 payload = pack_message(hb_data)
                 # Broadcast on stream PUB socket

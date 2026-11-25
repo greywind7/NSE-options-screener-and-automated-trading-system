@@ -521,7 +521,8 @@ def create_tracks(
                 for sub_base, sub_m in sub_pairs:
                     sub_key = f"{sub_base}_{sub_m}"
                     if sub_key in active_filter:
-                        p = track_params_dict.get(sub_base, {})
+                        p = dict(track_params_dict.get(sub_base, {}))
+                        p.setdefault("brokerage_per_order", eff_brokerage)
                         tracks[sub_key] = _instantiate_base_track(
                             base_type=sub_base,
                             track_name=sub_key,
@@ -547,7 +548,7 @@ def create_tracks(
                     context=context,
                     preferred_mode=sub_m,
                     parent_track=t_name,
-                    track_params=p,
+                    track_params={**p, "brokerage_per_order": p.get("brokerage_per_order", eff_brokerage)},
                     entry_freeze_time=eff_freeze,
                     eod_squareoff_time=eff_squareoff,
                 )
@@ -564,7 +565,5 @@ def create_tracks(
                 total_capital=total_cap,
             )
             tracks[t_name] = composite_inst
-
-    return tracks
 
     return tracks

@@ -163,7 +163,12 @@ class BaseTrack(ABC):
         """Track-specific exit rules and trailing ratchets. Returns exit reason or None."""
         pass
 
-    def on_opportunity(self, opp: ActionableOpportunity) -> Optional[TradeState]:
+    def on_opportunity(
+        self,
+        opp: ActionableOpportunity,
+        target_pct_override: Optional[float] = None,
+        sl_pct_override: Optional[float] = None,
+    ) -> Optional[TradeState]:
         """
         Evaluate an incoming setup opportunity against pre-trade risk gates and initiate entry.
 
@@ -216,9 +221,11 @@ class BaseTrack(ABC):
             return None
 
         # INVARIANT #2: Strict Ask-based entry, target, and SL computations
+        eff_target_pct = float(target_pct_override) if target_pct_override is not None else self.target_pct
+        eff_sl_pct = float(sl_pct_override) if sl_pct_override is not None else self.sl_pct
         entry_ask = ask
-        target_price = entry_ask * (1.0 + self.target_pct)
-        stop_loss = entry_ask * (1.0 - self.sl_pct)
+        target_price = entry_ask * (1.0 + eff_target_pct)
+        stop_loss = entry_ask * (1.0 - eff_sl_pct)
 
         # Risk Gate 3: Stop-Loss Solvency Invariant
         # Prevailing market bid must be strictly above the calculated stop loss
@@ -262,8 +269,8 @@ class BaseTrack(ABC):
                 "entry_reason": entry_reason,
                 "preferred_mode": self.preferred_mode,
                 "required_capital": required_capital,
-                "target_pct": self.target_pct,
-                "sl_pct": self.sl_pct,
+                "target_pct": eff_target_pct,
+                "sl_pct": eff_sl_pct,
                 "underlying_symbol": opp.symbol,
                 "underlying_entry_price": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
                 "trigger_price": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
@@ -448,8 +455,8 @@ class BaseTrack(ABC):
         self.context.submit_order(req)
         self.context.record_trade_event("TRADE_EXIT", trade.to_dict())
 
-        # Unsubscribe from live quotes stream
-        self.context.unsubscribe_quotes([trade.token])
+        # Unsubscribe from live quotes stream (option + unused underlying equity symbol)
+        self._unsubscribe_trade_quotes(trade)
 
         # Release committed capital back to pool with realized PnL
         committed = trade.entry_ask * trade.quantity
@@ -458,6 +465,19 @@ class BaseTrack(ABC):
         # Move to closed trades
         self.active_trades.pop(trade.trade_id, None)
         self.closed_trades.append(trade)
+
+    def _unsubscribe_trade_quotes(self, trade: TradeState) -> None:
+        """Unsubscribe from trade's option token and any underlying equity symbol not held elsewhere."""
+        unsub_tokens = [trade.token]
+        if trade.symbol:
+            other_holding_sym = any(
+                t.symbol == trade.symbol and t.status == "OPEN"
+                for t in self.active_trades.values()
+                if t.trade_id != trade.trade_id
+            )
+            if not other_holding_sym:
+                unsub_tokens.extend([trade.symbol, f"NSE:{trade.symbol}"])
+        self.context.unsubscribe_quotes(unsub_tokens)
 
     def add_recovered_trade(self, trade: TradeState, is_filled: bool = True) -> None:
         """Restore a persisted trade from journal recovery (--continue) with capital & pending state."""
@@ -496,5 +516,5 @@ class BaseTrack(ABC):
                 committed = trade.entry_ask * trade.quantity
                 self.release_capital(committed, 0.0)
                 self.active_trades.pop(trade_id, None)
-                self.context.unsubscribe_quotes([trade.token])
+                self._unsubscribe_trade_quotes(trade)
                 self.context.record_trade_event("TRADE_REJECTED", trade.to_dict())

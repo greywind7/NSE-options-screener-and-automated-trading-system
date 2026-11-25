@@ -139,7 +139,8 @@ window.HistoricalTab = {
   renderStats(overall) {
     if (!overall || !this.overviewData || !this.overviewData.modes) return;
 
-    let targetNet = overall.net_pnl;
+    const nOverallTracks = overall.active_tracks_count || 1;
+    let targetNet = overall.avg_track_net_pnl !== undefined ? overall.avg_track_net_pnl : (overall.net_pnl / nOverallTracks);
     let targetWinRate = overall.win_rate;
     let targetTrades = overall.trades || 0;
     let targetFees = overall.brokerage;

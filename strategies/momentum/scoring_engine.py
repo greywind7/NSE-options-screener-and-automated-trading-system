@@ -591,7 +591,11 @@ class ScoringEngine3:
     def stop(self) -> None:
         self.running = False
         try:
-            self.shm.close()
+            self.headers = None
+            self.candles = None
+            if hasattr(self, "shm") and self.shm is not None:
+                self.shm.close()
+                self.shm = None
             if self._owns_pool and self.pool:
                 self.pool.stop()
         except Exception:

@@ -446,9 +446,29 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
 
     # 3. Execution Superstructures (one child process per mode and track)
     is_continue = getattr(args, "continue_state", False)
+    confirm_live = bool(getattr(args, "confirm_live", False))
+    cap_override = getattr(args, "capital", None)
+    eod_time_override = getattr(args, "eod_time", None)
+    eod_freeze_override = getattr(args, "eod_freeze_time", None)
+
     for m in modes:
+        cls_mod = "paper" if m == "paper" else "delayed" if m == "paper_delayed" else "live"
+        cls_name = "PaperSuperstructure" if m == "paper" else "DelayedSuperstructure" if m == "paper_delayed" else "LiveSuperstructure"
         for tr in tracks:
-            exec_code = f"from execution.superstructures.{'paper' if m == 'paper' else 'delayed' if m == 'paper_delayed' else 'live'} import {'Paper' if m == 'paper' else 'Delayed' if m == 'paper_delayed' else 'Live'}Superstructure; s = {'Paper' if m == 'paper' else 'Delayed' if m == 'paper_delayed' else 'Live'}Superstructure(track_names=['{tr}'], continue_state={is_continue}); s.start()"
+            extra_kwargs = ""
+            if m == "live":
+                extra_kwargs += f", live_confirmed={confirm_live}"
+                if cap_override is not None:
+                    extra_kwargs += f", initial_capital={float(cap_override)}"
+                if eod_freeze_override:
+                    extra_kwargs += f", eod_freeze_time={repr(str(eod_freeze_override))}"
+                if eod_time_override:
+                    extra_kwargs += f", eod_square_off_time={repr(str(eod_time_override))}"
+            exec_code = (
+                f"from execution.superstructures.{cls_mod} import {cls_name}; "
+                f"s = {cls_name}(track_names=['{tr}'], continue_state={is_continue}{extra_kwargs}); "
+                f"s.start()"
+            )
             p_exec = spawn_process([py_bin, "-c", exec_code], f"exec_{m}_{tr}", f"logs/exec_{m}_{tr}.log")
             procs.append(p_exec)
             print(f"  • Track Process      : {m.upper()} [{tr}] (PID: {p_exec.pid}) {'[CONTINUE STATE]' if is_continue else ''}")
@@ -925,12 +945,16 @@ def cmd_report(args: argparse.Namespace) -> int:
                 if not line.strip():
                     continue
                 try:
-                    t = json.loads(line)
-                    mode = t.get("mode", "unknown")
-                    track = t.get("track", "unknown")
-                    pnl = float(t.get("pnl", 0.0) or t.get("net_pnl", 0.0))
-                    entry_p = float(t.get("entry_price", 0.0))
-                    exit_p = float(t.get("exit_price", 0.0))
+                    rec = json.loads(line)
+                    event = rec.get("event")
+                    data = rec.get("data") if isinstance(rec.get("data"), dict) else rec
+                    if event and event != "TRADE_EXIT" and data.get("status") != "CLOSED":
+                        continue
+                    mode = rec.get("mode") or data.get("mode", "unknown")
+                    track = data.get("track", "unknown")
+                    pnl = float(data.get("realized_pnl") or data.get("pnl") or data.get("net_pnl") or 0.0)
+                    entry_p = float(data.get("entry_price") or 0.0)
+                    exit_p = float(data["exit_price"]) if data.get("exit_price") is not None else 0.0
                     pnl_pct = (exit_p - entry_p) / entry_p if entry_p > 0 else 0.0
 
                     key = (mode, track)

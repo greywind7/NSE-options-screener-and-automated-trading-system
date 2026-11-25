@@ -77,13 +77,18 @@ class MmapSharedMemoryAdapter:
         return memoryview(self._mmap)
 
     def close(self) -> None:
-        try:
-            if hasattr(self, "_mmap") and self._mmap is not None:
+        if hasattr(self, "_mmap") and self._mmap is not None:
+            try:
                 self._mmap.close()
-            if hasattr(self, "_file") and self._file is not None:
+            except Exception:
+                pass
+            self._mmap = None
+        if hasattr(self, "_file") and self._file is not None:
+            try:
                 self._file.close()
-        except Exception:
-            pass
+            except Exception:
+                pass
+            self._file = None
 
     def unlink(self) -> None:
         self.close()

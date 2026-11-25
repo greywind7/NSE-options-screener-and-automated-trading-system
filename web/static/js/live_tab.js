@@ -68,8 +68,9 @@ window.LiveTab = {
   renderStats(overall) {
     if (!overall || !this.liveData || !this.liveData.modes) return;
 
-    let targetNet = overall.net_pnl;
-    let targetMtm = overall.mtm_pnl;
+    const nOverallTracks = overall.active_tracks_count || 1;
+    let targetNet = overall.avg_track_net_pnl !== undefined ? overall.avg_track_net_pnl : (overall.net_pnl / nOverallTracks);
+    let targetMtm = overall.avg_track_mtm_pnl !== undefined ? overall.avg_track_mtm_pnl : (overall.mtm_pnl / nOverallTracks);
     let targetWinRate = overall.win_rate;
     let targetOpen = overall.open || 0;
     let targetClosed = overall.closed || 0;
@@ -297,14 +298,19 @@ window.LiveTab = {
 
       let exitPriceDisplay = "";
       if (isClosed) {
-        exitPriceDisplay = `₹${tr.exit_price.toFixed(2)}`;
+        exitPriceDisplay = (tr.exit_price !== null && tr.exit_price !== undefined)
+          ? `₹${Number(tr.exit_price).toFixed(2)}`
+          : `-`;
       } else {
         const quoteTime = tr.last_quote_time_str || "-";
         const quoteAge = (tr.last_quote_age_sec !== null && tr.last_quote_age_sec !== undefined)
           ? `<span style="color:var(--text-dim); font-size:10px;"> (${tr.last_quote_age_sec}s ago)</span>`
           : "";
+        const bidStr = (tr.current_bid !== null && tr.current_bid !== undefined)
+          ? Number(tr.current_bid).toFixed(2)
+          : "0.00";
         exitPriceDisplay = `<div style="display:flex; flex-direction:column; align-items:flex-end;">
-          <span style="color:var(--accent-cyan); font-weight:600;">₹${tr.current_bid.toFixed(2)} (Bid)</span>
+          <span style="color:var(--accent-cyan); font-weight:600;">₹${bidStr} (Bid)</span>
           <span style="font-size:10px; color:var(--text-muted);">Quote: ${quoteTime}${quoteAge}</span>
         </div>`;
       }

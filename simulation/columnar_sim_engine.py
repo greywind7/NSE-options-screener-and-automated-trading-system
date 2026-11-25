@@ -190,6 +190,7 @@ class ColumnarSimEngine:
 
         self.df_equity: Optional[pl.DataFrame] = None
         self.df_options: Optional[pl.DataFrame] = None
+        self._options_row_count: int = 0
 
         self.token_map: Dict[str, Tuple[str, float, str]] = {}
         self.lot_sizes: Dict[str, int] = {}
@@ -310,7 +311,7 @@ class ColumnarSimEngine:
                 df = df.with_columns(pl.col("instrument_token").alias("token"))
         return df
 
-    def load_data(self) -> Tuple[Optional[pl.DataFrame], Optional[pl.DataFrame]]:
+    def load_data(self, build_index: bool = True) -> Tuple[Optional[pl.DataFrame], Optional[pl.DataFrame]]:
         """
         Ingest equity ticks and option depth files.
         Separates equity underlyings and options depth records, sorting each by exchange_timestamp.
@@ -318,7 +319,7 @@ class ColumnarSimEngine:
         if self._cached_equity_df is not None:
             self.df_equity = self._cached_equity_df
             self.df_options = self._cached_options_df
-            if self.df_options is not None and len(self.df_options) > 0:
+            if build_index and self.df_options is not None and len(self.df_options) > 0:
                 self._build_options_index()
             return self.df_equity, self.df_options
 
@@ -355,11 +356,14 @@ class ColumnarSimEngine:
             if "exchange_timestamp" in self.df_equity.columns:
                 self.df_equity = self.df_equity.sort("exchange_timestamp")
 
-        # Normalize and index option depth data
+        # Index option depth data (skip redundant full-table sort when equity ticks drive chronological replay)
         if self.df_options is not None and len(self.df_options) > 0:
-            if "exchange_timestamp" in self.df_options.columns:
+            self._options_row_count = len(self.df_options)
+            has_equity_stream = self.df_equity is not None and len(self.df_equity) > 10
+            if not has_equity_stream and "exchange_timestamp" in self.df_options.columns:
                 self.df_options = self.df_options.sort("exchange_timestamp")
-            self._build_options_index()
+            if build_index:
+                self._build_options_index()
 
         return self.df_equity, self.df_options
 
@@ -367,6 +371,7 @@ class ColumnarSimEngine:
         """Build lightning-fast O(log N) numpy lookup tables for option depth by token."""
         if self.df_options is None or len(self.df_options) == 0:
             return
+        self._options_row_count = max(self._options_row_count, len(self.df_options))
 
         self._load_manifest_catalog()
         self._load_lot_sizes()
@@ -387,6 +392,9 @@ class ColumnarSimEngine:
             ltps = sub_df["ltp"].to_numpy().astype(np.float64) if "ltp" in sub_df.columns else bids
             bid_qtys = sub_df["bid_qty"].to_numpy().astype(np.int64) if "bid_qty" in sub_df.columns else np.zeros(len(sub_df), dtype=np.int64)
             ask_qtys = sub_df["ask_qty"].to_numpy().astype(np.int64) if "ask_qty" in sub_df.columns else np.zeros(len(sub_df), dtype=np.int64)
+            if len(ts) > 1 and not bool(np.all(ts[:-1] <= ts[1:])):
+                order = np.argsort(ts, kind="mergesort")
+                ts, bids, asks, ltps, bid_qtys, ask_qtys = ts[order], bids[order], asks[order], ltps[order], bid_qtys[order], ask_qtys[order]
 
             self.options_by_token[norm_token] = {
                 "timestamps": ts,
@@ -562,12 +570,16 @@ class ColumnarSimEngine:
         if self.df_equity is None or len(self.df_equity) == 0:
             return self._run_direct_option_simulation()
 
+        opt_count = len(self.df_options) if self.df_options is not None else self._options_row_count
         print(
             f"[SIMULATION_ENGINE] Running Serialized Chronological Simulation...\n"
             f"  • Equity Ticks : {len(self.df_equity):,} records\n"
-            f"  • Option Depth : {len(self.df_options) if self.df_options is not None else 0:,} records\n"
+            f"  • Option Depth : {opt_count:,} records\n"
             f"  • Active Modes : {', '.join(self.modes)} ({self.min_delay_ms:.0f}ms - {self.max_delay_ms:.0f}ms random delay)"
         )
+        # Release uncached raw Polars option DataFrame now that options_by_token is indexed
+        if self._cached_options_df is None and len(self.df_equity) > 10:
+            self.df_options = None
 
         # 1. Initialize State Layer: CandleManager & ScoringEngine with isolated SHM (ZeroMQ disabled in offline simulation)
         unlink_shm(self.shm_name)
@@ -685,14 +697,31 @@ class ColumnarSimEngine:
                 for release_ts, req in ctx_delayed.pending_orders:
                     if t_curr >= release_ts:
                         opt_q = self.get_option_quote(req.instrument_token, release_ts)
+                        track = tracks_by_mode.get("paper_delayed", {}).get(req.track)
                         if opt_q and opt_q["ask"] > 0:
-                            res = OrderResult(
-                                order_id=req.order_id,
-                                status="FILLED",
-                                fill_price=opt_q["ask"],
-                                fill_quantity=req.quantity,
-                                fill_timestamp=release_ts,
-                            )
+                            fill_price = opt_q["ask"]
+                            capital_delta = (fill_price - req.price) * req.quantity
+                            if track and capital_delta > 0 and track.available_capital < capital_delta:
+                                res = OrderResult(
+                                    order_id=req.order_id,
+                                    status="REJECTED",
+                                    fill_price=0.0,
+                                    fill_quantity=0,
+                                    fill_timestamp=release_ts,
+                                )
+                            else:
+                                if track:
+                                    if capital_delta > 0:
+                                        track.commit_capital(capital_delta)
+                                    elif capital_delta < 0:
+                                        track.release_capital(abs(capital_delta), 0.0)
+                                res = OrderResult(
+                                    order_id=req.order_id,
+                                    status="FILLED",
+                                    fill_price=fill_price,
+                                    fill_quantity=req.quantity,
+                                    fill_timestamp=release_ts,
+                                )
                         else:
                             res = OrderResult(
                                 order_id=req.order_id,
@@ -701,7 +730,6 @@ class ColumnarSimEngine:
                                 fill_quantity=0,
                                 fill_timestamp=release_ts,
                             )
-                        track = tracks_by_mode.get("paper_delayed", {}).get(req.track)
                         if track:
                             track.on_order_result(res)
                     else:
@@ -774,7 +802,13 @@ class ColumnarSimEngine:
             return {"paper": {}, "paper_delayed": {}}
 
         tokens = df["token"].unique().to_list() if "token" in df.columns else []
+        cfg = get_config_manager()
+        t_cfg = cfg.strategy.get("strategies", {}).get("momentum", {}).get("tracks", {})
         round_trip_brokerage = 2.0 * self.brokerage_per_order
+        mode_start_caps = {
+            m: float(cfg.get_execution_mode_config(m).get("starting_capital_per_sim", 250000.0))
+            for m in self.modes
+        }
         results: Dict[str, Dict[str, Any]] = {
             m: {
                 tr: {
@@ -786,17 +820,14 @@ class ColumnarSimEngine:
                     "total_brokerage": 0.0,
                     "net_pnl": 0.0,
                     "win_rate": 0.0,
-                    "start_capital": 250000.0,
-                    "end_capital": 250000.0,
+                    "start_capital": mode_start_caps[m],
+                    "end_capital": mode_start_caps[m],
                     "return_pct": 0.0,
                 }
                 for tr in self.tracks
             }
             for m in self.modes
         }
-
-        cfg = get_config_manager()
-        t_cfg = cfg.strategy.get("strategies", {}).get("momentum", {}).get("tracks", {})
         track_configs = {
             "fast_momentum": {"target_pct": float(t_cfg.get("fast_momentum", {}).get("target_pct", 0.12)), "sl_pct": float(t_cfg.get("fast_momentum", {}).get("sl_pct", 0.08)), "lot_size": 250},
             "trend_pullback": {"target_pct": float(t_cfg.get("trend_pullback", {}).get("target_pct", 0.25)), "sl_pct": float(t_cfg.get("trend_pullback", {}).get("sl_pct", 0.12)), "lot_size": 250},

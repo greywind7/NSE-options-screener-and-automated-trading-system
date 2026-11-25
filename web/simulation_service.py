@@ -195,6 +195,7 @@ class SimulationService:
         """Compute deterministic SHA256 hash of simulation parameters for deduplication."""
         norm_params = {
             "date": target_date,
+            "track_profile": params.get("track_profile", "default"),
             "global_settings": params.get("global_settings", {}),
             "base_tracks": params.get("base_tracks", {}),
             "composite_tracks": params.get("composite_tracks", []),
@@ -392,7 +393,7 @@ class SimulationService:
             session_date=target_date,
             modes=["paper"],
         )
-        df_eq, df_opt = temp_engine.load_data()
+        df_eq, df_opt = temp_engine.load_data(build_index=False)
 
         self.cached_date = target_date
         self.cached_equity_df = df_eq
@@ -690,7 +691,7 @@ class SimulationService:
                     tr_copy["exit_time_str"] = _safe_format_ts(x_ts)
 
                     entry_p = float(tr.get("entry_price", 0.0))
-                    exit_p = float(tr.get("exit_price") or entry_p)
+                    exit_p = float(tr["exit_price"]) if tr.get("exit_price") is not None else 0.0
                     pnl = float(tr.get("realized_pnl", 0.0))
                     ret_pct = (exit_p - entry_p) / entry_p if entry_p > 0 else 0.0
                     tr_meta = tr.get("metadata") or {}

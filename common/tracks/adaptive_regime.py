@@ -58,18 +58,15 @@ class AdaptiveRegimeTrack(BaseTrack):
         now_ts = opp.timestamp or time.time()
         phase = self._get_regime_phase(now_ts)
 
-        # Dynamically set target & SL before creating trade
+        # Dynamically compute target & SL per trade without mutating shared instance attributes
         if phase == "MORNING":
-            self.target_pct = 0.18
-            self.sl_pct = 0.07
+            t_pct, s_pct = 0.18, 0.07
         elif phase == "MIDDAY":
-            self.target_pct = 0.08
-            self.sl_pct = 0.05
+            t_pct, s_pct = 0.08, 0.05
         else:
-            self.target_pct = 0.25
-            self.sl_pct = 0.07
+            t_pct, s_pct = 0.25, 0.07
 
-        trade = super().on_opportunity(opp)
+        trade = super().on_opportunity(opp, target_pct_override=t_pct, sl_pct_override=s_pct)
         if trade:
             trade.metadata["regime_phase"] = phase
         return trade

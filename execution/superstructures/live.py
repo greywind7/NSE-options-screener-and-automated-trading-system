@@ -69,19 +69,19 @@ class LiveSuperstructure(BaseSuperstructure):
         groww_client: Optional[Any] = None,
         output_csv: str = "logs/live_trades.csv",
         state_file: Optional[str] = None,
-        brokerage_per_order: float = 20.0,
+        brokerage_per_order: Optional[float] = None,
         debug_log: Optional[str] = "logs/debug.log",
         live_confirmed: bool = False,
-        initial_capital: float = 100_000.0,
+        initial_capital: Optional[float] = None,
         enable_polling: bool = True,
         poll_interval_sec: float = 1.0,
-        reconciliation_interval_sec: float = 15.0,
-        settlement_quarantine_sec: float = 10.0,
-        enforce_market_hours: bool = False,
-        market_open_time: str = "09:15",
-        market_close_time: str = "15:30",
-        eod_freeze_time: str = "15:10",
-        eod_square_off_time: str = "15:15",
+        reconciliation_interval_sec: Optional[float] = None,
+        settlement_quarantine_sec: Optional[float] = None,
+        enforce_market_hours: Optional[bool] = None,
+        market_open_time: Optional[str] = None,
+        market_close_time: Optional[str] = None,
+        eod_freeze_time: Optional[str] = None,
+        eod_square_off_time: Optional[str] = None,
         option_sl_pct: float = 15.0,
         broker_max_order_modifications: int = 25,
         rms_ipc: Optional[str] = None,
@@ -107,29 +107,41 @@ class LiveSuperstructure(BaseSuperstructure):
             continue_state=continue_state,
         )
 
+        live_cfg = self._cfg.get_execution_mode_config("live")
+        root_exec_cfg = self._cfg.execution.get("execution", {})
+        eff_brok = float(brokerage_per_order if brokerage_per_order is not None else live_cfg.get("brokerage_per_order", root_exec_cfg.get("brokerage_per_order", 30.0)))
+        eff_cap = float(initial_capital if initial_capital is not None else live_cfg.get("starting_capital_per_sim", 250000.0))
+        eff_recon_sec = float(reconciliation_interval_sec if reconciliation_interval_sec is not None else live_cfg.get("reconciliation_interval_sec", 30.0))
+        eff_quar_sec = float(settlement_quarantine_sec if settlement_quarantine_sec is not None else live_cfg.get("settlement_quarantine_sec", 10.0))
+        eff_eod_freeze = eod_freeze_time or live_cfg.get("live_entry_freeze_time") or root_exec_cfg.get("live_entry_freeze_time", "15:10")
+        eff_eod_sq = eod_square_off_time or live_cfg.get("live_eod_squareoff_time") or root_exec_cfg.get("live_eod_squareoff_time", "15:15")
+        eff_mkt_open = market_open_time or root_exec_cfg.get("market_open_time", "09:15")
+        eff_mkt_close = market_close_time or root_exec_cfg.get("market_close_time", "15:30")
+
         self.access_token = access_token or os.environ.get("GROWW_ACCESS_TOKEN") or os.environ.get("GROWW_API_KEY") or self._cfg.get_groww_api_key()
         self.api_key = api_key or os.environ.get("GROWW_API_KEY")
         self.output_csv = output_csv
         self.state_file = state_file or os.path.join(os.path.dirname(os.path.abspath(self.output_csv)), "live_positions_state.json")
-        self.brokerage_per_order = float(brokerage_per_order)
+        self.brokerage_per_order = eff_brok
         self.debug_log = debug_log
         self.live_confirmed = bool(live_confirmed)
-        self.initial_capital = float(initial_capital)
-        self.available_capital = float(initial_capital)
-        self.enforce_market_hours = bool(enforce_market_hours)
-        self.market_open_time = normalize_time_str(market_open_time, "09:15")
-        self.market_close_time = normalize_time_str(market_close_time, "15:30")
-        self.eod_freeze_time = normalize_time_str(eod_freeze_time, "15:10")
-        self.eod_square_off_time = normalize_time_str(eod_square_off_time, "15:15")
+        self.initial_capital = eff_cap
+        self.available_capital = eff_cap
+        self.enforce_market_hours = bool(enforce_market_hours) if enforce_market_hours is not None else False
+        self.market_open_time = normalize_time_str(eff_mkt_open, "09:15")
+        self.market_close_time = normalize_time_str(eff_mkt_close, "15:30")
+        self.eod_freeze_time = normalize_time_str(eff_eod_freeze, "15:10")
+        self.eod_square_off_time = normalize_time_str(eff_eod_sq, "15:15")
         self.option_sl_pct = float(option_sl_pct)
         self.broker_max_order_modifications = int(broker_max_order_modifications)
 
         # Failure Handling & Conflation Configuration
-        self.reconciliation_interval_sec = float(reconciliation_interval_sec)
-        self.settlement_quarantine_sec = float(settlement_quarantine_sec)
+        self.reconciliation_interval_sec = eff_recon_sec
+        self.settlement_quarantine_sec = eff_quar_sec
         self.is_session_active = True
         self._last_reconciliation_ts = 0.0
         self._in_flight_exits: Dict[str, float] = {}
+        self._reconcile_lock = threading.Lock()
 
         # Initialize official GrowwAPI client object
         self.groww_client = groww_client
@@ -1136,14 +1148,15 @@ class LiveSuperstructure(BaseSuperstructure):
         Handles Ghost positions (closes locally), Orphan positions (adopts with risk attached),
         and partial fill quantity adjustments with settlement quarantine safeguards.
         """
-        now_ts = time.time()
-        self._last_reconciliation_ts = now_ts
-        quar_sec = self.settlement_quarantine_sec if quarantine_sec is None else float(quarantine_sec)
+        with self._reconcile_lock:
+            now_ts = time.time()
+            self._last_reconciliation_ts = now_ts
+            quar_sec = self.settlement_quarantine_sec if quarantine_sec is None else float(quarantine_sec)
 
-        # Query broker positions
-        broker_positions = self.get_broker_positions()
-        if not self.is_session_active:
-            return {"status": "AUTH_EXPIRED", "timestamp": now_ts}
+            # Query broker positions
+            broker_positions = self.get_broker_positions()
+            if not self.is_session_active:
+                return {"status": "AUTH_EXPIRED", "timestamp": now_ts}
 
         # Index broker positions by trading_symbol (upper-cased)
         broker_map: Dict[str, Dict[str, Any]] = {}
@@ -1196,9 +1209,7 @@ class LiveSuperstructure(BaseSuperstructure):
                         if not q and (sym == token or sym == trading_sym):
                             q = quotes_cache.get(sym)
                         q = q or {}
-                        exit_p = float(q.get("bid") or q.get("last_price") or q.get("ltp") or 0.0)
-                    if exit_p <= 0:
-                        exit_p = ep
+                        exit_p = float(q["bid"]) if q.get("bid") is not None else 0.0
 
                     gross = (exit_p - ep) * qty
                     net = gross - (self.brokerage_per_order * 2.0)

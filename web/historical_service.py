@@ -133,9 +133,11 @@ class HistoricalService:
             "breakevens": tot_be,
             "losses": tot_losses,
             "win_rate": round((tot_wins / tot_trades * 100.0) if tot_trades > 0 else 0.0, 1),
-            "gross_pnl": round(tot_gross / n_active, 2),
+            "gross_pnl": round(tot_gross, 2),
             "brokerage": round(tot_brokerage, 2),
-            "net_pnl": round(tot_net / n_active, 2),
+            "net_pnl": round(tot_net, 2),
+            "avg_track_gross_pnl": round(tot_gross / n_active, 2),
+            "avg_track_net_pnl": round(tot_net / n_active, 2),
             "raw_total_net": round(tot_net, 2),
             "active_tracks_count": n_active,
         }
@@ -172,7 +174,7 @@ class HistoricalService:
             tr_copy["exit_time_str"] = datetime.fromtimestamp(x_ts, tz=IST).strftime("%H:%M:%S") if x_ts > 0 else "-"
 
             entry_p = float(tr.get("entry_price", 0.0))
-            exit_p = float(tr.get("exit_price") or entry_p)
+            exit_p = float(tr["exit_price"]) if tr.get("exit_price") is not None else 0.0
             pnl = float(tr.get("realized_pnl", 0.0))
             ret_pct = (exit_p - entry_p) / entry_p if entry_p > 0 else 0.0
             fee = float(tr.get("metadata", {}).get("brokerage", 60.0))
@@ -297,13 +299,29 @@ class HistoricalService:
                                 "metadata": data.get("metadata", {}),
                             }
                         else:
+                            IMMUTABLE_FIELDS = {
+                                "trade_id", "mode", "track", "symbol", "token",
+                                "option_type", "strike", "lot_size", "quantity",
+                                "entry_ask", "entry_time", "entry_reason", "origin_track",
+                            }
                             tr = trades_map[trade_id]
                             for k, v in data.items():
-                                if v is not None:
-                                    if k == "token":
-                                        tr[k] = normalize_instrument_token(v)
-                                    else:
-                                        tr[k] = v
+                                if v is None:
+                                    continue
+                                if k == "token":
+                                    tr[k] = normalize_instrument_token(v)
+                                elif k == "metadata" and isinstance(v, dict):
+                                    merged_meta = dict(tr.get("metadata") or {})
+                                    merged_meta.update(v)
+                                    tr["metadata"] = merged_meta
+                                elif k == "entry_price":
+                                    if event == "TRADE_FILLED" and float(v) > 0.0:
+                                        tr["entry_price"] = float(v)
+                                elif k == "entry_time":
+                                    if event == "TRADE_FILLED" and float(v) > 0.0:
+                                        tr["entry_time"] = float(v)
+                                elif k not in IMMUTABLE_FIELDS:
+                                    tr[k] = v
 
                         if event == "TRADE_EXIT" or data.get("status") == "CLOSED":
                             trades_map[trade_id]["status"] = "CLOSED"
@@ -362,7 +380,7 @@ class HistoricalService:
 
         for tr in trades:
             entry_p = float(tr.get("entry_price", 0.0))
-            exit_p = float(tr.get("exit_price") or entry_p)
+            exit_p = float(tr["exit_price"]) if tr.get("exit_price") is not None else 0.0
             realized = float(tr.get("realized_pnl", 0.0))
             fee = float(tr.get("metadata", {}).get("brokerage", 60.0))
             gross_pnl += realized

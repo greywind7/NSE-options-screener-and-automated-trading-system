@@ -84,6 +84,7 @@ class CandleManager:
         self.vol_at_min_edges = np.zeros((NUM_SYMBOLS, 5), dtype=np.int64)
         self.current_bar_idx = np.full(NUM_SYMBOLS, -1, dtype=np.int32)
         self.current_min_idx = np.zeros(NUM_SYMBOLS, dtype=np.int32)
+        self._has_recorded_vol = np.zeros(NUM_SYMBOLS, dtype=bool)
 
         # ZeroMQ Subscriber (only when enable_zmq is True)
         if self.enable_zmq:
@@ -233,14 +234,15 @@ class CandleManager:
         self.headers[idx]["last_update_ns"] = time.time_ns()
 
         # Compute delta volume since last received tick
-        prev_v = self.prev_cum_vol[idx]
-        if prev_v > 0 and vol >= prev_v:
+        prev_v = int(self.prev_cum_vol[idx])
+        if self._has_recorded_vol[idx] and vol >= prev_v:
             delta_vol = vol - prev_v
         else:
             delta_vol = 0
 
-        if vol > 0:
+        if vol > 0 or not self._has_recorded_vol[idx]:
             self.prev_cum_vol[idx] = vol
+            self._has_recorded_vol[idx] = True
 
         # Bar transition check
         active_bar = self.candles[idx, bar_idx]
@@ -283,11 +285,13 @@ class CandleManager:
 
         bar_vol = int(active_bar["volume"])
 
-        # Minute edge tracking & linear extrapolation
+        # Minute edge tracking & linear extrapolation (backfill skipped quiet minutes)
         if min_offset != self.current_min_idx[idx]:
-            # Record volume accumulated at minute boundary
-            prev_min = self.current_min_idx[idx]
-            if 0 <= prev_min < 5:
+            prev_min = int(self.current_min_idx[idx])
+            if 0 <= prev_min < min_offset:
+                for m_edge in range(prev_min, min(5, min_offset)):
+                    self.vol_at_min_edges[idx, m_edge] = bar_vol
+            elif 0 <= prev_min < 5:
                 self.vol_at_min_edges[idx, prev_min] = bar_vol
             self.current_min_idx[idx] = min_offset
 
@@ -400,7 +404,7 @@ class CandleManager:
                     token=tick.get("token", ""),
                     ltp=float(tick.get("ltp", 0.0)),
                     vol=int(tick.get("volume", 0)),
-                    ts=float(tick.get("received_timestamp", time.time())),
+                    ts=float(tick.get("exchange_timestamp") or tick.get("received_timestamp") or time.time()),
                 )
             except zmq.ZMQError:
                 break

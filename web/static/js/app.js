@@ -62,6 +62,13 @@ window.App = {
   },
 
   connectWebSocket() {
+    if (this.ws) {
+      try {
+        this.ws.onclose = null;
+        this.ws.close();
+      } catch (_) {}
+      this.ws = null;
+    }
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${proto}//${window.location.host}/api/live/ws`;
 
@@ -300,6 +307,7 @@ window.App = {
     const modal = document.getElementById("trade-analysis-modal");
     if (!modal) return;
     this.currentModalTrade = trade;
+    this.tamCurrentRange = "local";
 
     const titleEl = document.getElementById("tam-title");
     const pnlBadge = document.getElementById("tam-pnl-badge");

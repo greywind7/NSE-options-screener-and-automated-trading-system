@@ -150,28 +150,6 @@
         },
         {
           "type": "composite",
-          "name": "composite_split_OTM",
-          "shared_pool": false,
-          "composition": [
-            {
-              "fast_momentum": [
-                "OTM"
-              ]
-            },
-            {
-              "trend_pullback": [
-                "OTM"
-              ]
-            },
-            {
-              "fixed_target": [
-                "OTM"
-              ]
-            }
-          ]
-        },
-        {
-          "type": "composite",
           "name": "composite_shared_fast_momentum",
           "shared_pool": true,
           "composition": [

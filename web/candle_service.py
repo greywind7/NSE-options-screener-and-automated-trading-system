@@ -4,6 +4,7 @@ Extracts intraday candles (default: 5-minute bars) for cash equities and option 
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import datetime
 import os
 import time
@@ -17,10 +18,9 @@ from core.common.time_utils import IST
 class CandleService:
     def __init__(self, recordings_dir: str = "recordings"):
         self.recordings_dir = recordings_dir
-        # In-memory LRU-like cache: (date, token_or_sym, is_option, interval_minutes) -> list of candle dicts
-        self._candle_cache: Dict[Tuple[str, str, bool, int], List[Dict[str, Any]]] = {}
-        # In-memory DataFrame cache for raw recordings: (date, is_option) -> pl.DataFrame
-        self._df_cache: Dict[Tuple[str, bool], pl.DataFrame] = {}
+        # In-memory LRU caches
+        self._candle_cache: OrderedDict[Tuple[str, str, bool, int], List[Dict[str, Any]]] = OrderedDict()
+        self._df_cache: OrderedDict[Tuple[str, bool], pl.DataFrame] = OrderedDict()
 
     def get_candles(
         self,
@@ -38,6 +38,7 @@ class CandleService:
         norm_date = target_date.replace("-", "") if not ("-" in target_date and len(target_date) == 10) else target_date
         cache_key = (norm_date, token or symbol, is_option, interval_minutes)
         if cache_key in self._candle_cache:
+            self._candle_cache.move_to_end(cache_key)
             return self._candle_cache[cache_key]
 
         norm_tok = normalize_instrument_token(token)
@@ -71,6 +72,7 @@ class CandleService:
             df_cache_key = (norm_date, is_option)
             if df_cache_key in self._df_cache:
                 try:
+                    self._df_cache.move_to_end(df_cache_key)
                     df = self._df_cache[df_cache_key].filter(combined_filter)
                 except Exception:
                     df = None
@@ -100,8 +102,7 @@ class CandleService:
                         needed_cols = [c for c in ["token", "symbol", "exchange_timestamp", "received_timestamp", "ltp", "volume"] if c in schema]
                         loaded_df = pl.read_parquet(pq_path, columns=needed_cols)
                         if len(self._df_cache) >= 3:
-                            first_k = next(iter(self._df_cache))
-                            self._df_cache.pop(first_k, None)
+                            self._df_cache.popitem(last=False)
                         self._df_cache[df_cache_key] = loaded_df
                         df = loaded_df.filter(combined_filter)
                     else:
@@ -158,6 +159,8 @@ class CandleService:
                     "volume": bar_vol,
                 })
 
+            if len(self._candle_cache) >= 256:
+                self._candle_cache.popitem(last=False)
             self._candle_cache[cache_key] = candles
             return candles
 

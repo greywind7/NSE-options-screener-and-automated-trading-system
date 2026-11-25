@@ -309,7 +309,10 @@ class BaseSuperstructure(ExecutionContext, ABC):
         return self._mode
 
     def is_frozen(self) -> bool:
-        return self._is_frozen or self.risk_mgr.is_circuit_breaker_tripped()
+        freeze_all = os.path.join("logs", ".freeze_all")
+        freeze_mode = os.path.join("logs", f".freeze_{self.mode}")
+        file_frozen = os.path.exists(freeze_all) or os.path.exists(freeze_mode)
+        return self._is_frozen or file_frozen or self.risk_mgr.is_circuit_breaker_tripped()
 
     def freeze(self) -> None:
         self._is_frozen = True
@@ -332,7 +335,11 @@ class BaseSuperstructure(ExecutionContext, ABC):
         tokens_to_unsub = []
         for t in tokens:
             still_held = any(
-                any(tr.token == t and tr.status == "OPEN" for tr in track.active_trades.values())
+                any(
+                    (tr.token == t or tr.symbol == t or f"NSE:{tr.symbol}" == t)
+                    and tr.status == "OPEN"
+                    for tr in track.active_trades.values()
+                )
                 for track in self.tracks.values()
             )
             if not still_held:
@@ -453,6 +460,13 @@ class BaseSuperstructure(ExecutionContext, ABC):
 
     def start(self) -> None:
         """Main polling event loop."""
+        import threading
+        if threading.current_thread() is threading.main_thread():
+            try:
+                signal.signal(signal.SIGUSR1, lambda _s, _f: self.freeze())
+                signal.signal(signal.SIGUSR2, lambda _s, _f: self.unfreeze())
+            except (ValueError, OSError, AttributeError):
+                pass
         self.running = True
         print(f"[{self.mode.upper()}_SUPERSTRUCTURE] Active | Tracks: {list(self.tracks.keys())}")
 

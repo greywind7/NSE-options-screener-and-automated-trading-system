@@ -48,6 +48,8 @@ class LiveService:
 
     async def start(self) -> None:
         """Start async background listener for active options ZeroMQ sockets."""
+        if self.running:
+            return
         self.running = True
         self._zmq_ctx = zmq.asyncio.Context()
         self._listener_task = asyncio.create_task(self._listen_options_stream())
@@ -108,9 +110,9 @@ class LiveService:
                         data = unpack_message(raw_bytes)
                         token = normalize_instrument_token(data.get("token") or data.get("symbol", ""))
                         if token:
-                            ltp = float(data.get("ltp", 0.0))
-                            bid = float(data.get("bid", ltp))
-                            ask = float(data.get("ask", ltp))
+                            ltp = float(data.get("ltp") or 0.0)
+                            bid = float(data["bid"]) if data.get("bid") is not None else 0.0
+                            ask = float(data["ask"]) if data.get("ask") is not None else 0.0
                             ts = float(data.get("exchange_timestamp") or data.get("received_timestamp") or time.time())
                             self.lvc[token] = {
                                 "token": token,
@@ -252,9 +254,9 @@ class LiveService:
                     sub_df = df.filter(pl.col("token") == tok)
                     if len(sub_df) > 0:
                         last_row = sub_df.row(-1, named=True)
-                        ltp = float(last_row.get("ltp", 0.0))
-                        bid = float(last_row.get("bid", ltp))
-                        ask = float(last_row.get("ask", ltp))
+                        ltp = float(last_row.get("ltp") or 0.0)
+                        bid = float(last_row["bid"]) if last_row.get("bid") is not None else 0.0
+                        ask = float(last_row["ask"]) if last_row.get("ask") is not None else 0.0
                         ts = float(last_row.get("exchange_timestamp") or last_row.get("received_timestamp") or 0.0)
                         self.lvc[tok] = {
                             "token": tok,
@@ -312,13 +314,29 @@ class LiveService:
                                 "metadata": data.get("metadata", {}),
                             }
                         else:
+                            IMMUTABLE_FIELDS = {
+                                "trade_id", "mode", "track", "symbol", "token",
+                                "option_type", "strike", "lot_size", "quantity",
+                                "entry_ask", "entry_time", "entry_reason", "origin_track",
+                            }
                             tr = trades_map[trade_id]
                             for k, v in data.items():
-                                if v is not None:
-                                    if k == "token":
-                                        tr[k] = normalize_instrument_token(v)
-                                    else:
-                                        tr[k] = v
+                                if v is None:
+                                    continue
+                                if k == "token":
+                                    tr[k] = normalize_instrument_token(v)
+                                elif k == "metadata" and isinstance(v, dict):
+                                    merged_meta = dict(tr.get("metadata") or {})
+                                    merged_meta.update(v)
+                                    tr["metadata"] = merged_meta
+                                elif k == "entry_price":
+                                    if event == "TRADE_FILLED" and float(v) > 0.0:
+                                        tr["entry_price"] = float(v)
+                                elif k == "entry_time":
+                                    if event == "TRADE_FILLED" and float(v) > 0.0:
+                                        tr["entry_time"] = float(v)
+                                elif k not in IMMUTABLE_FIELDS:
+                                    tr[k] = v
 
                         if event == "TRADE_EXIT" or data.get("status") == "CLOSED":
                             trades_map[trade_id]["status"] = "CLOSED"
@@ -395,10 +413,13 @@ class LiveService:
             "breakevens": tot_be,
             "losses": tot_losses,
             "win_rate": (tot_wins / tot_closed * 100.0) if tot_closed > 0 else 0.0,
-            "gross_pnl": round(tot_gross / n_active, 2),
+            "gross_pnl": round(tot_gross, 2),
             "brokerage": round(tot_brokerage, 2),
-            "mtm_pnl": round(tot_mtm / n_active, 2),
-            "net_pnl": round(tot_net / n_active, 2),
+            "mtm_pnl": round(tot_mtm, 2),
+            "net_pnl": round(tot_net, 2),
+            "avg_track_gross_pnl": round(tot_gross / n_active, 2),
+            "avg_track_mtm_pnl": round(tot_mtm / n_active, 2),
+            "avg_track_net_pnl": round(tot_net / n_active, 2),
             "raw_total_net": round(tot_net, 2),
             "active_tracks_count": n_active,
         }
@@ -430,7 +451,10 @@ class LiveService:
                 open_count += 1
                 tok = tr.get("token", "")
                 quote = self.lvc.get(tok, {})
-                current_bid = float(quote.get("bid") or quote.get("ltp") or tr.get("current_bid") or tr.get("entry_price") or 0.0)
+                current_bid = float(
+                    quote["bid"] if quote.get("bid") is not None
+                    else (tr["current_bid"] if tr.get("current_bid") is not None else 0.0)
+                )
                 entry_p = float(tr.get("entry_price", 0.0))
                 qty = int(tr.get("quantity", 0))
 
@@ -445,7 +469,7 @@ class LiveService:
             else:
                 closed_count += 1
                 entry_p = float(tr.get("entry_price", 0.0))
-                exit_p = float(tr.get("exit_price") or entry_p)
+                exit_p = float(tr["exit_price"]) if tr.get("exit_price") is not None else 0.0
                 realized = float(tr.get("realized_pnl", 0.0))
                 gross_pnl += realized
                 brokerage += b_fee
@@ -460,7 +484,11 @@ class LiveService:
 
         win_rate = (wins / closed_count * 100.0) if closed_count > 0 else 0.0
         net_pnl = (gross_pnl - brokerage) + mtm_pnl
-        start_budget = 250000.0
+        try:
+            from core.config.config_loader import get_config_manager
+            start_budget = float(get_config_manager().get_execution_mode_config(mode).get("starting_capital_per_sim", 250000.0))
+        except Exception:
+            start_budget = 250000.0
         # Available Cash = starting budget + realized cash pnl - premium paid for open positions
         current_budget = round(max(0.0, start_budget + (gross_pnl - brokerage) - open_committed), 2)
         total_equity = round(start_budget + net_pnl, 2)
@@ -516,11 +544,14 @@ class LiveService:
                     tr_copy["last_quote_time_str"] = "-"
                     tr_copy["last_quote_age_sec"] = None
 
-                cur_p = float(quote.get("bid") or quote.get("ltp") or tr.get("current_bid") or entry_p)
+                cur_p = float(
+                    quote["bid"] if quote.get("bid") is not None
+                    else (tr["current_bid"] if tr.get("current_bid") is not None else 0.0)
+                )
                 pnl = float(tr.get("mtm", 0.0))
                 ret_pct = (cur_p - entry_p) / entry_p if entry_p > 0 else 0.0
             else:
-                cur_p = float(tr.get("exit_price") or entry_p)
+                cur_p = float(tr["exit_price"]) if tr.get("exit_price") is not None else 0.0
                 pnl = float(tr.get("realized_pnl", 0.0))
                 ret_pct = (cur_p - entry_p) / entry_p if entry_p > 0 else 0.0
                 tr_copy["last_quote_time_str"] = "-"
@@ -579,33 +610,41 @@ class LiveService:
         ts_points.add(max_ts)
 
         eval_times = sorted(ts_points)
+        closed_events = sorted(
+            (
+                (float(tr.get("exit_time") or 0.0), float(tr.get("realized_pnl", 0.0)), float(tr.get("metadata", {}).get("brokerage", 60.0)))
+                for tr in trades
+                if tr.get("status") == "CLOSED"
+            ),
+            key=lambda item: item[0],
+        )
+        open_entries = sorted(
+            (
+                (float(tr.get("entry_time") or 0.0), float(tr.get("mtm", 0.0)))
+                for tr in trades
+                if tr.get("status") == "OPEN"
+            ),
+            key=lambda item: item[0],
+        )
+
         curve = []
         cum_closed_net = 0.0
         cum_closed_gross = 0.0
-        processed_exits = set()
+        cur_mtm = 0.0
+        c_idx = 0
+        o_idx = 0
+        n_closed = len(closed_events)
+        n_open = len(open_entries)
 
         for cur_t in eval_times:
-            # Check newly closed trades up to cur_t
-            for tr in trades:
-                tid = tr.get("trade_id")
-                if tid in processed_exits:
-                    continue
-                if tr.get("status") == "CLOSED":
-                    x_ts = float(tr.get("exit_time") or 0.0)
-                    if x_ts <= cur_t:
-                        pnl = float(tr.get("realized_pnl", 0.0))
-                        fee = float(tr.get("metadata", {}).get("brokerage", 60.0))
-                        cum_closed_net += (pnl - fee)
-                        cum_closed_gross += pnl
-                        processed_exits.add(tid)
-
-            # Check open trades MTM at cur_t
-            cur_mtm = 0.0
-            for tr in trades:
-                if tr.get("status") == "OPEN":
-                    e_ts = float(tr.get("entry_time") or 0.0)
-                    if e_ts <= cur_t:
-                        cur_mtm += float(tr.get("mtm", 0.0))
+            while c_idx < n_closed and closed_events[c_idx][0] <= cur_t:
+                _, pnl, fee = closed_events[c_idx]
+                cum_closed_net += (pnl - fee)
+                cum_closed_gross += pnl
+                c_idx += 1
+            while o_idx < n_open and open_entries[o_idx][0] <= cur_t:
+                cur_mtm += open_entries[o_idx][1]
+                o_idx += 1
 
             total_net = cum_closed_net + cur_mtm
             total_gross = cum_closed_gross + cur_mtm

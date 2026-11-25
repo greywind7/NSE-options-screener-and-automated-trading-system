@@ -168,8 +168,20 @@ def supervise_processes(procs: List[subprocess.Popen]) -> int:
         cleanup()
         sys.exit(0)
 
+    def fwd_usr_signal(sig, frame):
+        for p in procs:
+            if p and p.poll() is None:
+                try:
+                    os.kill(p.pid, sig)
+                except Exception:
+                    pass
+
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
+    if hasattr(signal, "SIGUSR1"):
+        signal.signal(signal.SIGUSR1, fwd_usr_signal)
+    if hasattr(signal, "SIGUSR2"):
+        signal.signal(signal.SIGUSR2, fwd_usr_signal)
 
     try:
         while True:

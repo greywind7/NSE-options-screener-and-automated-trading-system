@@ -42,7 +42,8 @@ class TrendPullbackV2Track(BaseTrack):
         return opp.strikes.get("ITM1") or opp.strikes.get("ITM") or opp.strikes.get("ATM")
 
     def on_opportunity(self, opp: ActionableOpportunity) -> Optional[TradeState]:
-        # Dynamically calibrate initial stop-loss to bid-ask spread
+        # Dynamically calibrate initial stop-loss to bid-ask spread per trade
+        sl_override: Optional[float] = None
         strike_info = self.select_strike(opp)
         if strike_info:
             ask = float(strike_info.get("ask", 0.0))
@@ -50,10 +51,9 @@ class TrendPullbackV2Track(BaseTrack):
             if ask > 0.0 and bid > 0.0:
                 spread_pct = (ask - bid) / ask
                 # Invariant: SL must be wider than the immediate bid-ask spread
-                calibrated_sl = max(0.06, 1.5 * spread_pct + 0.03)
-                self.sl_pct = calibrated_sl
+                sl_override = max(0.06, 1.5 * spread_pct + 0.03)
 
-        return super().on_opportunity(opp)
+        return super().on_opportunity(opp, sl_pct_override=sl_override)
 
     def evaluate_exit_rules(
         self, trade: TradeState, ltp: float, bid: float, ask: float, ts: float
