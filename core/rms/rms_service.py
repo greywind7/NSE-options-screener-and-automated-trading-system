@@ -6,6 +6,7 @@ over ZeroMQ PUB for mode-specific execution superstructures.
 """
 import argparse
 import csv
+from datetime import date, datetime, timedelta
 import json
 import os
 import signal
@@ -20,6 +21,14 @@ from core.quotes.quotes_broker import QuotesBrokerClient, DEFAULT_QUOTES_ROUTER_
 
 DEFAULT_ALERTS_SUB_IPC = "ipc:///tmp/scoring_alerts_pub.ipc"
 DEFAULT_RMS_PUB_IPC = "ipc:///tmp/rms_strike_pub.ipc"
+
+
+def get_current_expiry_tag(ref_date: Optional[date] = None) -> str:
+    """Compute nearest Thursday expiry tag (e.g. '26NOV') for fallback symbol construction."""
+    d = ref_date or date.today()
+    days_ahead = (3 - d.weekday()) % 7
+    thursday = d + timedelta(days=days_ahead)
+    return f"{thursday.day:02d}{thursday.strftime('%b').upper()}"
 
 
 def get_strike_step(price: float) -> float:
@@ -59,7 +68,18 @@ class RMSService:
         self.quotes_router_ipc = quotes_router_ipc or ipc.get("quotes_router_ipc", DEFAULT_QUOTES_ROUTER_IPC)
         self.universe_csv = universe_csv or inst_paths.get("filtered_universe_csv", "data/filtered.csv")
         self.manifest_path = kwargs.get("manifest_path") or inst_paths.get("subscription_manifest_json", "data/subscription_manifest.json")
-        self.spread_gate = risk_cfg.get("spread_gate", {"max_spread_pct": 0.03, "min_spread_abs": 0.50})
+        spread_gate_cfg = risk_cfg.get("spread_gate", {})
+        self.spread_gate = {
+            "max_spread_pct": float(
+                spread_gate_cfg.get("max_spread_pct", risk_cfg.get("max_spread_pct", 0.03))
+            ),
+            "min_spread_abs": float(
+                spread_gate_cfg.get("min_spread_abs", risk_cfg.get("min_absolute_spread_inr", 0.50))
+            ),
+        }
+        self.default_expiry_tag = str(
+            kwargs.get("default_expiry_tag") or risk_cfg.get("default_expiry_tag") or get_current_expiry_tag()
+        )
         self.running = False
 
         # Load lot sizes and metadata from universe
@@ -177,7 +197,7 @@ class RMSService:
                 otm_strike = atm_strike - step
                 otm2_strike = atm_strike - 2 * step
 
-        expiry_tag = "26NOV"
+        expiry_tag = self.default_expiry_tag
 
         token_roles = {
             "ATM": atm_strike,
@@ -261,6 +281,11 @@ class RMSService:
         # Resolve strikes with hybrid spread gate
         strikes = self.resolve_strikes(alert.symbol, alert.direction, alert.trigger_price)
         if not strikes:
+            print(
+                f"[RMS_SERVICE] Alert {alert.alert_id} rejected: no liquid strikes for "
+                f"{alert.symbol} {alert.direction} @ {alert.trigger_price:.2f}",
+                flush=True,
+            )
             return None
 
         opp = ActionableOpportunity(
@@ -284,12 +309,17 @@ class RMSService:
         topic = b"OPP." + alert.symbol.encode("utf-8")
         payload = pack_message(opp)
         self.pub.send_multipart([topic, payload], flags=zmq.NOBLOCK)
+        print(
+            f"[RMS_SERVICE] Published {opp.opp_id} ({alert.symbol} {alert.direction} @ {alert.trigger_price:.2f}) "
+            f"-> strikes={list(strikes.keys())}",
+            flush=True,
+        )
         return opp
 
     def start(self) -> None:
         """Run RMS subscriber loop."""
         self.running = True
-        print(f"[RMS_SERVICE] Active | SUB: {self.alerts_ipc} | PUB: {self.rms_pub_ipc}")
+        print(f"[RMS_SERVICE] Active | SUB: {self.alerts_ipc} | PUB: {self.rms_pub_ipc}", flush=True)
 
         poller = zmq.Poller()
         poller.register(self.sub, zmq.POLLIN)

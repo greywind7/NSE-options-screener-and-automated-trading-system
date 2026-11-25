@@ -39,6 +39,7 @@ class TestRMSService(unittest.TestCase):
             quotes_router_ipc=self.quotes_router_ipc,
             max_daily_loss=10000.0,
             universe_csv="data/filtered.csv",
+            default_expiry_tag="26NOV",
             ctx=self.ctx,
         )
 
@@ -175,6 +176,18 @@ class TestRMSService(unittest.TestCase):
         self.assertEqual(resolved["ITM2"]["strike"], 3400.0)
         self.assertEqual(resolved["OTM1"]["strike"], 3550.0)
         self.assertEqual(resolved["OTM2"]["strike"], 3600.0)
+
+    def test_dynamic_expiry_tag_and_config_spread_gate(self):
+        from datetime import date
+        from core.rms.rms_service import get_current_expiry_tag
+
+        self.assertEqual(get_current_expiry_tag(date(2026, 11, 25)), "26NOV")
+        self.assertEqual(get_current_expiry_tag(date(2026, 11, 26)), "26NOV")
+        self.assertEqual(get_current_expiry_tag(date(2026, 11, 27)), "03DEC")
+        self.assertIn("max_spread_pct", self.rms.spread_gate)
+        self.assertIn("min_spread_abs", self.rms.spread_gate)
+        self.assertGreater(self.rms.spread_gate["max_spread_pct"], 0.0)
+        self.assertGreater(self.rms.spread_gate["min_spread_abs"], 0.0)
 
 
 if __name__ == "__main__":
