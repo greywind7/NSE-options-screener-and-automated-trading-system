@@ -1,9 +1,13 @@
 """
 Dynamic Track Construction Factory.
-Builds strategy tracks from configuration-driven 'enabled_tracks' schema.
+
+Builds and instantiates strategy execution tracks from configuration-driven schemas.
 Supports:
-- Base tracks with explicit strike modes (e.g. fast_momentum_ATM, fast_momentum_ITM)
-- Composite tracks with sub-track compositions and shared vs equal-share pools.
+- Track profile configuration loading from `config/tracks/{profile}.json` or direct paths.
+  Presets: 'default', 'v1', 'v2', or user-defined JSON files.
+- Standalone Base Tracks with explicit moneyness modes (e.g. fast_momentum_ATM, delta_scalp_ITM1).
+- Composite Tracks with sub-track compositions and shared vs equal-share capital pools.
+- Full registry of v1 baseline tracks and v2 multi-regime tracks (12 total archetypes).
 """
 import json
 import os
@@ -382,8 +386,19 @@ def create_tracks(
     track_profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Construct track instances based on configuration and optional track_filter.
-    Returns: Dict[str, Union[BaseTrack, CompositeTrack]] mapping track_name -> instance.
+    Construct and wire track instances based on configuration, selected profile, and filters.
+
+    Args:
+        context: ExecutionContext (Paper, Delayed, Live, or Headless Sim).
+        track_filter: Optional subset of track names to instantiate. If single token matches a
+                      profile preset ('v1', 'v2', 'default'), it switches profile accordingly.
+        strategy_cfg: Optional dictionary overriding strategy configuration.
+        entry_freeze_time: Optional 'HH:MM' cutoff time for new entries.
+        eod_squareoff_time: Optional 'HH:MM' auto-exit time for open trades.
+        track_profile: Specific profile name ('default', 'v1', 'v2') or JSON filepath.
+
+    Returns:
+        Dict[str, Union[BaseTrack, CompositeTrack]] mapping effective track_name -> instance.
     """
     eff_profile = track_profile
     if track_filter and len(track_filter) == 1:

@@ -67,7 +67,7 @@ flowchart TD
     subgraph StorageAndIPC ["Platform State & Storage Tier"]
         ZMQ_Opt["ZeroMQ: feed_options.ipc / quotes_stream.ipc"]
         SHM[("POSIX Shared Memory: shm_ohlc_221 (777 KB)")]
-        DiskJournals[("Trade Journals:<br/>recordings/YYYYMMDD/trade_journal_*.csv")]
+        DiskJournals[("Trade Journals:<br/>recordings/YYYYMMDD/journal_*.jsonl")]
         DiskParquet[("Lossless Parquet Ticks:<br/>recordings/YYYYMMDD/*.parquet")]
         AlertsLog[("Alerts Log:<br/>logs/alerts_*.jsonl")]
         

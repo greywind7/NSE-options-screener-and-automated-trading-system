@@ -32,6 +32,19 @@ def _parse_time_to_minutes(time_val: Any, default_minutes: int) -> int:
 
 
 class BaseTrack(ABC):
+    """
+    Abstract Base Execution Track.
+    
+    Encapsulates lifecycle, risk gates, position tracking, capital budgeting,
+    and exit rule evaluation for a specific strategy archetype.
+    
+    Core Architectural Invariants:
+    1. Capital Availability: Allocations are bound by allocated capital + realized PnL - committed capital.
+    2. Strict Ask-based Entry: Targets and Stop-Losses are strictly computed off entry Ask price.
+    3. Stop-Loss Solvency: At entry, market bid must strictly exceed stop-loss price.
+    4. Zero Price Fabrication: All exits execute strictly at genuine prevailing bid; no LTP/entry_price fallbacks.
+    5. Breakeven Ratchet: Once profit reaches breakeven_trigger_pct (default 2.5%), stop loss is moved to entry price.
+    """
     def __init__(
         self,
         track_name: str,
@@ -47,6 +60,22 @@ class BaseTrack(ABC):
         eod_squareoff_time: Optional[str] = None,
         **kwargs,
     ):
+        """
+        Initialize base track parameters.
+
+        Args:
+            track_name: Identifier for this execution track (e.g. 'fast_momentum_ATM').
+            context: Superstructure ExecutionContext providing order routing and quote subscriptions.
+            target_pct: Take-profit target as a fraction of entry ask (e.g. 0.08 = 8%).
+            sl_pct: Stop-loss threshold as a fraction of entry ask (e.g. 0.05 = 5%).
+            breakeven_trigger_pct: Profit threshold to ratchet SL to entry price (default 0.025 = 2.5%).
+            max_trades: Optional trade count cap (legacy; superseded by capital budgeting).
+            preferred_mode: Preferred option strike moneyness ('ATM', 'ITM1', 'ITM2', 'OTM1', 'OTM2').
+            parent_track: Name of parent composite track if nested.
+            allocated_capital: Total capital earmarked for this track (default ₹250,000.00).
+            entry_freeze_time: Time string 'HH:MM' (IST) after which new entries are blocked (default 15:00).
+            eod_squareoff_time: Time string 'HH:MM' (IST) to force-close open positions (default 15:15).
+        """
         self.track_name = track_name
         self.context = context
         self.target_pct = target_pct
@@ -81,12 +110,14 @@ class BaseTrack(ABC):
 
     @property
     def available_capital(self) -> float:
+        """Calculate uncommitted liquid capital available for new trade positions."""
         if self.parent_composite is not None:
             return self.parent_composite.available_capital
         net_worth = self.allocated_capital + self.realized_pnl
         return max(0.0, net_worth - self.committed_capital)
 
     def can_allocate(self, required_capital: float) -> bool:
+        """Check if sufficient capital exists to enter a trade requiring `required_capital`."""
         if self.parent_composite is not None:
             return self.parent_composite.can_allocate(required_capital)
         if required_capital <= 0.0:
@@ -94,12 +125,14 @@ class BaseTrack(ABC):
         return self.available_capital >= required_capital
 
     def commit_capital(self, required_capital: float) -> None:
+        """Lock capital when submitting an entry order."""
         if self.parent_composite is not None:
             self.parent_composite.commit_capital(required_capital)
         else:
             self.committed_capital += required_capital
 
     def release_capital(self, required_capital: float, pnl: float = 0.0) -> None:
+        """Release locked capital upon trade exit and realize PnL."""
         if self.parent_composite is not None:
             self.parent_composite.release_capital(required_capital, pnl)
         else:
@@ -131,7 +164,25 @@ class BaseTrack(ABC):
         pass
 
     def on_opportunity(self, opp: ActionableOpportunity) -> Optional[TradeState]:
-        """Handle incoming setup opportunity and initiate entry order."""
+        """
+        Evaluate an incoming setup opportunity against pre-trade risk gates and initiate entry.
+
+        Lifecycle:
+        1. Pre-Trade Gate 1a: Context freeze check (circuit breaker / kill-switch).
+        2. Pre-Trade Gate 1b: Time-of-day freeze cutoff (default 15:00 IST).
+        3. Strike Selection: Maps preferred moneyness (ATM, ITM1, ITM2, OTM1, OTM2) to contract depth.
+        4. Pre-Trade Gate 2: Capital availability check (prevents overleveraging beyond allocated capital).
+        5. Invariant #2: Strict Ask-based entry, target, and stop-loss computations.
+        6. Pre-Trade Gate 3: Stop-loss solvency (bid must strictly exceed stop-loss price).
+        7. State Registration: Commits capital, initializes TradeState, subscribes to depth streaming.
+        8. Order Submission: Dispatches OrderRequest to ExecutionContext.
+
+        Args:
+            opp: ActionableOpportunity emitted by RMS with validated option depth and pattern metadata.
+
+        Returns:
+            Instantiated TradeState if entry order submitted; None if blocked by risk gates.
+        """
         # Risk Gate 1a: Check in-memory freeze flag
         if self.context.is_frozen():
             return None

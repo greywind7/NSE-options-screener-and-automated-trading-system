@@ -118,8 +118,23 @@ class RMSService:
 
     def resolve_strikes(self, symbol: str, direction: str, trigger_price: float) -> Dict[str, Any]:
         """
-        Compute ATM, ITM1, OTM1 strikes and query QuotesBroker for depth.
+        Compute ATM, ITM1, ITM2, OTM1, OTM2 strikes and query QuotesBroker for depth.
         Enforces hybrid tick spread gate (Gap 1 / HIGH-004): (ask - bid) <= max(0.50, 0.03 * ask).
+
+        Parameters:
+            symbol: Trading symbol of the underlying equity (e.g. "RELIANCE", "TCS").
+            direction: Breakout direction ("BULL" or "BEAR").
+            trigger_price: Prevailing price of the underlying equity when breakout alerted.
+
+        Returns:
+            Dictionary of resolved strikes mapped by moneyness role ('ATM', 'ITM1', 'ITM2',
+            'OTM1', 'OTM2', plus backward-compatible 'ITM', 'OTM'). Each value contains genuine
+            market depth (bid, ask, ltp, bid_qty, ask_qty, lot_size, token).
+            Returns empty dict if no liquid strikes satisfy the spread gate.
+
+        Architectural Invariant:
+            Zero made-up or synthetic quotes. If QuotesBroker lacks a quote or the bid/ask spread
+            fails the liquidity gate, the strike is rejected immediately.
         """
         opt_type = "CE" if direction.upper() == "BULL" else "PE"
         lot_size = self.lot_sizes.get(symbol.upper(), 1)
@@ -136,12 +151,18 @@ class RMSService:
                 return {}
             if opt_type == "CE":
                 itm_idx = max(0, atm_idx - 1)
+                itm2_idx = max(0, atm_idx - 2)
                 otm_idx = min(len(avail_strikes) - 1, atm_idx + 1)
+                otm2_idx = min(len(avail_strikes) - 1, atm_idx + 2)
             else:
                 itm_idx = min(len(avail_strikes) - 1, atm_idx + 1)
+                itm2_idx = min(len(avail_strikes) - 1, atm_idx + 2)
                 otm_idx = max(0, atm_idx - 1)
+                otm2_idx = max(0, atm_idx - 2)
             itm_strike = avail_strikes[itm_idx]
+            itm2_strike = avail_strikes[itm2_idx]
             otm_strike = avail_strikes[otm_idx]
+            otm2_strike = avail_strikes[otm2_idx]
         else:
             step = get_strike_step(trigger_price)
             atm_strike = round(trigger_price / step) * step

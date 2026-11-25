@@ -1,9 +1,9 @@
-#  witSystem Architecture Specification 2.0: High-Throughput Distributed Options Trading Engine
+# System Architecture Specification 2.0: High-Throughput Distributed Options Trading Engine
 
 > **Document Type**: Comprehensive Architectural Blueprint & Specification  
 > **Version**: 2.0 (Distributed Multi-Process, ZeroMQ IPC, Shared Memory, Quotes Broker)  
 > **Status**: Finalized Design Specification  
-> **Historical Reference**: Previous brainstorming and legacy audit documents are archived in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive). Active code audit is in [`SELF_AUDIT.md`](file:///Users/yorha/Documents/Trading%20Stuff/SELF_AUDIT.md).
+> **Historical Reference**: Previous brainstorming and legacy audit documents are archived in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive). Active code audit is in [`AUDIT_TODO.md`](file:///Users/yorha/Documents/Trading%20Stuff/AUDIT_TODO.md).
 
 ---
 
@@ -15,8 +15,9 @@ Processes communicate over ultra-fast **ZeroMQ IPC sockets** and read from **loc
 
 ```mermaid
 flowchart TD
-    subgraph Ingestion ["Market Ingestion Tier (Upstox API v2/v3)"]
-        FeedWS["Upstox WebSocket Feed"] --> FeedHandler["Feed Listener Process"]
+    subgraph Ingestion ["Market Ingestion Tier (Upstox API v3 Dual WebSocket)"]
+        FeedWS_1["Upstox WS Conn 0 (Shard 0: ~107 Underlyings)"] --> FeedHandler["FeedHandler Process (Dual-Connection)"]
+        FeedWS_2["Upstox WS Conn 1 (Shard 1: ~108 Underlyings)"] --> FeedHandler
         FeedHandler -->|ZMQ PUB: Equity Ticks| SocketEq["ipc:///tmp/feed_equity.ipc"]
         FeedHandler -->|ZMQ PUB: Option Ticks| SocketOpt["ipc:///tmp/feed_options.ipc"]
         
@@ -34,13 +35,13 @@ flowchart TD
     end
 
     subgraph AlphaPipe ["Alpha & Gatekeeping Pipeline"]
-        ShmCandles -.->|"Lock-Free Busy-Spin Loop: < 2 us"| Scoring["Scoring / Pattern Engine Process"]
+        ShmCandles -.->|"Lock-Free Busy-Spin Loop: < 2 us"| Scoring["Scoring Engine 3.0 Process"]
         
-        Scoring -->|ZMQ PUB: Setup Alerts| SocketAlerts["ipc:///tmp/alerts_breakout.ipc"]
+        Scoring -->|ZMQ PUB: Setup Alerts (pole/flag/clv)| SocketAlerts["ipc:///tmp/scoring_alerts_pub.ipc"]
         SocketAlerts --> RMS["RMS & Option Resolver Process"]
         
         RMS <-->|ZMQ REQ/REP: Snapshot Spread| QuotesBroker
-        RMS -->|ZMQ PUB: Approved Trade Packets| SocketTrades["ipc:///tmp/approved_trades.ipc"]
+        RMS -->|ZMQ PUB: Actionable Opportunities| SocketTrades["ipc:///tmp/rms_strike_pub.ipc"]
     end
 
     subgraph ExecSuper ["Execution Superstructures (Concurrent Independent OS Processes)"]
@@ -51,11 +52,11 @@ flowchart TD
         SocketStream -->|Heartbeat & Active Ticks| SuperDelayed
         SocketStream -->|Active Position Ticks| SuperLive
         SuperLive --> GrowwAPI["Groww Live Broker SDK (growwapi)"]
-        SuperDelayed --> DelayedLedger["Delayed Trade Journal (CSV)"]
-        SuperPaper --> PaperLedger["Paper Trade Journal (CSV)"]
-        SuperLive --> LiveLedger["Live Trade Journal (CSV)"]
+        SuperDelayed --> DelayedLedger["Delayed Trade Journal (JSONL)"]
+        SuperPaper --> PaperLedger["Paper Trade Journal (JSONL)"]
+        SuperLive --> LiveLedger["Live Trade Journal (JSONL)"]
         
-        SuperLive -.->|Imports| CommonTracks["Shared Tracks: Core & Composite"]
+        SuperLive -.->|Imports| CommonTracks["Execution Tracks: v1 Baseline & v2 Multi-Regime"]
         SuperPaper -.->|Imports| CommonTracks
         SuperDelayed -.->|Imports| CommonTracks
     end
@@ -398,55 +399,105 @@ sequenceDiagram
 
 ## 5. Data Structures & Shared Memory Schemas
 
-### 5.1 Candle Shared Memory Struct (`infrastructure/schemas.py`)
+### 5.1 Candle Shared Memory Struct (`core/candles/shm_layout.py`)
 ```python
 import numpy as np
 
-# Fixed 48-byte struct per candle
-CANDLE_DTYPE = np.dtype([
-    ('timestamp', '<f8'),       # 8 bytes: Unix timestamp
-    ('open', '<f4'),            # 4 bytes: Open price
-    ('high', '<f4'),            # 4 bytes: High price
-    ('low', '<f4'),             # 4 bytes: Low price
-    ('close', '<f4'),           # 4 bytes: Close price
-    ('volume', '<u8'),          # 8 bytes: Volume traded
-    ('vwap', '<f4'),            # 4 bytes: Volume Weighted Average Price
-    ('atr', '<f4'),             # 4 bytes: Average True Range (14)
-    ('rvol', '<f4'),            # 4 bytes: Relative Volume Multiple
-    ('range_compression', '<f4')# 4 bytes: High-Low range / VWAP
-])
+# Exact 48-byte struct layout adhering to LOW_LEVEL_DESIGN_2_0 (§3.1) and core/candles/shm_layout.py
+CANDLE_DTYPE = np.dtype(
+    [
+        ("timestamp", "<i8"),       # 8 bytes: Unix timestamp in seconds (int64)
+        ("open", "<f4"),            # 4 bytes: Open price (float32)
+        ("high", "<f4"),            # 4 bytes: High price (float32)
+        ("low", "<f4"),             # 4 bytes: Low price (float32)
+        ("close", "<f4"),           # 4 bytes: Close / Current LTP (float32)
+        ("volume", "<u8"),          # 8 bytes: Cumulative bar volume (uint64)
+        ("rvol", "<f4"),            # 4 bytes: Strict Current Candle rVOL (float32)
+        ("atr", "<f4"),             # 4 bytes: 14-period Average True Range (float32)
+        ("is_closed", "?"),         # 1 byte:  Boolean flag (True if bar finished, False if active)
+        ("reserved", "<u1", (7,)),  # 7 bytes: Explicit padding to align struct to 48 bytes
+    ],
+    align=False,
+)
+
+# Seqlock synchronization header: 16 bytes per symbol
+SEQLOCK_DTYPE = np.dtype(
+    [
+        ("sequence_id", "<u8"),     # 8 bytes: monotonically increasing counter (odd = updating)
+        ("last_update_ns", "<i8"),  # 8 bytes: nanosecond timestamp of last tick
+    ],
+    align=False,
+)
 ```
 
-### 5.2 Approved Trade Packet Schema (ZeroMQ Payload)
+> [!NOTE]
+> **OS Residence & L2 Cache Note**: The 777 KB shared memory segment (`221 symbols × 75 bars × 48 bytes = 795,600 bytes`) resides in CPU L2 cache for microsecond reads when run with POSIX shared memory (`FORCE_POSIX_SHM=1` on Linux `/dev/shm`). On macOS, the platform seamlessly uses a high-speed memory-mapped file fallback in `/tmp/shm_ohlc_221.shm`.
+
+### 5.2 Actionable Opportunity Schema (ZeroMQ Payload on `rms_strike_pub.ipc`)
 ```json
 {
-  "packet_id": "trade_20261115_094625_001",
+  "opp_id": "OPP_BOSCHLTD_1700000785120",
+  "alert_id": "ALERT_BOSCHLTD_1700000785000",
   "symbol": "BOSCHLTD",
   "direction": "BEAR",
   "trigger_price": 49200.0,
-  "trigger_timestamp": 1700000785.12,
+  "timestamp": 1700000785.12,
+  "archetype": "FLAG_BEAR_BREAKOUT",
+  "pole_high": 49800.0,
+  "pole_low": 49100.0,
+  "flag_high": 49500.0,
+  "flag_low": 49200.0,
+  "atr": 450.0,
+  "rvol": 2.85,
+  "clv": 0.82,
   "strikes": {
     "ATM": {
-      "contract_key": "NSE_FO:BOSCHLTD24NOV49200PE",
+      "token": "NSE_FO:BOSCHLTD26NOV49200PE",
+      "strike": 49200.0,
+      "option_type": "PE",
       "lot_size": 25,
-      "freeze_qty": 250,
-      "snapshot_bid": 980.0,
-      "snapshot_ask": 982.5,
-      "spread_pct": 0.25
+      "bid": 980.0,
+      "ask": 982.5,
+      "ltp": 981.0,
+      "bid_qty": 250,
+      "ask_qty": 250
     },
     "ITM1": {
-      "contract_key": "NSE_FO:BOSCHLTD24NOV49500PE",
+      "token": "NSE_FO:BOSCHLTD26NOV49500PE",
+      "strike": 49500.0,
+      "option_type": "PE",
       "lot_size": 25,
-      "freeze_qty": 250,
-      "snapshot_bid": 1042.0,
-      "snapshot_ask": 1044.2,
-      "spread_pct": 0.21
+      "bid": 1042.0,
+      "ask": 1044.2,
+      "ltp": 1043.0
+    },
+    "ITM2": {
+      "token": "NSE_FO:BOSCHLTD26NOV49800PE",
+      "strike": 49800.0,
+      "option_type": "PE",
+      "lot_size": 25,
+      "bid": 1110.0,
+      "ask": 1113.0,
+      "ltp": 1111.5
+    },
+    "OTM1": {
+      "token": "NSE_FO:BOSCHLTD26NOV48900PE",
+      "strike": 48900.0,
+      "option_type": "PE",
+      "lot_size": 25,
+      "bid": 920.0,
+      "ask": 922.5,
+      "ltp": 921.0
+    },
+    "OTM2": {
+      "token": "NSE_FO:BOSCHLTD26NOV48600PE",
+      "strike": 48600.0,
+      "option_type": "PE",
+      "lot_size": 25,
+      "bid": 860.0,
+      "ask": 863.0,
+      "ltp": 861.5
     }
-  },
-  "risk_metadata": {
-    "target_pct": 0.15,
-    "stop_loss_pct": 0.10,
-    "max_slippage_pct": 0.035
   }
 }
 ```
@@ -478,7 +529,7 @@ CANDLE_DTYPE = np.dtype([
 ### 6.3 Process Failure, Auto-Recovery & Mid-Day Continue (`--continue`)
 * Each process is managed by a lightweight supervisor (systemd / supervisord / launchd).
 * **State Recovery Protocol (`runner.py start/strat --continue`)**:
-  - When restarted mid-day, Superstructures scan today's trade journals in `recordings/YYYYMMDD/trade_journal_<mode>.csv`.
+  - When restarted mid-day, Superstructures scan today's trade journals in `recordings/YYYYMMDD/journal_<mode>.jsonl`.
   - Open positions are reconstituted with their original entry prices, targets, trailing stops, and timestamps.
   - Superstructures immediately issue `subscribe_quotes(recovered_tokens)` to `QuotesBroker` using their isolated `client_id`.
   - Prevailing snapshot quotes are returned to seed active trade states (`current_bid`, `highest_price`) before market streaming begins.

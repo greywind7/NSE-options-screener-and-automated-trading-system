@@ -15,8 +15,9 @@ The system transitions from a single-threaded synchronous monolith into a distri
 
 ```mermaid
 flowchart TD
-    subgraph Market Ingestion Tier ["Market Ingestion Tier (Upstox API v2/v3)"]
-        FeedWS["Upstox WebSocket Feed"] --> FeedHandler["FeedHandler Process"]
+    subgraph Market Ingestion Tier ["Market Ingestion Tier (Upstox API v3 Dual WebSocket)"]
+        FeedWS_1["Upstox WS Conn 0 (Shard 0: ~107 Underlyings)"] --> FeedHandler["FeedHandler Process (Dual-Connection)"]
+        FeedWS_2["Upstox WS Conn 1 (Shard 1: ~108 Underlyings)"] --> FeedHandler
         FeedHandler -->|PUB: feed_equity.ipc| ZMQ_EQ[("ZeroMQ Equity Stream")]
         FeedHandler -->|PUB: feed_options.ipc| ZMQ_OPT[("ZeroMQ Options Stream")]
         
@@ -49,9 +50,9 @@ flowchart TD
         
         ZMQ_QUOTES --> SuperLive & SuperPaper & SuperDelayed
         SuperLive --> GrowwSDK["Groww Live Broker SDK (growwapi)"]
-        SuperDelayed --> DelayedLog["Delayed Trade Journal (CSV)"]
-        SuperPaper --> PaperLog["Paper Trade Journal (CSV)"]
-        SuperLive --> LiveLog["Live Trade Journal (CSV)"]
+        SuperDelayed --> DelayedLog["Delayed Trade Journal (JSONL)"]
+        SuperPaper --> PaperLog["Paper Trade Journal (JSONL)"]
+        SuperLive --> LiveLog["Live Trade Journal (JSONL)"]
     end
 
     subgraph Universal Monitoring Tier ["Universal Monitoring & Web Tier"]
@@ -393,13 +394,20 @@ All inter-process messages utilize MessagePack (`msgpack`) for sub-microsecond b
 - **Objective**: Multi-source market data ingestion engine (Upstox WebSocket v3 Protobuf, high-speed REST poller failover, and Mock engine) with strict separation of Cash Equities and Derivatives Options onto two physically distinct ZeroMQ IPC sockets:
   - `feed_equity_ipc` (`ipc:///tmp/feed_equity.ipc`): Broadcasts `TICK.EQ` (consumed exclusively by `CandleManager` and `MarketRecorder`).
   - `feed_options_ipc` (`ipc:///tmp/feed_options.ipc`): Broadcasts `TICK.OPT` (consumed exclusively by `QuotesBroker` and `MarketRecorder`).
+- **Dual WebSocket Partitioning & Deterministic Sharding**:
+  - Upstox API v3 enforces a hard limit of **2,000 keys per WebSocket connection**.
+  - `FeedHandler` runs `num_connections=2` parallel WebSocket connections:
+    - Symbols are partitioned using deterministic consistent hashing: `zlib.crc32(symbol.encode("utf-8")) % num_connections`.
+    - `NIFTY` and `NIFTY 50` are pinned to Connection 0.
+    - Result: Exactly 107 underlyings on Connection 0 and 108 on Connection 1. Total streamed keys across all 221 underlyings is **3,224 keys** (~1,612 per connection), staying well under the 1,800 configured limit and 2,000 Upstox ceiling.
 - **Dynamic Strike Subscription & Capacity Management**:
-  - Upstox imposes an account limit of **5,000 streamed instruments**. With 221 F&O equities and 35,000+ option strikes, streaming every strike simultaneously is physically impossible.
   - `FeedHandler` maintains a dynamic **Popular Options Window**:
     - Evaluates ATM strike on underlying price updates: $K_{\text{atm}} = \arg\min_K |K - \text{LTP}|$.
     - Subscribes to ATM $\pm 3$ strikes (7 strikes total: 7 CE + 7 PE = 14 contracts per stock).
     - Hysteresis Retention Window: ATM $\pm 4$ strikes (prevents unneeded sub/unsub oscillations when price fluctuates around strike edges).
-    - Capacity Ceiling (`max_stream_contracts` = 1,800): Enforces a hard budget (215 equities + ~1,500 active options), auto-pruning unheld dynamic options when capacity is reached.
+    - Capacity Ceiling (`max_stream_contracts` = 1,800 per connection): Auto-prunes unheld dynamic options when capacity is reached, and cleanly discards pruned keys across all symbol sets in `conn.active_options_by_symbol`.
+- **Zero Synthetic Quotes / Price Integrity Invariant**:
+  - For option contracts (`is_option_contract`), if market depth has no bids or asks, `FeedHandler` emits `bid = 0.0, ask = 0.0`. It NEVER defaults missing bids or asks to LTP or entry price.
 - **Critical Active Position Protection Guard**:
   - Queries `ProtectedPositionRegistry.get_instance().get_protected_keys()`.
   - Any contract key associated with an open position in ANY execution mode (`live`, `paper`, `paper_delayed`, `sim`) or track is **unconditionally protected**:
@@ -407,7 +415,7 @@ All inter-process messages utilize MessagePack (`msgpack`) for sub-microsecond b
     $$\text{keys\_to\_add} = \text{keys\_to\_add} \cup (\text{protected\_keys} \cap \text{all\_options\_for\_symbol})$$
   - Open positions are NEVER unsubscribed until the trade exits and position registry clears.
 - **Depth Preservation**:
-  - Full 5-level market depth arrays (`bids: [[p, q, o], ...]`, `asks: [[p, q, o], ...]`) are extracted from Protobuf `MarketLevel` and serialized in `TickEvent` for archival and simulation parity.
+  - Full 5-level market depth arrays (`bids: [[p, q, o], ...]`, `asks: [[p, q, o], ...]`) are extracted from Protobuf `MarketLevel` and serialized in `OptionDepthTickEvent` for archival and simulation parity.
 
 ```python
 class FeedHandler:
@@ -1003,7 +1011,7 @@ To prevent any regression against the verified baseline code while maintaining c
    - **Time Created & Time Elapsed Tabs**: Displays the wall-clock trigger time and a live dynamic elapsed-time counter ($T_{\text{now}} - T_{\text{trigger}}$) with visual color gradation (Green $< 30\text{s}$, Yellow $< 60\text{s}$, Dim $> 120\text{s}$).
    - **Available Strikes Grid**: Lists the resolved ITM, ATM, and OTM strike tokens, bid/ask prices, and current spreads verified by RMS.
 2. **Strategy Trade Journal Watcher**:
-   - Watches `recordings/<session_date>/trade_journal_<mode>.csv` across all active modes (`paper`, `delayed`, `live`).
+   - Watches `recordings/<session_date>/journal_<mode>.jsonl` across all active modes (`paper`, `delayed`, `live`).
    - Aggregates position status, realized P&L, unrealized P&L, win rate, and realized slippage against $P_{\text{trigger}}$.
    - Refreshes at 2 Hz without touching IPC sockets or trading shared memory.
 
@@ -1282,7 +1290,7 @@ tests/
 │   ├── test_paper_delayed.py          # Event-driven timestamp queue, cached quote fills (CRIT-007)
 │   ├── test_live_adapter.py           # Groww TOTP, 401 auto-freeze, resting SL, 25-mod limit, reconciliation
 │   ├── test_freeze_mode.py            # In-memory atomic IPC toggle, zero disk polling (Gap 5)
-│   └── test_trade_journal.py          # Single-owner CSV logging, zero duplicate records (Gap 3)
+│   └── test_trade_journal.py          # Single-owner JSONL logging, zero duplicate records (Gap 3)
 ├── common/
 │   ├── test_tracks.py                 # BaseTrack lifecycle, FastMomentum, TrendPullback
 │   ├── test_composite_track.py        # Capital sharing, dynamic trio re-weighting without math bypass (Gap 6)

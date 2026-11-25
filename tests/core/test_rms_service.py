@@ -134,6 +134,48 @@ class TestRMSService(unittest.TestCase):
         self.assertTrue(mgr.is_circuit_breaker_tripped())
         self.assertFalse(mgr.can_allocate(10000.0))
 
+    def test_options_map_moneyness_resolution_itm2_otm2(self):
+        """Verify RMS resolves ATM, ITM1, ITM2, OTM1, OTM2 from options_map without UnboundLocalError."""
+        self.rms.options_map["TCS"] = {
+            "strikes": {
+                "3400.0": {"CE": "NSE_FO|TCS3400CE", "PE": "NSE_FO|TCS3400PE"},
+                "3450.0": {"CE": "NSE_FO|TCS3450CE", "PE": "NSE_FO|TCS3450PE"},
+                "3500.0": {"CE": "NSE_FO|TCS3500CE", "PE": "NSE_FO|TCS3500PE"},
+                "3550.0": {"CE": "NSE_FO|TCS3550CE", "PE": "NSE_FO|TCS3550PE"},
+                "3600.0": {"CE": "NSE_FO|TCS3600CE", "PE": "NSE_FO|TCS3600PE"},
+            }
+        }
+        # Inject quotes into broker for all 5 strikes
+        for s_val, tok in [
+            (3400.0, "NSE:TCS3400CE"),
+            (3450.0, "NSE:TCS3450CE"),
+            (3500.0, "NSE:TCS3500CE"),
+            (3550.0, "NSE:TCS3550CE"),
+            (3600.0, "NSE:TCS3600CE"),
+        ]:
+            self.broker.on_tick({
+                "token": tok,
+                "symbol": "TCS",
+                "ltp": 50.0,
+                "bid": 49.8,
+                "ask": 50.2,
+                "bid_qty": 100,
+                "ask_qty": 100,
+            })
+
+        # Trigger at 3500.0 (BULL CE): ATM=3500, ITM1=3450, ITM2=3400, OTM1=3550, OTM2=3600
+        resolved = self.rms.resolve_strikes("TCS", "BULL", 3500.0)
+        self.assertIn("ATM", resolved)
+        self.assertIn("ITM1", resolved)
+        self.assertIn("ITM2", resolved)
+        self.assertIn("OTM1", resolved)
+        self.assertIn("OTM2", resolved)
+        self.assertEqual(resolved["ATM"]["strike"], 3500.0)
+        self.assertEqual(resolved["ITM1"]["strike"], 3450.0)
+        self.assertEqual(resolved["ITM2"]["strike"], 3400.0)
+        self.assertEqual(resolved["OTM1"]["strike"], 3550.0)
+        self.assertEqual(resolved["OTM2"]["strike"], 3600.0)
+
 
 if __name__ == "__main__":
     unittest.main()

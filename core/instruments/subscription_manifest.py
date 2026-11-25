@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-infrastructure/instruments/subscription_manifest.py
-===================================================
+core/instruments/subscription_manifest.py
+=========================================
 Generates the comprehensive multi-stream subscription manifest for:
-1. Real-time WebSocket streaming:
-   - All ~213 F&O underlying equities (NSE_EQ|INE...).
+1. Real-time Dual WebSocket streaming:
+   - All ~215 F&O underlying equities (NSE_EQ|INE...) + NIFTY 50 index.
    - Popular option strikes: 3 strikes above and 3 strikes below ATM for CE & PE
      on the nearest expiry (~14 contracts per stock).
+   - Capacity Budget: 215 stocks * 14 contracts = 3,010 options + 215 equities = 3,225 keys.
+     Sharded 50/50 across dual Upstox WebSockets (~1,612 keys/conn, well below 2,000 limit).
 2. Periodic background REST polling:
-   - All remaining strikes across the option chain for raw session coagulated recording.
+   - All remaining strikes across the option chain (~27,800+ contracts) partitioned
+     into 400-key batches for session archival and historical depth analysis.
 """
 
 from __future__ import annotations

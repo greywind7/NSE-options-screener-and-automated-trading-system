@@ -168,11 +168,11 @@ class TestPreMarketPipeline(unittest.TestCase):
         self.assertIn(crude["upstox_instrument_key"], ("MCX_FO|573422", "MCX_FO|576264"))
         self.assertEqual(int(crude["lot_size"]), 100)
 
-        # NATURALGAS: Flagship 1250-mmBtu benchmark (574319) over NATGASMINI
+        # NATURALGAS: Flagship 1250-mmBtu benchmark (574319 or 578249) over NATGASMINI
         natgas = rows_by_name.get("NATURALGAS")
         self.assertIsNotNone(natgas)
-        self.assertEqual(natgas["trading_symbol"], "NATURALGAS26NOVFUT")
-        self.assertEqual(natgas["upstox_instrument_key"], "MCX_FO|574319")
+        self.assertIn(natgas["trading_symbol"], ("NATURALGAS26NOVFUT", "NATURALGAS26DECFUT"))
+        self.assertIn(natgas["upstox_instrument_key"], ("MCX_FO|574319", "MCX_FO|578249"))
         self.assertEqual(int(natgas["lot_size"]), 1250)
 
 
