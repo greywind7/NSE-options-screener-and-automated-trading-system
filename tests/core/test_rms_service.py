@@ -23,6 +23,7 @@ class TestRMSService(unittest.TestCase):
         self.broker = QuotesBroker(
             feed_ipc="inproc://dummy_feed",
             router_ipc=self.quotes_router_ipc,
+            stream_ipc="inproc://test_rms_stream",
             heartbeat_ipc=self.hb_ipc,
             ctx=self.ctx,
         )

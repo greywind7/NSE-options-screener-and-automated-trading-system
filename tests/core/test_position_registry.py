@@ -149,10 +149,13 @@ class TestProtectedPositionRegistry(unittest.TestCase):
         ipc_path = os.path.join(self.temp_dir.name, "test_prot.ipc")
         listener = MarketDataListener(
             mode="mock",
+            feed_equity_ipc="inproc://test_posreg_eq1",
+            feed_options_ipc="inproc://test_posreg_opt1",
             ipc_path=ipc_path,
             poll_interval=0.1,
             enable_socket=False,
             debug_log=None,
+            silent=True,
         )
         listener.position_registry = self.registry
 
@@ -275,10 +278,13 @@ class TestProtectedPositionRegistry(unittest.TestCase):
         ipc_path = os.path.join(self.temp_dir.name, "test_cap.ipc")
         listener = MarketDataListener(
             mode="mock",
+            feed_equity_ipc="inproc://test_posreg_eq2",
+            feed_options_ipc="inproc://test_posreg_opt2",
             ipc_path=ipc_path,
             poll_interval=0.1,
             enable_socket=False,
             debug_log=None,
+            silent=True,
             max_stream_contracts=6,  # Small limit for testing
         )
         listener.position_registry = self.registry

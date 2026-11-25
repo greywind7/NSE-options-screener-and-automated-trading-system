@@ -153,3 +153,18 @@ class CompositeTrack:
             if trade.trade_id in st.active_trades:
                 st.exit_trade(trade, exit_price=exit_price, reason=reason, ts=ts)
                 return
+
+    def add_recovered_trade(self, trade: TradeState, is_filled: bool = True) -> None:
+        """Route recovered trade from journal (--continue) into its originating sub-track."""
+        if not self.sub_tracks:
+            return
+        origin = trade.origin_track or (trade.metadata or {}).get("sub_track") or (trade.metadata or {}).get("origin_track")
+        target_st = None
+        if origin:
+            for st in self.sub_tracks:
+                if st.track_name == origin:
+                    target_st = st
+                    break
+        if target_st is None:
+            target_st = self.sub_tracks[0]
+        target_st.add_recovered_trade(trade, is_filled=is_filled)

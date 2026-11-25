@@ -60,6 +60,28 @@ class DelayedSuperstructure(BaseSuperstructure):
         self._order_counter = 0
         self._queue: List[Tuple[float, int, OrderRequest]] = []
 
+        # Re-enqueue any unfilled TRADE_ENTRY_SUBMITTED trades recovered via --continue
+        if getattr(self, "_pending_delayed_recovery", None):
+            now_ts = time.time()
+            for trade in self._pending_delayed_recovery:
+                delay_s = random.uniform(self.min_delay_ms, self.max_delay_ms) / 1000.0
+                release_ts = max(now_ts, float(trade.entry_time or now_ts) + delay_s)
+                req = OrderRequest(
+                    order_id=f"ORD_{trade.trade_id}",
+                    mode=self.mode,
+                    track=trade.track,
+                    instrument_token=trade.token,
+                    symbol=trade.symbol,
+                    transaction_type="BUY",
+                    order_type="MARKET",
+                    quantity=trade.quantity,
+                    price=float(trade.entry_ask or trade.entry_price or 0.0),
+                    trigger_price=0.0,
+                    timestamp=float(trade.entry_time or now_ts),
+                )
+                self._order_counter += 1
+                heapq.heappush(self._queue, (release_ts, self._order_counter, req))
+
     def submit_order(self, request: OrderRequest) -> None:
         """Enqueue order for release after random delay between min_delay_ms and max_delay_ms."""
         delay_sec = random.uniform(self.min_delay_ms, self.max_delay_ms) / 1000.0

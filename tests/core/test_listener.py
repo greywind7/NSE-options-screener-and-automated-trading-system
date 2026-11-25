@@ -324,7 +324,14 @@ class TestFeedHandler(unittest.TestCase):
         self.assertEqual(self.feed.get_connection_for_symbol("NIFTY 50"), 0)
 
         # Create a brand new FeedHandler instance and verify identical shard assignments
-        new_feed = FeedHandler(mode="mock", num_connections=2, silent=True, ctx=self.ctx)
+        new_feed = FeedHandler(
+            mode="mock",
+            feed_equity_ipc="inproc://test_feed_eq2",
+            feed_options_ipc="inproc://test_feed_opt2",
+            num_connections=2,
+            silent=True,
+            ctx=self.ctx,
+        )
         try:
             for s in syms:
                 self.assertEqual(new_feed.get_connection_for_symbol(s), initial_map[s],

@@ -302,7 +302,127 @@ class TestSuperstructures20(unittest.TestCase):
         track = superstructure.tracks["fast_momentum"]
         self.assertIn("RECOVER_TEST_1", track.active_trades)
         self.assertIn("NSE:TCS26NOV4000CE", superstructure._recovered_tokens)
+        self.assertEqual(track.committed_capital, 50.0 * 175)
         superstructure.stop()
+
+    def test_continue_composite_track_and_delayed_recovery(self):
+        from core.common.time_utils import get_market_date_str
+        today_str = get_market_date_str()
+        session_dir = os.path.join(self.test_dir, today_str)
+        os.makedirs(session_dir, exist_ok=True)
+
+        # 1. CompositeTrack recovery: open trade + closed trade
+        comp_journal = os.path.join(session_dir, "journal_paper_composite_shared_ITM.jsonl")
+        closed_evt = {
+            "timestamp": 1000.0,
+            "event": "TRADE_EXIT",
+            "data": {
+                "trade_id": "COMP_CLOSED_1",
+                "symbol": "INFY",
+                "token": "NSE:INFY26NOV1500CE",
+                "option_type": "CE",
+                "strike": 1500.0,
+                "lot_size": 400,
+                "quantity": 400,
+                "entry_price": 40.0,
+                "entry_ask": 40.0,
+                "entry_time": 900.0,
+                "exit_price": 45.0,
+                "exit_time": 1000.0,
+                "exit_reason": "TARGET_HIT",
+                "realized_pnl": 2000.0,
+                "status": "CLOSED",
+                "track": "composite_shared_ITM",
+                "origin_track": "fast_momentum_ITM",
+            },
+        }
+        open_evt = {
+            "timestamp": 1100.0,
+            "event": "TRADE_FILLED",
+            "data": {
+                "trade_id": "COMP_OPEN_1",
+                "symbol": "TCS",
+                "token": "NSE:TCS26NOV3500CE",
+                "option_type": "CE",
+                "strike": 3500.0,
+                "lot_size": 175,
+                "quantity": 175,
+                "entry_price": 100.0,
+                "entry_ask": 100.0,
+                "entry_time": 1100.0,
+                "target_price": 125.0,
+                "stop_loss": 95.0,
+                "status": "OPEN",
+                "track": "composite_shared_ITM",
+                "origin_track": "trend_pullback_ITM",
+            },
+        }
+        with open(comp_journal, "w", encoding="utf-8") as f:
+            f.write(json.dumps(closed_evt) + "\n")
+            f.write(json.dumps(open_evt) + "\n")
+
+        paper_comp = PaperSuperstructure(
+            track_names=["composite_shared_ITM"],
+            rms_ipc="inproc://dummy_rms_comp",
+            feed_ipc="inproc://dummy_feed_comp",
+            hb_ipc="inproc://dummy_hb_comp",
+            quotes_router_ipc="inproc://dummy_quotes_comp",
+            recordings_dir=self.test_dir,
+            ctx=self.ctx,
+            continue_state=True,
+        )
+        comp_track = paper_comp.tracks["composite_shared_ITM"]
+        self.assertIn("COMP_OPEN_1", comp_track.active_trades)
+        self.assertEqual(len(comp_track.closed_trades), 1)
+        self.assertEqual(comp_track.committed_capital, 17500.0)
+        self.assertEqual(comp_track.realized_pnl, 2000.0)
+
+        # Simulate tick below -5% SL (bid = 90.4 <= 95.0) -> must exit via trend_pullback_ITM sub-track
+        paper_comp.on_tick("NSE:TCS26NOV3500CE", ltp=90.5, bid=90.4, ask=90.8, ts=1200.0)
+        self.assertEqual(len(comp_track.active_trades), 0)
+        self.assertEqual(len(comp_track.closed_trades), 2)
+        self.assertEqual(comp_track.committed_capital, 0.0)
+        paper_comp.stop()
+
+        # 2. DelayedSuperstructure recovery of unfilled TRADE_ENTRY_SUBMITTED
+        del_journal = os.path.join(session_dir, "journal_paper_delayed_fast_momentum.jsonl")
+        sub_evt = {
+            "timestamp": 1000.0,
+            "event": "TRADE_ENTRY_SUBMITTED",
+            "data": {
+                "trade_id": "DEL_UNFILLED_1",
+                "symbol": "SBIN",
+                "token": "NSE:SBIN26NOV800CE",
+                "option_type": "CE",
+                "strike": 800.0,
+                "lot_size": 750,
+                "quantity": 750,
+                "entry_price": 20.0,
+                "entry_ask": 20.0,
+                "entry_time": 1000.0,
+                "target_price": 23.0,
+                "stop_loss": 19.0,
+                "status": "OPEN",
+                "track": "fast_momentum",
+            },
+        }
+        with open(del_journal, "w", encoding="utf-8") as f:
+            f.write(json.dumps(sub_evt) + "\n")
+
+        delayed = DelayedSuperstructure(
+            track_names=["fast_momentum"],
+            delay_sec=1.0,
+            rms_ipc="inproc://dummy_rms_del_rec",
+            feed_ipc="inproc://dummy_feed_del_rec",
+            hb_ipc="inproc://dummy_hb_del_rec",
+            quotes_router_ipc="inproc://dummy_quotes_del_rec",
+            recordings_dir=self.test_dir,
+            ctx=self.ctx,
+            continue_state=True,
+        )
+        self.assertEqual(len(delayed._queue), 1)
+        self.assertIn("DEL_UNFILLED_1", delayed.tracks["fast_momentum"].active_trades)
+        delayed.stop()
 
 
 if __name__ == "__main__":

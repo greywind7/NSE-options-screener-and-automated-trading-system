@@ -262,6 +262,9 @@ class BaseTrack(ABC):
                 "entry_reason": entry_reason,
                 "preferred_mode": self.preferred_mode,
                 "required_capital": required_capital,
+                "target_pct": self.target_pct,
+                "sl_pct": self.sl_pct,
+                "underlying_symbol": opp.symbol,
                 "underlying_entry_price": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
                 "trigger_price": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
                 "flag_high": getattr(opp, "flag_high", None),
@@ -364,6 +367,8 @@ class BaseTrack(ABC):
         for trade in trades_to_eval:
             if trade.status != "OPEN":
                 continue
+            if bid <= 0.0:
+                continue
             trade.current_bid = bid
             trade.highest_price = max(trade.highest_price, bid)
 
@@ -401,7 +406,18 @@ class BaseTrack(ABC):
             bid = trade.current_bid if trade.current_bid > 0 else 0.0
             ask = trade.entry_ask
             reason = self.evaluate_exit_rules(trade, bid, bid, ask, ts)
-            if reason in ("STAGNATION_TIMEOUT", "FIXED_STAGNATION_TIMEOUT", "PULLBACK_STAGNATION_TIMEOUT", "MAX_HOLD_TIMEOUT", "PULLBACK_TIMEOUT"):
+            if reason in (
+                "STAGNATION_TIMEOUT",
+                "FIXED_STAGNATION_TIMEOUT",
+                "PULLBACK_STAGNATION_TIMEOUT",
+                "MAX_HOLD_TIMEOUT",
+                "PULLBACK_TIMEOUT",
+                "MORNING_SESSION_CUTOFF",
+                "VELOCITY_TIMEOUT",
+                "DECELERATION_TIMEOUT",
+                "MIDDAY_CONSOLIDATION_TIMEOUT",
+                "TIMEOUT",
+            ):
                 self.exit_trade(trade, exit_price=bid, reason=reason, ts=ts)
 
     def exit_trade(self, trade: TradeState, exit_price: float, reason: str, ts: float) -> None:
@@ -443,6 +459,23 @@ class BaseTrack(ABC):
         self.active_trades.pop(trade.trade_id, None)
         self.closed_trades.append(trade)
 
+    def add_recovered_trade(self, trade: TradeState, is_filled: bool = True) -> None:
+        """Restore a persisted trade from journal recovery (--continue) with capital & pending state."""
+        if trade.status == "OPEN":
+            self.active_trades[trade.trade_id] = trade
+            committed = float(trade.entry_ask or trade.entry_price or 0.0) * int(trade.quantity or 0)
+            if committed > 0.0:
+                self.commit_capital(committed)
+            if not is_filled:
+                self._pending_orders[f"ORD_{trade.trade_id}"] = trade.trade_id
+        else:
+            self.closed_trades.append(trade)
+            pnl = float(trade.realized_pnl or 0.0)
+            if self.parent_composite is not None:
+                self.parent_composite.realized_pnl += pnl
+            else:
+                self.realized_pnl += pnl
+
     def on_order_result(self, result: OrderResult) -> None:
         """Handle order execution confirmation."""
         trade_id = self._pending_orders.pop(result.order_id, None)
@@ -451,9 +484,12 @@ class BaseTrack(ABC):
             if result.status == "FILLED":
                 trade.entry_price = result.fill_price
                 trade.entry_time = result.fill_timestamp
+                trade.highest_price = result.fill_price
+                t_pct = float(trade.metadata.get("target_pct", self.target_pct))
+                s_pct = float(trade.metadata.get("sl_pct", self.sl_pct))
                 # Re-calculate target and SL strictly using executable Ask / fill
-                trade.target_price = result.fill_price * (1.0 + self.target_pct)
-                trade.stop_loss = result.fill_price * (1.0 - self.sl_pct)
+                trade.target_price = result.fill_price * (1.0 + t_pct)
+                trade.stop_loss = result.fill_price * (1.0 - s_pct)
                 self.context.record_trade_event("TRADE_FILLED", trade.to_dict())
             elif result.status == "REJECTED":
                 trade.status = "REJECTED"

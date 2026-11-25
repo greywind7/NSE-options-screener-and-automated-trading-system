@@ -11,11 +11,13 @@ A full-codebase, line-by-line audit was conducted across all tiers: Ingestion (`
 
 ### Key Takeaways
 1. **Verified Fixed from Previous Audit (`SYSTEM_AUDIT.md` / `AUDIT_TODO.md`)**:
-   - Feed Manager dual-WS persistent event loop, TLS verification, CRC32 sharding, capacity pruning, and `max_stream_underlyings_with_options: 221` are **fixed and verified**.
+   - **Feed Manager Pre-Flight Overhaul**: Persistent event loop (`asyncio.new_event_loop()`), standard CA TLS validation (`ssl.create_default_context()`), deterministic CRC32 connection sharding (`NIFTY`/`NIFTY 50` pinned to conn 0, 107 vs 108 split), multi-symbol cleanup in `_prune_dynamic_options_to_fit`, unified `_running` flag, and `max_stream_underlyings_with_options: 221` (3,224 total keys, 1,612/conn below Upstox's 2,000/conn ceiling).
+   - **Strike Moneyness & Proximity Guard**: End-to-end resolution of `ITM2`, `ITM1`, `ATM`, `OTM1`, `OTM2` (with legacy `ITM`→`ITM1`, `OTM`→`OTM1` aliasing) and `ColumnarSimEngine` ATM proximity guard (`max(1.5 * step, 2% * spot)`).
    - `CandleManager.warmup_from_parquet` (`BUG-CM-001`) already uses `self.symbol_to_index` (no `AttributeError`).
    - `CandleManager` seqlock (`BUG-CM-004`) is **per-symbol** (`headers` shape `(221,)`), so previous-bar finalization writes are already bracketed by the symbol's seqlock.
    - `ScoringEngine3.stop()` (`BUG-SE-001`) already sets `self.running = False` before `self.shm.close()`.
    - `web/server.py` `handle_sim_run` (`BUG-014`) already sets `self.simulation_service.is_running = True` before `asyncio.create_task(...)`.
+   - **Live-Session Hotfixes Already Applied (2026-11-25, Pending Post-Market Full Audit Completion)**: `RMSService` config/quote fixes, `CRIT-01` (`FeedHandler.publish_tick()` & `is_opt` init), `CRIT-03` (`underlying_symbol` metadata), `CRIT-04` (v2 heartbeat timeout reasons), partial `HIGH-01` (`--continue` recovery for `CompositeTrack` & `DelayedSuperstructure`), `HIGH-04` (per-trade `target_pct`/`sl_pct` metadata), and test `.ipc` isolation (`inproc://` endpoints across `tests/`).
 2. **Critical Regressions & Newly Discovered Bugs**:
    - **Zero-Price Fabrication Leaks**: `FeedHandler.publish_tick()` undoes its own protobuf zero-price guard via `bid=float(bid or ltp)` / `ask=float(ask or ltp)` (since `0.0 or ltp == ltp`). Similar `ltp`/`entry_price` fallbacks remain in `QuotesBroker.on_tick()`, `BaseSuperstructure.start()`, `LiveSuperstructure.reconcile_broker_positions()`, `LiveService`, `HistoricalService`, and `SimulationService`.
    - **Broken Underlying Tick Routing (`StructuralConvexityTrack`)**: `BaseTrack.on_opportunity()` never populates `metadata["underlying_symbol"]`, so `BaseTrack.on_tick()` never dispatches `on_underlying_tick()` in live/paper execution.
@@ -125,17 +127,28 @@ A full-codebase, line-by-line audit was conducted across all tiers: Ingestion (`
 | **MED-09** | `Web / Sim / Alerts` | [simulation_service.py:53](file:///Users/yorha/Documents/Trading%20Stuff/web/simulation_service.py#L53), [L194](file:///Users/yorha/Documents/Trading%20Stuff/web/simulation_service.py#L194); [candle_service.py:46](file:///Users/yorha/Documents/Trading%20Stuff/web/candle_service.py#L46); [live_service.py:49](file:///Users/yorha/Documents/Trading%20Stuff/web/live_service.py#L49), [L463](file:///Users/yorha/Documents/Trading%20Stuff/web/live_service.py#L463), [L587](file:///Users/yorha/Documents/Trading%20Stuff/web/live_service.py#L587) | Worker re-reads Parquet from disk; `compute_param_hash` omits `track_profile`; `CandleService` OR-filter across token/symbol; `LiveService.start()` unguarded, `start_budget` hardcoded, `_build_intraday_curve` $O(N^2)$. |
 | **MED-10** | `runner.py` | [runner.py:928-935](file:///Users/yorha/Documents/Trading%20Stuff/runner.py#L928-L935) | `cmd_report` reads flat JSONL keys (`t.get("entry_price")`), failing on `BaseSuperstructure` nested `{"event": ..., "data": {...}}` records. |
 | **MED-11** | `Web Frontend` | [app.js:64](file:///Users/yorha/Documents/Trading%20Stuff/web/static/js/app.js#L64), [L358](file:///Users/yorha/Documents/Trading%20Stuff/web/static/js/app.js#L358); [simulation_tab.js:778](file:///Users/yorha/Documents/Trading%20Stuff/web/static/js/simulation_tab.js#L778), [L848](file:///Users/yorha/Documents/Trading%20Stuff/web/static/js/simulation_tab.js#L848) | `connectWebSocket()` does not close prior WS; `openTradeModal` does not reset `tamCurrentRange = "local"`; `startBatchSimulation` uses `RUN-${this.runs.length + 1}`; `pollStatus` lacks max-poll timeout. |
+| **MED-12** | `CandleManager` | [candle_manager.py:237-276](file:///Users/yorha/Documents/Trading%20Stuff/core/candles/candle_manager.py#L237-L276) | Pre-market/first-bar volume transition resets `prev_v = 0`; tracking per-symbol `_last_recorded_vol = None` prevents attributing full cumulative day volume on transition from a zero-volume bar (`BUG-CM-003`). |
+| **MED-13** | `Web / SimServer` | [server.py:263-273](file:///Users/yorha/Documents/Trading%20Stuff/web/server.py#L263-L273), [simulation_service.py:508-512](file:///Users/yorha/Documents/Trading%20Stuff/web/simulation_service.py#L508-L512) | `run_simulation_job` catches exceptions and returns an error dict, so `_on_sim_done` checking `t.exception()` misses worker failure paths (`BUG-013`). |
 
 ---
 
 ## 4. Low-Severity, Config & Doc Drift Findings (P3)
 
+- **Silent Alert Drops (`BUG-RMS-001`)**: `RMSService.process_alert()` ([rms_service.py:225-248](file:///Users/yorha/Documents/Trading%20Stuff/core/rms/rms_service.py#L225-L248)) returns `None` without logging when `resolve_strikes()` returns `{}` (spread gate / manifest miss).
+- **Mock Dynamic Subscription Blind Spot (`BUG-001`)**: In mock mode, `FeedHandler.evaluate_dynamic_options` computes subscription changes, but `self._ws_loop` is `None` so dynamic option dispatch never runs silently.
+- **FeedHandler Dead Code (`DEAD-001`..`003`)**: Check and clean legacy `_active_ws` setter, `_run_poll_stream` hot-sleep stub, and unused `TickEvent` import in `core/feed/feed_handler.py`.
 - **Config Duplication**: [config/strategies.json:130-172](file:///Users/yorha/Documents/Trading%20Stuff/config/strategies.json#L130-L172) defines `composite_split_OTM` twice.
 - **Hardcoded Constants**: `300.0` bar seconds in [scoring_engine.py:364](file:///Users/yorha/Documents/Trading%20Stuff/strategies/momentum/scoring_engine.py#L364), [L455](file:///Users/yorha/Documents/Trading%20Stuff/strategies/momentum/scoring_engine.py#L455); `brokerage=60.0` in `live_service.py` / `historical_service.py`; `start_budget=250000.0` in `live_service.py` / `historical_service.py`.
-- **AlertService SHM Churn**: [web/alert_service.py:227](file:///Users/yorha/Documents/Trading%20Stuff/web/alert_service.py#L227) opens and closes `shm_ohlc_221` on every request instead of caching the handle.
-- **CandleService FIFO Cache**: [web/candle_service.py:102](file:///Users/yorha/Documents/Trading%20Stuff/web/candle_service.py#L102) evicts by insertion order instead of LRU.
+- **AlertService SHM Churn**: [web/alert_service.py:227](file:///Users/yorha/Documents/Trading%20Stuff/web/alert_service.py#L227) opens and closes `shm_ohlc_221` on every request instead of caching the handle (`BUG-AS-001`).
+- **CandleService FIFO Cache**: [web/candle_service.py:102](file:///Users/yorha/Documents/Trading%20Stuff/web/candle_service.py#L102) evicts by insertion order instead of LRU (`BUG-CS-001`).
 - **Test ResourceWarnings**: `tests/strategies/test_scoring_engine_3_0.py` emits `ResourceWarning` for unclosed ZMQ sockets/contexts and `/tmp/test_scoring_shm.shm`.
-- **Doc Drift**: `AGENT_CONTEXT.md` §4.1 references `config/tracks/tracks_v1.json` / `tracks_v2.json` / `tracks_default.json`, whereas actual files are `config/tracks/v1.json`, `v2.json`, and `default.json`. `README.md` §2 diagram still shows a single WebSocket and `(CSV)` trade journals.
+- **Doc Drift Consolidation (`DOC DRIFT-001`..`005`)**:
+  - `ARCHITECTURE_SPEC_2_0.md` & `LOW_LEVEL_DESIGN_2_0.md` diagrams still show a single `FeedWS` arrow instead of dual parallel connections (`FeedWS-1` & `FeedWS-2` for Upstox's 2,000-key/conn cap).
+  - `CANDLE_DTYPE` differs between `ARCHITECTURE_SPEC_2_0.md §5.1` (`vwap`, `range_compression`) and `LOW_LEVEL_DESIGN_2_0.md §3.1` (`is_closed`, `_reserved`); sync both against [shm_layout.py](file:///Users/yorha/Documents/Trading%20Stuff/core/candles/shm_layout.py).
+  - `ARCHITECTURE_SPEC_2_0.md §5` L2-cache claim for `shm_ohlc_221` only applies on Linux with `FORCE_POSIX_SHM=1` (`/dev/shm`); macOS/default uses `/tmp/*.shm` mmap page cache (`BUG-SHM-001`).
+  - `ARCHITECTURE_SPEC_2_0.md §6` should note the 1-second mtime polling lag in file-backed `ProtectedPositionRegistry` (`BUG-RMS-002`).
+  - `WEB_VIEW_FLOW.md` still shows CSV trade journals instead of `journal_<mode>_<track>.jsonl`.
+  - Archived `docs/archive/AGENT_CONTEXT.md` referenced `tracks_v1.json` etc., whereas actual files are `config/tracks/v1.json`, `v2.json`, `default.json`.
 
 ---
 
@@ -149,5 +162,24 @@ A full-codebase, line-by-line audit was conducted across all tiers: Ingestion (`
    - Wire `logs/.freeze_*` into `BaseSuperstructure.is_frozen()` and pass `--confirm-live` / `--capital` / `--eod-*` in `runner.py`.
    - Fix `--continue` capital/PnL restoration and immutable field whitelists in journal parsers.
    - Fix `RMSService` config key mismatch + dynamic expiry tag; fix `AdaptiveRegimeTrack`/`TrendPullbackV2Track` per-trade `target_pct`/`sl_pct`; fix `ColumnarSimEngine` delayed capital delta; fix `LiveSuperstructure` reconciliation lock & config defaults; fix `live_tab.js` null guard and overview `net_pnl` totals.
-3. **Batch 3 — Performance, Concurrency & Polish (`MED-01`..`MED-11`, `P3`)**:
-   - `CandleManager` `exchange_timestamp` & bar alignment; `QuotesBroker` delimiter/unsub/heartbeat; `MarketRecorder` part-file or incremental flush; `ProtectedPositionRegistry` `flock`; Web UI & `runner.py` cleanup.
+3. **Batch 3 — Performance, Concurrency & Polish (`MED-01`..`MED-13`, `P3`)**:
+   - `CandleManager` `exchange_timestamp`, bar alignment & `_last_recorded_vol`; `QuotesBroker` delimiter/unsub/heartbeat; `MarketRecorder` part-file or incremental flush; `ProtectedPositionRegistry` `flock`; Web UI (`_on_sim_done` error visibility, AlertService SHM cache, CandleService LRU), `FeedHandler` dead code & mock-mode warning, `runner.py` `cmd_report`, and doc drift synchronization.
+
+---
+
+## 6. Verification & Regression Checklist (Post-Fix)
+
+Run after implementing any audit batch (note: run tests offline/outside live market windows or verify `/tmp/*.ipc` timestamps are untouched):
+
+```bash
+# 1. Full automated unit & integration suite
+.venv/bin/python runner.py test
+
+# 2. Historical columnar simulation smoke check
+.venv/bin/python runner.py sim --date 2026-11-19 --track v2
+
+# 3. Frontend JavaScript syntax check
+node --check web/static/js/app.js
+node --check web/static/js/live_tab.js
+node --check web/static/js/simulation_tab.js
+```

@@ -196,12 +196,16 @@ class TestScoringEngine3(unittest.TestCase):
         engine_high_pole = ScoringEngine3(
             shm_name=self.shm_name,
             min_pole_pct=0.08,  # 8.0% minimum pole
+            enable_zmq=False,
+            persist_alerts=False,
         )
         self.assertEqual(engine_high_pole.min_pole_pct, 0.08)
 
         engine_pct_normalized = ScoringEngine3(
             shm_name=self.shm_name,
             min_pole_pct=5.0,  # 5.0% passed as percentage (normalized to 0.05)
+            enable_zmq=False,
+            persist_alerts=False,
         )
         self.assertEqual(engine_pct_normalized.min_pole_pct, 0.05)
 
@@ -218,7 +222,12 @@ class TestScoringEngine3(unittest.TestCase):
         self._set_bar(sym_idx, 5, now_ts, 5150.0, 5210.0, 5150.0, 5205.0, 3000, rvol=3.0, atr=50.0, is_closed=False)
 
         # Engine with 0.5% threshold accepts the 3.9% pole
-        engine_low = ScoringEngine3(shm_name=self.shm_name, min_pole_pct=0.005)
+        engine_low = ScoringEngine3(
+            shm_name=self.shm_name,
+            min_pole_pct=0.005,
+            enable_zmq=False,
+            persist_alerts=False,
+        )
         alert_low = engine_low._check_flag_breakout(
             symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 3.0, 50.0, now_ts
         )
@@ -226,7 +235,12 @@ class TestScoringEngine3(unittest.TestCase):
         self.assertEqual(alert_low.archetype, "FLAG_BULL_BREAKOUT")
 
         # Engine with 5.0% threshold rejects the 3.9% pole
-        engine_high = ScoringEngine3(shm_name=self.shm_name, min_pole_pct=0.05)
+        engine_high = ScoringEngine3(
+            shm_name=self.shm_name,
+            min_pole_pct=0.05,
+            enable_zmq=False,
+            persist_alerts=False,
+        )
         alert_high = engine_high._check_flag_breakout(
             symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 3.0, 50.0, now_ts
         )

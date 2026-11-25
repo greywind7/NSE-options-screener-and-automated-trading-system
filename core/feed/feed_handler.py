@@ -784,8 +784,8 @@ class FeedHandler:
                 symbol=symbol,
                 ltp=float(ltp),
                 volume=int(volume),
-                bid=float(bid or ltp),
-                ask=float(ask or ltp),
+                bid=float(bid),
+                ask=float(ask),
                 bid_qty=b_qty,
                 ask_qty=a_qty,
                 exchange_timestamp=float(exchange_ts or time.time()),
@@ -1046,6 +1046,7 @@ class FeedHandler:
                                         ltp, bid, ask = 0.0, 0.0, 0.0
                                         bids, asks = [], []
                                         vol = 0
+                                        is_opt = is_option_contract(canonical_key)
                                         feed_union = feed.WhichOneof("FeedUnion")
                                         if feed_union == "fullFeed":
                                             ff = feed.fullFeed
@@ -1060,14 +1061,15 @@ class FeedHandler:
                                                         ap, aq = float(ba.askP or 0.0), int(ba.askQ or 0)
                                                         if bp > 0: bids.append([bp, bq, 1])
                                                         if ap > 0: asks.append([ap, aq, 1])
-                                                    is_opt = is_option_contract(canonical_key)
                                                     bid = bids[0][0] if bids else (0.0 if is_opt else ltp)
                                                     ask = asks[0][0] if asks else (0.0 if is_opt else ltp)
+                                                else:
+                                                    bid = 0.0 if is_opt else ltp
+                                                    ask = 0.0 if is_opt else ltp
                                         elif feed_union == "firstLevelWithGreeks":
                                             fl = feed.firstLevelWithGreeks
                                             ltp = float(fl.ltpc.ltp or 0.0)
                                             vol = int(fl.vtt or 0)
-                                            is_opt = is_option_contract(canonical_key)
                                             if fl.firstDepth:
                                                 bid = float(fl.firstDepth.bidP or 0.0)
                                                 ask = float(fl.firstDepth.askP or 0.0)
@@ -1076,7 +1078,6 @@ class FeedHandler:
                                                 ask = 0.0 if is_opt else ltp
                                         elif feed_union == "ltpc":
                                             ltp = float(feed.ltpc.ltp or 0.0)
-                                            is_opt = is_option_contract(canonical_key)
                                             bid = 0.0 if is_opt else ltp
                                             ask = 0.0 if is_opt else ltp
 

@@ -108,16 +108,19 @@ class BaseSuperstructure(ExecutionContext, ABC):
         client_timeout = 50 if "dummy" in str(self.quotes_router_ipc) else 1000
         self.quotes_client = QuotesBrokerClient(router_ipc=self.quotes_router_ipc, timeout_ms=client_timeout, ctx=self.ctx)
 
+        self._pending_delayed_recovery: List[TradeState] = []
         if self.continue_state:
             self._recover_state_from_journals()
 
     def _recover_state_from_journals(self) -> None:
         """
         Recover active positions, closed trades, and cumulative PnL from journal files on disk.
-        Prevents orphaned/inflated trades and avoids double entries upon process restart.
+        Supports BaseTrack, CompositeTrack (routing to originating sub_track), capital restoration,
+        and unfilled paper_delayed orders.
         """
         from datetime import datetime
         from common.interfaces import TradeState
+        from core.common.symbol_utils import normalize_instrument_token
 
         today_str = get_market_date_str()
         session_dir = os.path.join(self.recordings_dir, today_str)
@@ -127,6 +130,12 @@ class BaseSuperstructure(ExecutionContext, ABC):
                 session_dir = alt_dir
             else:
                 return
+
+        IMMUTABLE_FIELDS = {
+            "trade_id", "mode", "track", "symbol", "token",
+            "option_type", "strike", "lot_size", "quantity",
+            "entry_ask", "entry_time", "entry_reason", "origin_track",
+        }
 
         total_open_recovered = 0
         total_closed_recovered = 0
@@ -139,6 +148,9 @@ class BaseSuperstructure(ExecutionContext, ABC):
                 continue
 
             trades_map: Dict[str, Dict[str, Any]] = {}
+            filled_ids = set()
+            rejected_ids = set()
+
             with open(filepath, "r", encoding="utf-8") as f:
                 for line in f:
                     if not line.strip():
@@ -151,24 +163,63 @@ class BaseSuperstructure(ExecutionContext, ABC):
                         if not trade_id:
                             continue
 
+                        if event == "TRADE_FILLED":
+                            filled_ids.add(trade_id)
+                        elif event == "TRADE_REJECTED" or data.get("status") == "REJECTED":
+                            rejected_ids.add(trade_id)
+
                         if trade_id not in trades_map:
                             trades_map[trade_id] = dict(data)
+                            if trades_map[trade_id].get("token"):
+                                trades_map[trade_id]["token"] = normalize_instrument_token(trades_map[trade_id]["token"])
                         else:
-                            trades_map[trade_id].update(data)
+                            tr = trades_map[trade_id]
+                            for k, v in data.items():
+                                if v is None:
+                                    continue
+                                if k == "metadata" and isinstance(v, dict):
+                                    merged_meta = dict(tr.get("metadata") or {})
+                                    merged_meta.update(v)
+                                    tr["metadata"] = merged_meta
+                                elif k == "entry_price":
+                                    if event == "TRADE_FILLED" and float(v) > 0.0:
+                                        tr["entry_price"] = float(v)
+                                elif k == "entry_time":
+                                    if event == "TRADE_FILLED" and float(v) > 0.0:
+                                        tr["entry_time"] = float(v)
+                                elif k not in IMMUTABLE_FIELDS:
+                                    tr[k] = v
 
                         if event == "TRADE_EXIT" or data.get("status") == "CLOSED":
                             trades_map[trade_id]["status"] = "CLOSED"
+                            if data.get("exit_price") is not None:
+                                trades_map[trade_id]["exit_price"] = float(data["exit_price"])
+                            if data.get("exit_time") is not None:
+                                trades_map[trade_id]["exit_time"] = float(data["exit_time"])
+                            if data.get("exit_reason"):
+                                trades_map[trade_id]["exit_reason"] = data["exit_reason"]
+                            if data.get("realized_pnl") is not None:
+                                trades_map[trade_id]["realized_pnl"] = float(data["realized_pnl"])
                     except Exception:
                         pass
 
             for tid, tdict in trades_map.items():
+                if tid in rejected_ids or tdict.get("status") == "REJECTED":
+                    continue
                 try:
+                    meta = dict(tdict.get("metadata") or {})
+                    origin_track = (
+                        tdict.get("origin_track")
+                        or meta.get("origin_track")
+                        or meta.get("sub_track")
+                        or tr_name
+                    )
                     trade = TradeState(
                         trade_id=tid,
                         mode=self.mode,
                         track=tr_name,
                         symbol=tdict.get("symbol", ""),
-                        token=tdict.get("token", ""),
+                        token=normalize_instrument_token(tdict.get("token", "")),
                         option_type=tdict.get("option_type", ""),
                         strike=float(tdict.get("strike", 0.0)),
                         lot_size=int(tdict.get("lot_size", 0)),
@@ -181,35 +232,49 @@ class BaseSuperstructure(ExecutionContext, ABC):
                         highest_price=float(tdict.get("highest_price", 0.0)),
                         current_bid=float(tdict.get("current_bid", 0.0)),
                         status=tdict.get("status", "OPEN"),
+                        entry_reason=tdict.get("entry_reason"),
+                        origin_track=origin_track,
                         exit_price=float(tdict["exit_price"]) if tdict.get("exit_price") is not None else None,
                         exit_time=float(tdict["exit_time"]) if tdict.get("exit_time") is not None else None,
                         exit_reason=tdict.get("exit_reason"),
                         realized_pnl=float(tdict.get("realized_pnl", 0.0)),
                         ratchet_level=int(tdict.get("ratchet_level", 0)),
-                        metadata=tdict.get("metadata", {}),
+                        underlying_entry_price=float(tdict["underlying_entry_price"]) if tdict.get("underlying_entry_price") is not None else None,
+                        underlying_exit_price=float(tdict["underlying_exit_price"]) if tdict.get("underlying_exit_price") is not None else None,
+                        metadata=meta,
                     )
 
-                    if trade.status == "OPEN":
+                    is_filled = (tid in filled_ids) or (self.mode != "paper_delayed")
+                    if hasattr(track, "add_recovered_trade"):
+                        track.add_recovered_trade(trade, is_filled=is_filled)
+                    elif trade.status == "OPEN":
                         track.active_trades[tid] = trade
-                        tokens_to_sub.add(trade.token)
-                        total_open_recovered += 1
-                        try:
-                            from core.feed.position_registry import ProtectedPositionRegistry
-                            ProtectedPositionRegistry.get_instance().register_open_position(
-                                contract_key=trade.token,
-                                symbol=trade.symbol,
-                                contract_symbol=trade.symbol,
-                                mode=self.mode,
-                                track=tr_name,
-                                trade_id=tid,
-                                quantity=trade.quantity,
-                                entry_price=trade.entry_price,
-                                entry_time=trade.entry_time,
-                            )
-                        except Exception:
-                            pass
                     else:
                         track.closed_trades.append(trade)
+
+                    if trade.status == "OPEN":
+                        if trade.token:
+                            tokens_to_sub.add(trade.token)
+                        total_open_recovered += 1
+                        if self.mode == "paper_delayed" and not is_filled:
+                            self._pending_delayed_recovery.append(trade)
+                        else:
+                            try:
+                                from core.feed.position_registry import ProtectedPositionRegistry
+                                ProtectedPositionRegistry.get_instance().register_open_position(
+                                    contract_key=trade.token,
+                                    symbol=trade.symbol,
+                                    contract_symbol=trade.symbol,
+                                    mode=self.mode,
+                                    track=tr_name,
+                                    trade_id=tid,
+                                    quantity=trade.quantity,
+                                    entry_price=trade.entry_price,
+                                    entry_time=trade.entry_time,
+                                )
+                            except Exception:
+                                pass
+                    else:
                         self.risk_mgr.update_pnl(trade.realized_pnl)
                         total_closed_recovered += 1
                 except Exception as e:
@@ -395,14 +460,15 @@ class BaseSuperstructure(ExecutionContext, ABC):
         if hasattr(self, "_recovered_tokens") and self._recovered_tokens:
             quotes = self.subscribe_quotes(self._recovered_tokens)
             if quotes:
+                now_ts = time.time()
                 for tok, q in quotes.items():
-                    bid = float(q.get("bid", 0.0))
+                    bid = float(q["bid"]) if q.get("bid") is not None else 0.0
+                    ask = float(q["ask"]) if q.get("ask") is not None else 0.0
+                    ltp = float(q.get("ltp") or 0.0)
+                    q_ts = float(q.get("timestamp") or now_ts)
                     if bid > 0:
-                        for tr in self.tracks.values():
-                            for trade in tr.active_trades.values():
-                                if trade.token == tok:
-                                    trade.current_bid = bid
-                                    trade.highest_price = max(trade.highest_price, bid)
+                        self.on_tick(token=tok, ltp=ltp, bid=bid, ask=ask, ts=q_ts)
+            self.on_heartbeat(time.time())
 
         poller = zmq.Poller()
         poller.register(self.rms_sub, zmq.POLLIN)
@@ -432,9 +498,9 @@ class BaseSuperstructure(ExecutionContext, ABC):
                             pass
                         token = data.get("token") or topic_token
                         sym = data.get("symbol", "")
-                        ltp = float(data.get("ltp", 0.0))
-                        bid = float(data.get("bid", ltp))
-                        ask = float(data.get("ask", ltp))
+                        ltp = float(data.get("ltp") or 0.0)
+                        bid = float(data["bid"]) if data.get("bid") is not None else 0.0
+                        ask = float(data["ask"]) if data.get("ask") is not None else 0.0
                         ts = float(data.get("timestamp") or time.time())
                         self.on_tick(token=token, ltp=ltp, bid=bid, ask=ask, ts=ts, topic_token=topic_token, symbol=sym)
                     elif topic == b"HEARTBEAT":

@@ -1,223 +1,188 @@
-# Algorithmic Trading Infrastructure (NSE F&O)
+# Algorithmic Trading Platform (NSE Equity & F&O Options)
 
-> **Architecture Status**: Distributed Architecture 2.0 & Scoring Engine 3.0  
-> **Target Universe**: 221 National Stock Exchange (NSE) Equity Derivatives Underlyings  
-> **Execution Modes**: Live Broker Gateway, Instant Paper Trading, Stream-Driven Delayed Fills, Columnar Sim  
+An event-driven, multi-process algorithmic trading system for Indian equity derivatives (NSE Futures & Options). It ingests real-time tick data from **Upstox**, aggregates 5-minute OHLCV candles in memory, detects institutional momentum breakouts on underlying equities, selects liquid option contracts, and executes concurrent **Paper**, **Delayed Paper**, and **Live (Groww)** trading strategies—alongside a fast historical backtester and a browser-based Web UI.
 
 ---
 
-## 1. System Overview
+## 1. Key Concepts (At a Glance)
 
-This platform is a high-performance, distributed, low-latency algorithmic trading infrastructure engineered for the Indian equity derivatives markets (NSE F&O). It captures institutional momentum expansion (Call CE and Put PE buying) using **strict physical price action invariants**, eliminating lagging indicators, continuous 0–100 scores, and market regime bias.
+If you are new to this repository, four core abstractions organize the system:
 
-The architecture strictly decouples market domains:
-- **Cash Equity Ticks (~2,000/s)**: Aggregate into a dedicated **777 KB POSIX Shared Memory** cache (`shm_ohlc_221`) fitting completely within the CPU's **L2 cache**, evaluated in $< 2\ \mu\text{s}$ by a lock-free spin-loop.
-- **Derivatives Option Ticks (~30,000/s)**: Isolated from strategy computation and routed directly to an in-memory **Quotes Broker (Ticker Plant)** maintaining a Last Value Cache ($< 200\text{ KB}$ RAM) with instantaneous snapshot lookups and active strike subscription streams.
+1. **Multi-Process ZeroMQ Pipeline**: Instead of one monolithic script, market ingestion, candle building, quote caching, strategy scanning, risk/strike filtering, and trade execution run as separate OS processes communicating over ZeroMQ IPC sockets (`/tmp/*.ipc`) serialized with MessagePack.
+2. **Execution Modes (`paper`, `paper_delayed`, `live`)**:
+   - **`paper`**: Instant simulated fills at the option's prevailing best Ask price when a signal arrives.
+   - **`paper_delayed`**: Simulates real-world execution latency (configurable delay window) and fills against the option quote cached just prior to target fill time—testing slippage sensitivity under realistic delays.
+   - **`live`**: Routes actual orders to the **Groww** broker SDK (`growwapi`), attaches resting stop-loss orders, and reconciles positions.
+3. **Execution Tracks & Composite Tracks (`common/tracks/`)**: A *track* defines how a position is sized, entered (option moneyness like `ATM`, `ITM1`, `ITM2`, `OTM1`, `OTM2`), trailed, and exited (stop-loss, target, stagnation timeout). A *composite track* groups multiple exit profiles under one shared capital pool. Each track × mode runs in its own isolated worker process.
+4. **Superstructures (`execution/superstructures/`)**: The mode-specific runtime harness (`PaperSuperstructure`, `DelayedSuperstructure`, `LiveSuperstructure`) that subscribes to filtered opportunities and option quotes, drives track state machines, checks risk limits, and writes event journals (`journal_<mode>_<track>.jsonl`).
 
 ---
 
-## 2. High-Level Architecture Topology
+## 2. System Architecture
+
+The platform separates noisy options market data from lightweight equity candle processing so strategy evaluation stays in the microsecond range while execution processes always have live option bid/ask depth.
 
 ```mermaid
 flowchart TD
-    subgraph Market Ingestion Tier ["Market Ingestion Tier (Upstox API v2/v3)"]
-        FeedWS["Upstox WebSocket Feed"] --> FeedHandler["FeedHandler Process"]
-        FeedHandler -->|PUB: feed_equity.ipc| ZMQ_EQ[("ZeroMQ Equity Stream")]
-        FeedHandler -->|PUB: feed_options.ipc| ZMQ_OPT[("ZeroMQ Options Stream")]
-        
-        ZMQ_EQ & ZMQ_OPT --> Recorder["Market Recorder Process"]
-        Recorder --> RecStore[("Lossless Parquet Recordings")]
+    subgraph Market Ingestion Tier ["1. Market Ingestion Tier (Upstox API)"]
+        FeedWS1["Upstox WebSocket #1"] --> FeedHandler["FeedHandler Process"]
+        FeedWS2["Upstox WebSocket #2"] --> FeedHandler
+        FeedHandler -->|"PUB: feed_equity.ipc"| ZMQ_EQ[("ZeroMQ Equity Stream")]
+        FeedHandler -->|"PUB: feed_options.ipc"| ZMQ_OPT[("ZeroMQ Options Stream")]
+
+        ZMQ_EQ & ZMQ_OPT --> Recorder["MarketRecorder Process"]
+        Recorder --> RecStore[("Parquet Recordings: equity_ticks & option_depth")]
     end
 
-    subgraph State & In-Memory Store Tier
+    subgraph State & Quote Cache Tier ["2. State & Ticker Plant Tier"]
         ZMQ_EQ --> CandleMgr["CandleManager Process"]
-        CandleMgr -->|"Atomic In-Place Write (Zero Locks)"| SHM[("POSIX Shared Memory: shm_ohlc_221 (777 KB - L2 Cache)")]
-        
-        ZMQ_OPT --> QuotesBroker["QuotesBroker / Ticker Plant Process"]
-        QuotesBroker -->|XPUB: quotes_stream.ipc| ZMQ_QUOTES[("ZeroMQ Option Quotes Stream")]
-        QuotesBroker <-->|REP: quotes_snapshot.ipc| QuotesSnap[("ZeroMQ REQ/REP Snapshot")]
+        CandleMgr -->|"Atomic Seqlock Writes"| SHM[("Shared Memory: shm_ohlc_221 (777 KB)")]
+
+        ZMQ_OPT --> QuotesBroker["QuotesBroker Process (LVC)"]
+        QuotesBroker -->|"PUB: quotes_stream.ipc & heartbeat"| ZMQ_QUOTES[("ZeroMQ Option Quotes & Clock")]
+        QuotesBroker <-->|"ROUTER/REQ: quotes_router.ipc"| QuotesSnap[("On-Demand Quote Snapshots")]
     end
 
-    subgraph Signal & Risk Tier
-        SHM -->|"Microsecond Spin-Loop (< 2 us)"| ScoringEng["Scoring Engine 3.0 Process"]
-        ScoringEng -->|PUSH: alerts_breakout.ipc| ZMQ_ALERTS[("ZeroMQ Alerts Queue")]
-        
-        ZMQ_ALERTS --> RMS["RMS & Option Resolver Process"]
-        QuotesSnap <-->|Snapshot Check| RMS
-        RMS -->|PUB: rms_strike_pub.ipc| ZMQ_RMS[("ZeroMQ Candidate Strikes")]
+    subgraph Signal & Risk Tier ["3. Signal & Strike Resolution Tier"]
+        SHM -->|"Lock-Free Seqlock Read"| ScoringEng["Scoring Engine 3.0 Process"]
+        ScoringEng -->|"PUB: scoring_alerts_pub.ipc"| ZMQ_ALERTS[("ZeroMQ Setup Alerts")]
+
+        ZMQ_ALERTS --> RMS["RMS & Strike Resolver Process"]
+        QuotesSnap <-->|"Liquidity & Spread Check"| RMS
+        RMS -->|"PUB: rms_strike_pub.ipc"| ZMQ_RMS[("ZeroMQ Actionable Opportunities")]
     end
 
-    subgraph Execution & Tracking Tier ["Execution Tier (Multi-Mode Concurrency)"]
-        ZMQ_RMS --> SuperLive["Live Superstructure (Groww SDK)"]
-        ZMQ_RMS --> SuperPaper["Paper Superstructure (Virtual Fills)"]
-        ZMQ_RMS --> SuperDelayed["Delayed Superstructure (Cached Fills)"]
-        
-        ZMQ_QUOTES --> SuperLive & SuperPaper & SuperDelayed
-        SuperLive --> GrowwSDK["Groww Live Broker SDK (growwapi)"]
-        SuperDelayed --> DelayedLog["Delayed Trade Journal (CSV)"]
-        SuperPaper --> PaperLog["Paper Trade Journal (CSV)"]
-        SuperLive --> LiveLog["Live Trade Journal (CSV)"]
+    subgraph Execution Tier ["4. Concurrent Execution Tier (Process per Mode × Track)"]
+        ZMQ_RMS --> SuperPaper["Paper Superstructure"]
+        ZMQ_RMS --> SuperDelayed["Delayed Superstructure"]
+        ZMQ_RMS --> SuperLive["Live Superstructure"]
+
+        ZMQ_QUOTES --> SuperPaper & SuperDelayed & SuperLive
+        SuperLive --> GrowwSDK["Groww Broker SDK (growwapi)"]
+        SuperPaper & SuperDelayed & SuperLive --> Journals[("recordings/YYYY-MM-DD/journal_<mode>_<track>.jsonl")]
     end
 
-    subgraph Universal Monitoring Tier ["Universal Monitoring & Web Tier"]
+    subgraph Monitoring & Research Tier ["5. Web UI & Offline Simulation"]
         ZMQ_RMS --> WebServer["Analytics Web Server (web/server.py)"]
-        DelayedLog & PaperLog & LiveLog -.->|Live Scans & MTM Stream| WebServer
-        WebServer -->|WebSocket: /api/live/ws| WebUI["Analytics & Simulation Web UI (Browser: 8080)"]
-        WebServer -->|REST: /api/*| WebUI
+        ZMQ_QUOTES --> WebServer
+        Journals -.->|"Live MTM & Historical Replay"| WebServer
+        RecStore -.->|"3–5s Full-Day Backtests"| SimEngine["Columnar Sim Engine (Polars/Arrow)"]
+        WebServer --> Browser["Web SPA Dashboard (http://localhost:8080)"]
     end
 ```
 
----
+### How Data Flows End-to-End
 
-## 3. Core Pillars & Breakthroughs
-
-### 1. 90%+ Feed Noise Elimination
-In NSE F&O, 221 underlying stocks generate ~2,000 ticks/sec, while their active option strikes generate over 30,000 ticks/sec. The `FeedHandler` partitions the feed into `feed_equity.ipc` and `feed_options.ipc`. The Scoring Engine and Candle Manager process **only equity ticks**, cutting strategy CPU overhead by $> 90\%$.
-
-### 2. 777 KB POSIX Shared Memory in L2 Cache
-All 221 F&O stocks across 75 five-minute bars per day ($221 \times 75 = 16,575\text{ bars}$) are pre-allocated in POSIX Shared Memory (`shm_ohlc_221`). At 48 bytes per bar struct, the total footprint is **$777\text{ KB}$**, fitting entirely inside the CPU's **L2 cache** (1–2 MB typical, 4–16 MB on Apple Silicon). Zero DRAM thrashing, zero deserialization overhead, lock-free evaluation in $< 2\ \mu\text{s}$.
-
-### 3. Scoring Engine 3.0: Physical Price Action Invariants
-- **No Continuous Score**: Continuous 0–100 sums and curve-fitting thresholds are abolished.
-- **No Market Regime Dependency**: High relative volume ($\text{rVOL} \ge 2.0\times$) proves institutional participation has uncoupled the stock from Nifty.
-- **Strict Current Candle rVOL**: Evaluated against a pre-compiled 1-minute historical baseline (`[221, 375]`) with linear intra-minute extrapolation to the upcoming minute edge.
-- **Archetype 1 (Flag Breakout)**: 1–3 bar pole, 2–4 bar contraction. **50% Retracement Invariant** evaluated first as an anti-reversal guard before fitting an OLS regression line to define dynamic resistance.
-- **Archetype 2 (Pure 3-Candle Impulse)**: Directional thrust $|open - high| \ge 2.0\times \max(\overline{\text{Thrust}}_3, 0.35\text{ATR})$ with a Close Location Value ($\text{CLV} \ge 0.75$) anti-wick guard.
-
-### 4. Quotes Broker Ticker Plant & Stream-Driven Delayed Fills
-- Quotes Broker maintains latest depth for traded options ($< 200\text{ KB}$ RAM) with REQ/REP snapshots and active subscription streams.
-- **Prevailing Cached Quote Semantics**: Delayed orders fill at the **cached quote established prior to target time $T_{\text{target}}$**, not the waking future tick. If no new quote arrives during the delay window, it safely falls back to the original setup order price (`req.price`).
-- **Capital Sufficiency Gate**: If market moves against the buyer during the delay, the order is rejected only if the required cash delta exceeds `available_capital`.
-- **Zero Fabrication Policy**: Synthetic or nominal quotes are strictly banned across RMS and execution; real market depth or clean rejection only.
-
-### 5. In-Process Columnar Simulation Engine
-Simulates an entire trading day across 221 stocks in **3 to 5 seconds** using memory-mapped **Polars / Apache Arrow** option depth tables and binary search `asof_join` fill matching.
-
-### 6. Modern Analytics & Simulation Web UI (`runner.py web`)
-- Comprehensive browser Single-Page Application (SPA) replacing legacy terminal dashboards.
-- Sub-second live telemetry, open positions tracking, and dynamic cash balance streaming via WebSockets.
-- Independent OS worker process (`multiprocessing.Process`) for single and batch simulations, completely bypassing the Python GIL to keep the web event loop and charts 100% fluid.
-- Direct read-only attachment to `shm_ohlc_221` for sub-microsecond candlestick charts with exact breakout trigger points.
-
-### 7. Isolated Multi-Process Quotes Tracking & State Recovery (`--continue`)
-- **Per-Process Client IDs**: Superstructures identify themselves uniquely (`f"{mode}_{track}_{pid}"`) to `QuotesBroker`, eliminating unsubscription collisions across concurrent tracks.
-- **Active Position Protection**: `ProtectedPositionRegistry` prevents open option contracts from being prematurely unsubscribed until physical trade exit.
-- **Durability on `--continue`**: Reconstitutes open positions from today's journals, resubscribes to QuotesBroker, seeds initial snapshot quotes, and includes open positions in initial WebSocket subscriptions.
-- **Recorder Guaranteed Flush**: Hardened with `atexit`, `try ... finally`, and flush-before-teardown to ensure zero tick data loss.
+1. **Feed Splitting (`FeedHandler`)**: ~215 F&O underlying stocks + Nifty 50 run across two sharded Upstox WebSocket connections (respecting Upstox's per-connection subscription cap). Equity ticks go to `feed_equity.ipc`; 5-level option depth goes to `feed_options.ipc`. Contracts held in open positions are guarded by `ProtectedPositionRegistry` (`logs/active_positions.json`) so dynamic strike shifting never unsubscribes an active trade.
+2. **In-Memory 5-Minute Candles (`CandleManager`)**: Aggregates equity ticks into 75 five-minute bars per symbol inside `shm_ohlc_221` (221 symbols × 75 bars × 48 bytes ≈ 777 KB, synchronized via per-symbol seqlocks), computing incremental Wilder ATR(14) and extrapolated intraday relative volume (`rVOL`).
+3. **Price-Action Detection (`ScoringEngine3`)**: Scans `shm_ohlc_221` for two rule-based momentum patterns without lagging indicators or 0–100 composite scores:
+   - **Flag Breakout / Breakdown**: 1–3 bar high-volume pole followed by a 2–5 bar tight contraction holding within 50% retracement, breaking an OLS trendline with volume rate-of-change thrust and strong close location (`CLV >= 0.75`).
+   - **Pure 3-Candle Impulse**: Directional thrust breaking the 3-bar high/low with real-body expansion and strong `CLV`, guarded against firing inside an active flag contraction.
+4. **Liquidity & Spread Gating (`RMSService`)**: Resolves candidate strikes (`ATM`, `ITM1`, `ITM2`, `OTM1`, `OTM2`) matching the direction (`CE` for Bull, `PE` for Bear), checks `QuotesBroker` depth snapshots, and rejects strikes with missing quotes or excessive bid-ask spreads. **Zero synthetic quotes**: if live option depth is unavailable, setups are skipped cleanly rather than filled at LTP.
+5. **Backtesting (`ColumnarSimEngine`)**: Replays recorded `equity_ticks.parquet` and `option_depth.parquet` using Polars/Arrow `asof_join` and binary-search depth matching to simulate an entire trading session across all tracks in seconds.
 
 ---
 
-## 4. Directory Structure
+## 3. Repository Layout
 
-```
+```text
 Trading Stuff/
-├── core/
-│   ├── shm/            # POSIX Shared Memory allocator, layout, and 48-byte struct dtype
-│   ├── feed/           # FeedHandler splitting equity and derivative feeds
-│   ├── candles/        # CandleManager (5m bars), Wilder ATR(14), and strict rVOL profiles
-│   ├── quotes/         # QuotesBroker (Ticker plant, LVC, snapshot REQ/REP, heartbeat)
-│   ├── scoring/        # ScoringEngine3 spin-loop, Archetype 1 & 2 mathematical models
-│   └── rms/            # Option Resolver, liquidity and spread verification, strike publisher
-├── execution/
-│   ├── superstructures/# Delayed (stream-driven cached fills), Paper, and Live modes
-│   └── adapters/       # Broker API execution and paper trading ledger adapters
+├── runner.py                  # Unified CLI orchestrator (prepare, core, start, web, sim, stop, test)
+├── config/                    # System, instruments, execution, strategy configs & track profiles
+│   └── tracks/                # Track preset profiles (default.json, v1.json, v2.json)
+├── core/                      # Core infrastructure & data services
+│   ├── auth/                  # Upstox & Groww OAuth / TOTP session helpers
+│   ├── candles/               # CandleManager, SHM layout (48B candle dtype), Wilder ATR & rVOL
+│   ├── common/                # IPC MessagePack schemas, IST time utilities, symbol normalization
+│   ├── config/                # Typed config loader & market schedule helpers
+│   ├── feed/                  # Dual-WS Upstox FeedHandler, protobuf decoder, position registry, replay
+│   ├── instruments/           # Instrument master sync, F&O filtering, subscription manifest builder
+│   ├── quotes/                # QuotesBroker Last Value Cache, XPUB stream, ROUTER snapshot server
+│   ├── recorder/              # Dual-stream Parquet recorder (equity_ticks & option_depth)
+│   ├── rms/                   # Strike resolution, spread/liquidity gates, opportunity broadcaster
+│   └── volume/                # Historical 1-minute baseline volume indexer
+├── strategies/
+│   └── momentum/              # ScoringEngine3 spin-loop detector & OpportunityPool deduplicator
 ├── common/
-│   ├── tracks/         # Pluggable Core & Composite tracks (Composite Pattern for capital sharing)
-│   ├── models/         # MessagePack schemas, instrument database, dataclasses
-│   └── utils/          # Affinity pinning (Linux / macOS QoS), clock, structured logger
-├── web/                # Analytics & Simulation Web UI (aiohttp, WebSocket MTM, SPA, isolated workers)
-├── simulation/         # Fast monolithic Polars/Arrow columnar option depth backtester
-├── config/             # JSON configurations, tracks profiles (config/tracks/v1, v2, default)
-├── scripts/            # run_distributed.py (Process Supervisor with process group cleanup)
-├── runner.py           # Central Operational Orchestrator (CLI Entry Point)
-├── EXECUTION_TRACKS.md # Authoritative specification & reference for v1 and v2 execution tracks
-├── WEB_VIEW_FLOW.md
-├── ARCHITECTURE_SPEC_2_0.md
-├── ARCHITECTURE_EVOLUTION.md
-├── SCORING_ENGINE_3_0.md
-├── SCORING_EVOLUTION.md
-├── LOW_LEVEL_DESIGN_2_0.md
-├── SELF_AUDIT.md
-└── docs/archive/       # Historical brainstorms and legacy 1.0 audit documents
+│   ├── interfaces.py          # Abstract ExecutionContext, OrderRequest/Result, TradeState contracts
+│   ├── tracks/                # BaseTrack, CompositeTrack, and v1/v2 exit-profile track classes
+│   └── utils/                 # Structured logger, clock utilities, CPU affinity helpers
+├── execution/
+│   └── superstructures/       # BaseSuperstructure (IPC + --continue recovery), Paper, Delayed, Live (Groww)
+├── simulation/                # Monolithic Polars/Arrow columnar session simulator
+├── web/                       # aiohttp web server, WS live MTM streamer, historical/alert/sim services, SPA
+├── ui/                        # Legacy terminal dashboard (replaced by web/)
+├── tests/                     # Automated unittest suites across core, common, execution, simulation, web
+├── data/                      # Daily instrument masters, filtered F&O universe, manifests (generated)
+├── recordings/                # Session Parquet market data & JSONL execution journals (YYYY-MM-DD/)
+├── logs/                      # Service logs, PID registry (pids.json), active_positions.json
+├── SYSTEM_AUDIT_2_0.md        # Active codebase audit & prioritized fix queue
+└── docs/archive/              # Legacy 1.0 specs, historical brainstorms, and superseded audits
 ```
 
 ---
 
-## 5. Operational Commands (`runner.py`)
+## 4. Setup & Prerequisites
 
-All system operations are driven through the central runner CLI:
+1. **Python Environment**: Python 3.9+ with dependencies installed in `.venv`:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+2. **Credentials (`.env`)**: Copy `.env.example` to `.env` and populate API keys/secrets for Upstox market data (and Groww API credentials if running `live` mode).
+
+---
+
+## 5. Operational Workflow (`runner.py`)
+
+`runner.py` automatically re-executes using `.venv/bin/python` if invoked with system Python.
 
 ```bash
-# 1. Pre-Market Preparation (08:30 AM IST)
-# Downloads instrument master, filters 221 F&O universe, precomputes 1m volume profiles (Stateless, exits cleanly):
+# 1. Pre-Market Preparation (~08:45 IST)
+# Downloads NSE instrument master, filters ~215 F&O equities, builds 1m volume index & WS manifest
 python3 runner.py prepare
 
-# 2. Start Core Data Tier (09:00 AM IST)
-# Enforces --feed, --candlemanager (allocates 777 KB SHM), and --quotesbroker, with --record optional:
-python3 runner.py core --feed ws --candlemanager --quotesbroker --record
+# 2. Launch Core Data Tier (~09:05 IST)
+# Starts FeedHandler (--feed), CandleManager (--candlemanager), QuotesBroker (--quotesbroker), and Recorder (--record)
+python3 runner.py core --feed --candlemanager --quotesbroker --record
 
-# (Alternatively, each core component can also be launched independently:
-#  python3 runner.py feed --mode ws
-#  python3 runner.py candlemanager
-#  python3 runner.py quotesbroker
-#  python3 runner.py record)
+# 3. Launch Strategy & Execution Processes (~09:15 IST)
+# Launches ScoringEngine3, RMSService, and one execution process per (mode × track)
+python3 runner.py start --mode paper,paper_delayed
 
-# 3. Launch Strategy & Execution Superstructures (09:15 AM IST)
-# Starts ScoringEngine3, RMS, and all tracks per mode:
-python3 runner.py start --strategy momentum_3_0 --mode paper,paper_delayed,live
+# Resume mid-day after a restart, recovering open positions & capital from today's journals:
+python3 runner.py start --mode paper,paper_delayed --continue
 
-# (To restart or continue mid-day recovering active positions and state from journals):
-# python3 runner.py start --strategy momentum_3_0 --mode paper,paper_delayed,live --continue
-
-# 4. Modern Analytics & Simulation Web UI (Recommended Observability Hub)
-# Launches aiohttp web server with live WebSocket MTM telemetry, historical journals, and batch backtesting:
+# 4. Launch Web Analytics & Simulation UI (http://localhost:8080)
 python3 runner.py web --port 8080
 
-# (Legacy terminal dashboard remains available via: python3 runner.py dashboard)
+# 5. Run Offline Columnar Backtest (3-5 seconds per full session)
+python3 runner.py sim --date 2026-11-19 --track v2 --mode paper,paper_delayed
 
-# 5. Fast Columnar Simulation (3–5 seconds per full session)
-# Runs monolithic Polars/Arrow option depth backtester:
-python3 runner.py sim --date 20261114 --strategy momentum_3_0
-
-# 6. Multi-Process Historical Replay
-# Replays recorded ticks through the multi-process ZeroMQ topology:
-python3 runner.py replay --date 20261114 --strategy momentum_3_0 --mode paper_delayed
-
-# 7. System Health & Process Status
-# Queries supervisor PIDs, SHM write counter, and QuotesBroker heartbeat:
+# 6. Check Process Health, SHM Counter & Protected Contracts
 python3 runner.py status
 
-# 8. Operator Freeze Control (Blocks new entries while trailing active positions)
-# Freeze specific mode or all:
-python3 runner.py freeze --mode live
-python3 runner.py freeze --mode all
+# 7. Run Automated Test Suite (offline / safe against running IPC sockets)
+python3 runner.py test
 
-# Shortcut to immediately freeze live execution:
-python3 runner.py stop-live
+# 8. Stop All Running Background Services & Clean Up IPC/SHM
+python3 runner.py stop
 
-# Unfreeze mode to resume normal order entries:
-python3 runner.py unfreeze --mode live
-
-# 9. Graceful Shutdown & Teardown
-# Stop strategy only (leaves feed, candle manager, and recorder running for zero tick loss during strategy reloads):
-python3 runner.py stop --strategy
-
-# Full End-of-Day Teardown (stops all processes, flushes recordings, unlinks SHM):
-python3 runner.py stop --all
+# 9. Post-Market Compression (compresses recordings/{YYYYMMDD}/ to .tar.gz)
+python3 runner.py post-market --date 20261125
 ```
 
 ---
 
-## 6. Documentation Index
+## 6. Further Documentation
 
-| Document | Purpose & Contents |
-| :--- | :--- |
-| [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/WEB_VIEW_FLOW.md) | Antigravity Analytics & Simulation Web UI (Architecture, REST/WS APIs, GIL bypass, UI flows, and caching). |
-| [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/ARCHITECTURE_SPEC_2_0.md) | High-Level Architecture 2.0 (ADRs, ZeroMQ IPC topology, POSIX SHM, Quotes Broker, Delayed execution). |
-| [`ARCHITECTURE_EVOLUTION.md`](file:///Users/yorha/Documents/Trading%20Stuff/ARCHITECTURE_EVOLUTION.md) | Historical progression: Version Alpha $\to$ Architecture 1.0 $\to$ Architecture 2.0 rationale. |
-| [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SCORING_ENGINE_3_0.md) | Signal & Quantitative Specification (Zero score, 50% retracement invariant, directional thrust, CLV). |
-| [`SCORING_EVOLUTION.md`](file:///Users/yorha/Documents/Trading%20Stuff/SCORING_EVOLUTION.md) | Historical progression: Alpha rVOL $\to$ 100-Point Linear Sum Trap $\to$ Scoring 3.0 invariants. |
-| [`LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/LOW_LEVEL_DESIGN_2_0.md) | Implementation-ready Low-Level Design (DTypes, msgpack schemas, Strategy-Track-Mode IoC, Runner CLI). |
-| [`IMPLEMENTATION_MANIFEST.md`](file:///Users/yorha/Documents/Trading%20Stuff/IMPLEMENTATION_MANIFEST.md) | Granular engineering manifest (reasons, effects, failure risks, and regression fixes). |
-| [`SELF_AUDIT.md`](file:///Users/yorha/Documents/Trading%20Stuff/SELF_AUDIT.md) | Active bug registry, code reconnaissance, and architectural reconciliation matrix (CRIT-001 to MED-010). |
-| [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive) | Preserved historical brainstorms (`BRAINSTORM_A/B/C.md`), legacy audit, and scoring 1.0/2.0 specs. |
+| Document | Scope |
+|---|---|
+| [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/ARCHITECTURE_SPEC_2_0.md) | System-level ADRs, IPC topology, Shared Memory design, and execution guarantees |
+| [`LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/LOW_LEVEL_DESIGN_2_0.md) | Struct definitions, MessagePack schemas, interfaces, and module contracts |
+| [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SCORING_ENGINE_3_0.md) | Mathematical specification for Flag Breakout and Pure Impulse archetypes |
+| [`EXECUTION_TRACKS.md`](file:///Users/yorha/Documents/Trading%20Stuff/EXECUTION_TRACKS.md) | Reference for v1, v2, and composite execution track rules and strike selections |
+| [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/WEB_VIEW_FLOW.md) | Web UI tabs, REST/WebSocket APIs, and multiprocessing simulation flow |
+| [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SYSTEM_AUDIT_2_0.md) | Current system audit, open bugs, and prioritized fix roadmap |
+| [`IMPROVEMENTS.md`](file:///Users/yorha/Documents/Trading%20Stuff/IMPROVEMENTS.md) | Future roadmap: structural refactors, scoring ideas, live Groww hardening, and new strategies |
