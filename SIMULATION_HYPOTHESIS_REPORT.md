@@ -1,448 +1,424 @@
-# Simulation Hypothesis Experimentation Report (`Nov 16 – Nov 25, 2026`)
+# Simulation Hypothesis Experimentation Report (`Nov 16 – Nov 26, 2026` — Tick-by-Tick)
 
-> **Scope & Clean-Data Baseline:** 7 recorded sessions (`2026-11-16`, `2026-11-17`, `2026-11-18`, `2026-11-19`, `2026-11-20`, `2026-11-23` expiry, `2026-11-25`) across **all 20 tracks** (`12 v1` + `8 v2`) in both **`paper`** (instant fill at ask) and **`paper_delayed`** (randomized latency fill), executed with **zero edits to existing repository source or config files** via day-local scratch harnesses matching stock `ColumnarSimEngine` bit-for-bit (`2026-11-16` baseline parity check: `2,644` trades, `-₹74,753` net).
+> **Scope & Tick-by-Tick Baseline Parity:** All **8 clean recorded sessions** (`2026-11-16`, `2026-11-17`, `2026-11-18`, `2026-11-19`, `2026-11-20`, `2026-11-23` expiry, `2026-11-25`, `2026-11-26` expiry) across **all 20 tracks** (`12 v1` + `8 v2`) in both **`paper`** (instant fill at ask) and **`paper_delayed`** (`200ms–500ms` randomized latency fill), executed using the upgraded **event-driven tick-by-tick `ColumnarSimEngine`** (`3%` configurable spread gate, circuit breaker `false`, real-time equity `underlying_ltp` replay, and dated volume baselines `data/index_YYYYMMDD.json`).
 
 ---
 
 ## 1. Executive Summary
 
-We tested **30 configurations** total:
-- **`H0_BASELINE`** — current production scoring (`ScoringEngine3`) and track configs (`v1` + `v2`).
-- **13 Single-Hypothesis Variants (`H1`–`H6b`)** — isolating one parameter/rule change at a time.
-- **9 Original Mixed Variants (`M1`–`M9`)** — multi-rule mixes that all kept **Midday Freeze (`11:30–13:30`)**.
-- **6 Non-Midday Winner Combinations (`W1`–`W6`)** — mixing the best individual winners **without** Midday Freeze or hard per-symbol caps after diagnosing why `M1`–`M9` underperformed.
+We evaluated **45 configurations** total (360 full-session multi-mode simulations = **720 mode runs**):
+- **`H0_BASELINE`** — stock production `ScoringEngine3` & track parameters (`v1` + `v2`).
+- **14 Single-Hypothesis Variants (`H1`–`H6b`)** — isolating one signal or execution parameter at a time.
+- **9 Original Mixed Variants (`M1`–`M9`)** — multi-rule combinations retaining **Midday Freeze (`11:30–13:30`)**.
+- **6 Non-Midday Winner Combinations (`W1`–`W6`)** — mixing the best individual rules **without** Midday Freeze.
+- **15 New Targeted Extensions (`E1`–`E15`)** — isolating pure scoring vs option scaling vs spread gate (`E1`, `E2`, `E14`), testing `3Bar 0.35% / 0.60%` (`E3`, `E4`), `Body 0.35%` (`E15`), `ATR >= 0.20%` (`E5`, `E6`), `30m` opposite-flip cooldown (`E7`, `E8`), `Cap <= 3` (`E9`, `E10`), `14:00` entry freeze (`E11`, `E12`), and strict `2%` spread gate (`E13`).
 
 ### Top-Line Takeaways
 
-1. **Champion Overall Profit — `W2_15S_FLAG25_OPT_SPREAD`** (`Min Elapsed >= 15s` + `OLS Flag Top 25% of Pole` + `Option Convexity Target/SL Scaling` + `ATR/Spread Gate`):
-   - **7-Day Paper Net P&L (All 20 tracks):** **`+₹1,511,447`** (**`+55.6%`** / `+₹539,949` over Baseline `+₹971,498`), Max Daily Drawdown **`₹67,771`** (**`-38%`** vs Baseline `₹109,330`), **`5/7`** green days (turns `2026-11-25` from `-₹51,796` into **`+₹120,218`**!).
-   - **7-Day Paper-Delayed Net P&L:** **`+₹1,421,488`** (**`+71.6%`** / `+₹593,283` over Baseline `+₹828,205`!). Slippage across all 7 days drops from `₹143,293` (Baseline) to **`₹89,959`** because waiting `15s` + requiring the upper 25% of the pole + gating wide spreads avoids fleeting micro-spikes that mean-revert within 100–250ms.
-   - **If pruning the 3 structurally losing `v2` tracks** (17 tracks: `12 v1` + `5 v2`): **`+₹1,700,622` Paper / `+₹1,630,824` Paper-Delayed**.
+1. **Raw Profit Champion — `W1_15S_OPT_SPREAD`** (`Min Elapsed >= 15s` + `Option Convexity Scaling` + `ATR/Spread Gate`) & **`W2_15S_FLAG25_OPT_SPREAD`** (`W1` + `Flag Top 25% of Pole`):
+   - **`W1` 8-Day Paper Net P&L (All 20 tracks):** **`+₹2,032,094`** (**`+206.2%`** / `+₹1,368,376` over tick-by-tick Baseline `+₹663,718`), **7/8** green days, Max Daily Drawdown **`₹26,060`** (**`-94.3%`** vs Baseline `₹453,775`!).
+   - **`W2` 8-Day Paper / Delayed:** **`+₹1,970,972` Paper / `+₹1,703,692` Delayed** (`86.4%` slippage retention vs `W1` `84.3%`). Adding `Flag Top 25%` trimmed delayed slippage by `₹52,738` (`₹320,018 → ₹267,280`).
+   - **Excluding `gamma_runner_OTM2` (19t):** **`W1: +₹2,134,701` Paper / `+₹1,830,822` Delayed**; **`W2: +₹2,074,278` Paper / `+₹1,801,166` Delayed**.
 
-2. **Highest Efficiency, Lowest Drawdown & Expiry-Proof — `W3_15S_FLAG25_3BAR045_OPT_SPREAD`** (`W2` + `PURE Net 3-Bar Expansion >= 0.45%`):
-   - **Opps & Commissions Cut by ~32–40%:** Opportunities drop `1,477 → 889` (`-39.8%`), trades drop `19,080 → 13,033` (`-31.7%`), saving **`₹362,820`** in brokerage (`₹781,980` vs `₹1,144,800`).
-   - **7-Day Paper Net P&L:** **`+₹1,322,853`** (`+36.2%` vs Baseline), **`6/7` GREEN DAYS**, Max Daily DD only **`₹52,123`**.
-   - **7-Day Paper-Delayed Net P&L:** **`+₹1,253,793`** (`+51.4%` vs Baseline), slippage only **`₹69,060`**, and **`v2` hits its #1 highest net P&L of all 30 tests (`+₹383,092`, `+240%` vs Baseline `+₹112,644`)**!
-   - **Conquers Both Problem Regimes:** Makes **Expiry Day (`2026-11-23`) GREEN on both `v1` (`+₹10,895`) and `v2` (`+₹7,529`)** (`+₹18,424` total vs Baseline `-₹57,533`) AND keeps **choppy `2026-11-25` GREEN (`+₹28,429`)**!
+2. **Zero-Drawdown, Highest Risk-Adjusted & Live-Ready Champion — `E10_W3_CAP3`** (`W3` + `Cap <= 3 alerts/symbol/day`) & **`W3_15S_FLAG25_3BAR045_OPT_SPREAD`**:
+   - **`E10_W3_CAP3` finished GREEN IN ALL 8 SESSIONS (`8/8`, `₹0` Paper MaxDD!!)** earning **`+₹1,874,596` Paper / `+₹1,705,447` Delayed (`₹3,664` Delayed DD — highest Delayed net P&L of all `E/W3` variants, beating `W2` Delayed `+₹1,703,692`)**!
+   - **Massive Cost Compression:** Opportunities drop `2,025 → 1,140` (`-43.7%`), trades drop `23,597 → 16,179` (`-31.4%`), win rate climbs from `32.0% → 35.4%`, and brokerage drops by **`₹445,080`** (`₹1,415,820 → ₹970,740`).
+   - **Notice 5 Zero-Drawdown (`8/8` Green, `₹0` Paper DD) Configurations Emerged Under `15s` + `OptScaleSpread`:** `E10_W3_CAP3` (`+₹1,874,596`), `W3` (`+₹1,842,081`), `E6_W3_ATR020` (`+₹1,788,366`), `E5_W2_ATR020` (`+₹1,761,182`, **`₹0` DD in BOTH Paper & Delayed**), and `E4_W2_3BAR060` (`+₹1,536,886`, **`₹0` DD in BOTH Paper & Delayed**).
 
-3. **Biggest Surprise — Midday Freeze (`11:30–13:30`) Was the #1 Drag in `M1`–`M9`:**
-   - Blocking `11:30–13:30` (`H1_MIDDAY_FREEZE`) collapsed 7-day Paper P&L by **`-63.9%`** (`+₹971,498 → +₹351,084`) and quadrupled Max Daily DD to **`₹426,779`**. On `Nov 18`, `Nov 20`, and especially `Nov 25`, morning chop stopped out early trades while profitable recovery/follow-through breakouts happened during `11:30–13:30`.
-   - Direct A/B proof: `M9_ALL_SIGNALS_SCALED` (had Midday Freeze) earned `+₹715,632`; removing Midday Freeze in `W1_15S_OPT_SPREAD` jumped P&L to **`+₹1,483,864`** (`+₹768,232`, **more than double**)!
+3. **Critical Revelation From Upgrading 0.5s Sampling → True Tick-by-Tick Replay:**
+   - Under old `0.5s` equity polling, `H0_BASELINE` looked artificially rosy (`+₹971k` in 7d) because intra-0.5s option bid dips were skipped, AND `structural_convexity_ATM` lost money in `0/30` experiments (`-₹103k`) because `0.5s` delayed its underlying invalidation ticks.
+   - Under true tick-by-tick replay across 8 days, **`H0_BASELINE` drops to `+₹663,718` (`4/8` green, `₹453,775` DD)** — meanwhile `W1`/`W2`/`E10`/`W3` jump nearly **`3×`** (`+₹1.84M–₹2.03M`) and crush drawdown (`₹0–₹26k`)! Even better, **`structural_convexity_ATM` flips from `0/30` losers to `45/45` PROFITABLE (`Avg +₹56,559`, best single day `+₹73,480`)**!
 
-4. **`15s` Elapsed Floor Beats `30s` Resoundingly & Matches Your Hypothesis:**
-   - `H4a_ELAPSED_15S` earned **`+₹1,167,005`** (`+20.1%` vs Baseline `+₹971,498`), whereas `H4b_ELAPSED_30S` **lost money vs Baseline** (`+₹824,119`, `-15.2%`) and hurt `v2` badly (`+₹112.6k → +₹9.7k` Paper, `-₹48.6k` Delayed). `15s` filters opening second-1 RVOL noise without missing real breakouts.
+4. **Isolating Scoring vs Gate vs Option Scaling (`E1`, `E2`, `E14`, `H6a`, `H6b`):**
+   - Pure `ScoringEngine3` improvements alone (`E2`: `15s + Flag25 + 3Bar0.45`, **without** any option scaling/gate) ALREADY **more than doubled `H0_BASELINE`**: `+₹663,718 → +₹1,349,484` (`7/8` green days, DD `₹453,775 → ₹84,409`).
+   - **Adding `OptScale` / `ATR/Spread` (`E14`, `W1`, `W2`):** Rejecting illiquid wide-spread entries via the `ATR/Spread` gate (`E14_W2_GATE_ONLY_NOSCALE`) lifted `E1` from `+₹1,046,055 → +₹1,741,840` (`+₹695,785`), and turning ON option target/SL convexity rescaling (`W2`) added another `+₹229,133` Paper and `+₹219,618` Delayed.
 
-5. **Structural Finding on Tracks (`v1` 12/12 Profitable vs `v2` Split):**
-   - **All 12 `v1` tracks are solidly profitable** under Baseline (`+₹858,854`, `6/7` green days) and climb to **`+₹1,212,473`** (`W2`) or `7/7` zero-DD green days (`+₹815,047` on `W4` / `+₹664,543` on `W6`).
-   - **`v2` (`+₹112,644` Baseline)** is held back by **3 losing tracks** totaling `-₹200,780` in Baseline: `structural_convexity_ATM` (`-₹103,383`, 14.8% WR), `gamma_runner_OTM2` (`-₹56,767`, 25.9% WR), and `delta_scalp_ITM2` (`-₹40,630`, 19.3% WR). Meanwhile the other 5 `v2` tracks (`adaptive_regime_ATM`, `volatility_expansion_ATM`, `trend_pullback_v2_ITM1`, `micro_chandelier_ITM1`, `opening_thrust_convex_ATM`) earned **`+₹313,424`** in Baseline and **`+₹461,305`** (`+₹488,149` on `W2`!) with Option Scaling!
-
----
-
-## 2. Full 30-Experiment Leaderboard (7 Days: `Nov 16–25, 2026`)
-
-> **Legend:** `Opps` = accepted opportunities (`7d` sum); `Trades` = closed trades across all 20 tracks; `WR` = Paper Win Rate (`> +2.5%` move); `DD` = Max Daily Drawdown across the 7 daily P&Ls (`cumulative peak-to-trough`); `Green` = profitable days out of 7; `Pruned (17t)` = `v1 (12)` + the `5` profitable `v2` tracks (excluding `structural_convexity_ATM`, `gamma_runner_OTM2`, `delta_scalp_ITM2`).
-
-| Rank | Experiment ID | Rule Description | Opps | Trades | WR | Paper Net (All 20) | Paper DD | Green | Paper v1 (12t) | Paper v2 (8t) | Delayed Net (All 20) | Delayed DD | Pruned 17t Paper | Pruned 17t Delayed |
-|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| **1** | **`W2_15S_FLAG25_OPT_SPREAD`** | 15s + Flag25 + OptScale + SpreadGate | 1,349 | 18,864 | 34.7% | **+₹1,511,447** | ₹67,771 | 5/7 | **+₹1,212,473** | +₹298,975 | **+₹1,421,488** | ₹67,771 | **+₹1,700,622** | **+₹1,630,824** |
-| **2** | **`W1_15S_OPT_SPREAD`** | 15s + OptScale + SpreadGate | 1,355 | 18,964 | 34.7% | **+₹1,483,864** | ₹67,771 | 5/7 | +₹1,195,900 | +₹287,965 | +₹1,376,967 | ₹67,771 | +₹1,668,485 | +₹1,589,419 |
-| **3** | **`H6b_OPT_SCALE_SPREAD`** | Option Convexity Scale + ATR/Spread Gate | 1,385 | 19,252 | 34.3% | **+₹1,329,644** | ₹54,938 | **6/7** | +₹1,062,412 | +₹267,233 | +₹1,181,570 | ₹82,294 | +₹1,523,716 | +₹1,393,972 |
-| **4** | **`W3_15S_FLAG25_3BAR045_OPT_SPREAD`** | 15s + Flag25 + 3Bar0.45 + OptScale + SpreadGate | **889** | **13,033** | **35.2%** | **+₹1,322,853** | **₹52,123** | **6/7** | +₹939,761 | **+₹383,092** | **+₹1,253,793** | **₹57,033** | +₹1,396,041 | +₹1,354,474 |
-| **5** | `W5_15S_FLAG25_NOFLIP_OPT_SPREAD` | W2 + Block Opposite-Dir Flips (No Cap) | 1,021 | 15,013 | 34.6% | +₹1,261,876 | ₹118,544 | 5/7 | +₹990,236 | +₹271,640 | +₹1,193,512 | ₹124,438 | +₹1,417,485 | +₹1,369,186 |
-| **6** | **`H4a_ELAPSED_15S`** | Min Candle Elapsed >= 15s | 1,446 | 18,763 | 33.1% | +₹1,167,005 | ₹96,581 | 4/7 | +₹989,836 | +₹177,169 | +₹1,014,754 | ₹188,987 | +₹1,355,183 | +₹1,211,455 |
-| **7** | `H6a_OPT_SCALE` | Option Convexity Target/SL Scaling Only | 1,477 | 19,644 | 33.9% | +₹1,118,620 | ₹149,715 | 4/7 | +₹966,375 | +₹152,245 | +₹972,379 | ₹248,678 | +₹1,360,568 | +₹1,232,903 |
-| **8** | **`W4_3BAR045_OPT_SPREAD`** | PURE 3Bar0.45 + OptScale + SpreadGate | 923 | 13,425 | 34.4% | +₹1,101,494 | **₹37,962** | **6/7** | +₹815,047 (**7/7, ₹0 DD**) | +₹286,447 | +₹988,718 (**6/7**) | ₹98,915 | +₹1,204,888 | +₹1,106,713 |
-| **9** | **`H2b_PURE_3BAR_045`** | PURE Net 3-Bar Expansion >= 0.45% | 970 | 13,251 | 33.2% | +₹1,028,615 | ₹52,830 | 5/7 | +₹777,656 | +₹250,959 | +₹906,560 | ₹73,530 | +₹1,109,872 | +₹1,003,119 |
-| **10** | **`H3b_FLAG_BUF_25`** | Flag Trigger >= Pole Top 25% | 1,465 | 18,895 | 32.8% | +₹1,019,668 | ₹112,462 | 4/7 | +₹908,160 | +₹111,508 | +₹821,316 | ₹198,206 | +₹1,222,171 | +₹1,041,761 |
-| **11** | `H3a_FLAG_BUF_15` | Flag OLS + 15% Buffer (Top 35% of Pole) | 1,469 | 18,995 | 32.8% | +₹996,127 | ₹103,076 | 4/7 | +₹909,809 | +₹86,318 | +₹804,243 | ₹201,979 | +₹1,197,033 | +₹1,029,093 |
-| **12** | **`H0_BASELINE`** | **Current Baseline (Unfiltered)** | **1,477** | **19,080** | **32.8%** | **+₹971,498** | **₹109,330** | **4/7** | **+₹858,854** | **+₹112,644** | **+₹828,205** | **₹175,134** | **+₹1,172,278** | **+₹1,051,368** |
-| **13** | `H3c_FLAG_FULL_POLE` | Flag Strict Full Pole High/Low (Ref) | 1,430 | 18,483 | 33.0% | +₹928,583 | ₹242,818 | 4/7 | +₹807,705 | +₹120,878 | +₹730,551 | ₹344,817 | +₹1,128,020 | +₹956,564 |
-| **14** | `W6_BODY025_ATR025_OPT_SPREAD` | Body0.25 + ATR0.25 + OptScale + SpreadGate | 733 | 10,496 | 34.6% | +₹855,833 | **₹21,500** | **6/7** | +₹664,543 (**7/7, ₹0 DD**) | +₹191,291 | +₹761,490 | **₹23,553** | +₹965,934 | +₹883,850 |
-| **15** | `H4b_ELAPSED_30S` | Min Candle Elapsed >= 30s (Ref) | 1,427 | 18,703 | 32.7% | +₹824,119 | ₹187,045 | 4/7 | +₹814,444 | +₹9,676 | +₹595,188 | ₹350,744 | +₹1,057,872 | +₹851,403 |
-| **16** | `H5a_CAP_2` | Cap Alerts <= 2 per Symbol/Day | 1,078 | 14,903 | 33.0% | +₹813,029 | ₹115,794 | 5/7 | +₹775,496 | +₹37,532 | +₹671,716 | ₹125,536 | +₹985,866 | +₹862,998 |
-| **17** | `H2a_MIN_ATR_030` | Min 5m ATR >= 0.30% | 604 | 8,270 | 33.3% | +₹787,955 | ₹79,034 | 6/7 | +₹668,585 | +₹119,370 | +₹658,647 | ₹82,847 | +₹846,730 | +₹723,255 |
-| **18** | `M9_ALL_SIGNALS_SCALED` | Midday + 15s + Flag15 + OptScaleSpread (No Cap) | 749 | 10,880 | 33.5% | +₹715,632 | ₹300,841 | 4/7 | +₹572,913 | +₹142,718 | +₹679,229 | ₹367,175 | +₹854,500 | +₹821,263 |
-| **19** | `H2c_BODY_025_ATR_025` | Min ATR >= 0.25% & PURE Body >= 0.25% | 776 | 10,379 | 33.0% | +₹669,040 | ₹99,222 | 5/7 | +₹582,447 (**7/7, ₹0 DD**) | +₹86,593 | +₹565,583 | ₹150,973 | +₹766,193 | +₹674,458 |
-| **20** | `H5b_CAP_2_NO_FLIP` | Cap <= 2 & Block Opposite Flips | 944 | 13,407 | 32.6% | +₹646,018 | ₹117,620 | 4/7 | +₹577,466 | +₹68,552 | +₹537,389 | ₹164,914 | +₹785,488 | +₹691,827 |
-| **21** | `M1_CORE_CLEAN` | Midday + 15s + Flag15 + Cap2 | 735 | 10,202 | 32.2% | +₹610,484 | ₹265,067 | 4/7 | +₹501,925 | +₹108,559 | +₹513,743 | ₹353,268 | +₹746,243 | +₹660,096 |
-| **22** | `M2_BALANCED` | M1 + Min ATR >= 0.30% | 294 | 4,529 | 33.1% | +₹480,696 | ₹68,058 | 4/7 | +₹381,086 | +₹99,610 | +₹436,259 | ₹71,975 | +₹534,141 | +₹492,469 |
-| **23** | `M7_SPREAD_GATE_CORE` | M1 + NoFlip + OptScaleSpread | 629 | 9,389 | 32.5% | +₹434,654 | ₹362,092 | 4/7 | +₹402,053 | +₹32,601 | +₹357,653 | ₹441,722 | +₹594,886 | +₹524,360 |
-| **24** | `M4_BALANCED_SCALED` | M2 + Option Scaling | 294 | 4,664 | 34.0% | +₹424,290 | ₹80,551 | 3/7 | +₹330,474 | +₹93,816 | +₹390,975 | ₹125,467 | +₹480,719 | +₹452,994 |
-| **25** | `M6_HIGH_CONVICTION` | Midday + 15s + Flag25 + 3Bar0.45 + ATR0.30 + Cap2NoFlip + Scaled | 269 | 4,342 | 33.6% | +₹374,740 | ₹79,864 | 3/7 | +₹304,854 | +₹69,886 | +₹357,050 | ₹106,264 | +₹449,315 | +₹436,917 |
-| **26** | `H1_MIDDAY_FREEZE` | Midday Freeze Only (`11:30–13:30`) | 830 | 11,105 | 31.4% | +₹351,084 | ₹426,779 | 3/7 | +₹322,823 | +₹28,261 | +₹324,593 | ₹453,524 | +₹511,019 | +₹488,184 |
-| **27** | `M3_SMART_IMPULSE` | M1 + 3Bar0.45 + ATR0.25 | 348 | 5,264 | 31.9% | +₹329,718 | ₹233,101 | 3/7 | +₹254,938 | +₹74,780 | +₹313,284 | ₹258,681 | +₹413,328 | +₹403,613 |
-| **28** | `H5c_CAP_1` | Cap Alerts <= 1 per Symbol/Day | 632 | 9,311 | 32.3% | +₹318,394 | ₹211,055 | 3/7 | +₹339,144 | -₹20,751 | +₹213,016 | ₹294,508 | +₹447,893 | +₹360,127 |
-| **29** | `M8_BODY025_SPREAD_SCALED` | Midday + 15s + Flag15 + ATR0.25 + Body0.25 + Cap2NoFlip + Scaled | 321 | 5,087 | 33.4% | +₹274,435 | ₹233,661 | 3/7 | +₹208,225 | +₹66,210 | +₹213,254 | ₹292,778 | +₹359,718 | +₹304,447 |
-| **30** | `M5_IMPULSE_SCALED` | M3 + Option Scaling | 348 | 5,439 | 32.3% | +₹221,441 | ₹346,371 | 3/7 | +₹153,067 | +₹68,374 | +₹220,166 | ₹356,945 | +₹315,545 | +₹316,457 |
+5. **Track Consistency, Upside & Risk Verdict Across All 45 Experiments:**
+   - **18 out of 20 tracks** were net-positive on average across all 45 configs (`17` tracks were **`45/45` (`100%`) profitable across every single config tested!**).
+   - **Most Consistent All-Weather Track:** **`fixed_target_ATM`** (`45/45` positive, **`7.33/8` (`91.7%`) green days**, `27/45` zero-DD configs, lowest `AvgDD = ₹2,855`, `Calmar = 30.2x`, `Daily Sharpe = 1.217`, worst experiment still **`+₹30,683`**) closely followed by **`trend_pullback_ATM`** (`45/45` positive, **`+₹98,032` avg P&L**, `92.7%` Delayed retention, `AvgDD = ₹3,565`, `6.96/8` green) and **`composite_shared_ATM`** (`45/45`, `7.13/8` green, `Avg = +₹87,714`).
+   - **Highest Upside / Highest Highs Champion:** **`volatility_expansion_ATM`** (`45/45` positive, **`#1` Avg 8d P&L `+₹107,827`**, **`#1` Peak 8d `+₹198,840`** on `W5`, `BestDay = +₹52,347`). Single-day jackpot outlier: `structural_convexity_ATM` (`+₹73,480` on a single trend day).
+   - **Only True Dead Weight (`0/45` profitable):** **`gamma_runner_OTM2`** (`Avg -₹79,678` Paper / `-₹81,556` Delayed, `Max -₹47,141`). Retire/disable immediately.
 
 ---
 
-## 3. Day-by-Day Breakdown (`Nov 16 – Nov 25`)
+## 2. Full 45-Experiment Performance Matrix (8 Days: `Nov 16 – Nov 26, 2026`)
+
+> **Legend:** `Opps` = accepted opportunities (`8d`); `Tr (P)` = closed Paper trades across all 20 tracks; `WR` = Paper Win Rate (`> +2.5%`); `DD` = Peak-to-Trough cumulative Daily Drawdown over the 8 days; `Grn` = profitable days out of 8; `Ret/DD` = `Paper Net / Paper DD`; `Pruned 19t` excludes `gamma_runner_OTM2`; `Pruned 18t` excludes both `gamma_runner_OTM2` & `delta_scalp_ITM2`.
+
+| Rank | Experiment ID | Rule Description | Opps | Tr (P) | WR | Paper Net (All 20) | Paper DD | Grn | Ret/DD | Paper v1 (12t) | Paper v2 (8t) | Delayed Net (All 20) | Delayed DD | Pruned 19t (P / D) | Pruned 18t (P) |
+|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **1** | `W1_15S_OPT_SPREAD` | 15s + OptScale + SpreadGate | 1,836 | 23,469 | 34.3% | **+₹2,032,094** | ₹26,060 | 7/8 | 78.0x | +₹1,345,946 | +₹686,148 | **+₹1,712,076** | ₹26,060 | +₹2,134,701 / +₹1,830,822 | +₹2,048,267 |
+| **2** | `W2_15S_FLAG25_OPT_SPREAD` | 15s + Flag25 + OptScale + SpreadGate | 1,825 | 23,316 | 34.3% | **+₹1,970,972** | ₹26,060 | 7/8 | 75.6x | +₹1,289,741 | +₹681,231 | **+₹1,703,692** | ₹26,060 | +₹2,074,278 / +₹1,801,166 | +₹1,986,111 |
+| **3** | `E10_W3_CAP3` | W3 + Cap <= 3 per Symbol/Day | 1,140 | 16,179 | 35.4% | **+₹1,874,596** | ₹0 | 8/8 | **∞** | +₹1,225,343 | +₹649,253 | **+₹1,705,447** | ₹3,664 | +₹1,948,082 / +₹1,778,671 | +₹1,862,882 |
+| **4** | `W3_15S_FLAG25_3BAR045_OPT_SPREAD` | 15s + Flag25 + 3Bar0.45 + OptScale + SpreadGate | 1,212 | 17,000 | 35.1% | **+₹1,842,081** | ₹0 | 8/8 | **∞** | +₹1,185,660 | +₹656,421 | **+₹1,633,037** | ₹5,858 | +₹1,915,705 / +₹1,701,995 | +₹1,831,231 |
+| **5** | `E6_W3_ATR020` | W3 + Min 5m ATR >= 0.20% | 1,100 | 15,420 | 35.1% | **+₹1,788,366** | ₹0 | 8/8 | **∞** | +₹1,146,775 | +₹641,591 | **+₹1,638,703** | ₹1,782 | +₹1,867,334 / +₹1,713,110 | +₹1,793,294 |
+| **6** | `E9_W2_CAP3` | W2 + Cap <= 3 per Symbol/Day | 1,636 | 21,596 | 34.2% | +₹1,782,343 | ₹54,415 | 6/8 | 32.8x | +₹1,156,314 | +₹626,030 | +₹1,548,208 | ₹57,656 | +₹1,891,276 / +₹1,649,678 | +₹1,818,307 |
+| **7** | `E5_W2_ATR020` | W2 + Min 5m ATR >= 0.20% | 1,439 | 18,716 | 34.4% | +₹1,761,182 | ₹0 | 8/8 | **∞** | +₹1,131,295 | +₹629,887 | +₹1,555,033 | ₹0 | +₹1,853,248 / +₹1,644,640 | +₹1,790,634 |
+| **8** | `E7_W2_FLIPCD30` | W2 + 30m Opposite-Flip Cooldown | 1,774 | 22,737 | 34.1% | +₹1,753,985 | ₹26,060 | 6/8 | 67.3x | +₹1,159,446 | +₹594,539 | +₹1,548,595 | ₹82,171 | +₹1,863,075 / +₹1,657,674 | +₹1,796,102 |
+| **9** | `E14_W2_GATE_ONLY_NOSCALE` | 15s + Flag25 + ATR/Spread Gate (No Target/SL Rescale) | 1,825 | 22,266 | 33.3% | +₹1,741,840 | ₹31,023 | 6/8 | 56.1x | +₹1,108,767 | +₹633,073 | +₹1,484,074 | ₹41,664 | +₹1,813,754 / +₹1,568,568 | +₹1,714,641 |
+| **10** | `E8_W3_FLIPCD30` | W3 + 30m Opposite-Flip Cooldown | 1,188 | 16,757 | 35.0% | +₹1,737,537 | ₹623 | 7/8 | 2788.8x | +₹1,114,543 | +₹622,995 | +₹1,577,307 | ₹9,071 | +₹1,806,051 / +₹1,645,904 | +₹1,737,313 |
+| **11** | `W5_15S_FLAG25_NOFLIP_OPT_SPREAD` | W2 + Block Opposite-Dir Flips (No Cap) | 1,357 | 18,822 | 34.6% | +₹1,727,783 | ₹81,005 | 6/8 | 21.3x | +₹1,090,209 | +₹637,574 | +₹1,597,211 | ₹87,969 | +₹1,843,600 / +₹1,716,923 | +₹1,775,899 |
+| **12** | `E3_W2_3BAR035` | 15s + Flag25 + PURE 3Bar>=0.35% + OptScaleSpread | 1,520 | 20,051 | 34.1% | +₹1,707,674 | ₹41,664 | 7/8 | 41.0x | +₹1,108,106 | +₹599,569 | +₹1,486,197 | ₹50,782 | +₹1,806,037 / +₹1,585,525 | +₹1,737,733 |
+| **13** | `H6b_OPT_SCALE_SPREAD` | Option Convexity Scale + ATR/Spread Gate | 1,880 | 23,814 | 33.8% | +₹1,699,264 | ₹13,025 | 6/8 | 130.5x | +₹1,088,719 | +₹610,545 | +₹1,381,151 | ₹52,667 | +₹1,798,805 / +₹1,486,949 | +₹1,732,010 |
+| **14** | `E15_15S_FLAG25_BODY035_SCALED` | 15s + Flag25 + PURE Body>=0.35% + OptScaleSpread | 915 | 13,150 | 35.8% | +₹1,696,922 | ₹660 | 7/8 | 2571.1x | +₹1,102,150 | +₹594,772 | +₹1,586,805 | ₹660 | +₹1,766,762 / +₹1,658,462 | +₹1,692,851 |
+| **15** | `E11_W2_FREEZE1400` | W2 + Entry Freeze at 14:00 IST | 1,396 | 18,325 | 34.8% | +₹1,683,618 | ₹4,914 | 7/8 | 342.6x | +₹1,151,846 | +₹531,773 | +₹1,444,902 | ₹10,659 | +₹1,781,469 / +₹1,540,095 | +₹1,699,765 |
+| **16** | `E12_W3_FREEZE1400` | W3 + Entry Freeze at 14:00 IST | 978 | 13,841 | 35.3% | +₹1,583,070 | ₹27,606 | 7/8 | 57.3x | +₹1,050,354 | +₹532,716 | +₹1,429,954 | ₹34,995 | +₹1,630,211 / +₹1,474,793 | +₹1,562,766 |
+| **17** | `E4_W2_3BAR060` | 15s + Flag25 + PURE 3Bar>=0.60% + OptScaleSpread | 824 | 12,201 | 35.2% | +₹1,536,886 | ₹0 | 8/8 | **∞** | +₹997,154 | +₹539,732 | +₹1,398,631 | ₹0 | +₹1,602,456 / +₹1,465,016 | +₹1,541,759 |
+| **18** | `W4_3BAR045_OPT_SPREAD` | PURE 3Bar0.45 + OptScale + SpreadGate | 1,264 | 17,530 | 34.1% | +₹1,401,487 | ₹24,993 | 6/8 | 56.1x | +₹882,366 | +₹519,121 | +₹1,241,896 | ₹67,658 | +₹1,485,218 / +₹1,327,599 | +₹1,426,281 |
+| **19** | `E2_15S_FLAG25_3BAR045_SCORING` | 15s + Flag25 + 3Bar0.45 (Pure Scoring Only) | 1,298 | 16,730 | 33.2% | +₹1,349,484 | ₹84,409 | 7/8 | 16.0x | +₹992,821 | +₹356,663 | +₹1,228,225 | ₹90,817 | +₹1,396,790 / +₹1,278,581 | +₹1,441,902 |
+| **20** | `E13_W2_SPREAD2PCT` | W2 + Tight 2% Option Spread Cap | 1,556 | 18,258 | 32.9% | +₹1,282,102 | ₹35,885 | 7/8 | 35.7x | +₹882,804 | +₹399,298 | +₹1,113,562 | ₹41,891 | +₹1,358,481 / +₹1,185,687 | +₹1,269,247 |
+| **21** | `H4a_ELAPSED_15S` | Min Candle Elapsed >= 15s | 1,980 | 23,181 | 32.6% | +₹1,161,823 | ₹186,925 | 5/8 | 6.2x | +₹935,930 | +₹225,893 | +₹894,937 | ₹360,326 | +₹1,238,633 / +₹985,377 | +₹1,314,274 |
+| **22** | `W6_BODY025_ATR025_OPT_SPREAD` | Body0.25 + ATR0.25 + OptScale + SpreadGate | 1,024 | 14,076 | 34.2% | +₹1,136,106 | ₹47,295 | 7/8 | 24.0x | +₹699,755 | +₹436,351 | +₹939,378 | ₹51,750 | +₹1,200,463 / +₹1,003,942 | +₹1,171,706 |
+| **23** | `E1_15S_FLAG25_SCORING_ONLY` | 15s + Flag25 (Pure Scoring, No OptScale/Gate) | 1,969 | 23,031 | 32.4% | +₹1,046,055 | ₹261,708 | 5/8 | 4.0x | +₹822,024 | +₹224,031 | +₹810,403 | ₹392,666 | +₹1,119,800 / +₹893,817 | +₹1,192,618 |
+| **24** | `H2b_PURE_3BAR_045` | PURE Net 3-Bar Expansion >= 0.45% | 1,350 | 17,281 | 32.4% | +₹979,525 | ₹100,793 | 5/8 | 9.7x | +₹780,000 | +₹199,526 | +₹823,872 | ₹119,959 | +₹1,041,244 / +₹889,238 | +₹1,102,221 |
+| **25** | `H6a_OPT_SCALE` | Option Convexity Target/SL Scaling Only | 2,025 | 24,655 | 33.1% | +₹971,255 | ₹373,825 | 4/8 | 2.6x | +₹826,055 | +₹145,200 | +₹730,848 | ₹503,400 | +₹1,075,044 / +₹840,362 | +₹1,203,274 |
+| **26** | `M9_ALL_SIGNALS_SCALED` | Midday + 15s + Flag15 + OptScaleSpread (No Cap) | 1,066 | 14,055 | 33.4% | +₹963,403 | ₹245,494 | 5/8 | 3.9x | +₹625,942 | +₹337,462 | +₹865,690 | ₹325,723 | +₹1,038,013 / +₹943,306 | +₹1,015,672 |
+| **27** | `H3c_FLAG_FULL_POLE` | Flag Strict Full Pole High/Low (Ref) | 1,944 | 22,717 | 32.5% | +₹853,943 | ₹364,883 | 4/8 | 2.3x | +₹731,072 | +₹122,872 | +₹475,818 | ₹645,893 | +₹944,609 / +₹573,920 | +₹1,027,342 |
+| **28** | `H4b_ELAPSED_30S` | Min Candle Elapsed >= 30s (Ref) | 1,949 | 23,013 | 32.2% | +₹777,272 | ₹451,520 | 4/8 | 1.7x | +₹699,152 | +₹78,120 | +₹401,396 | ₹755,650 | +₹878,041 / +₹498,140 | +₹987,492 |
+| **29** | `H3a_FLAG_BUF_15` | Flag OLS + 15% Buffer (Top 35% of Pole) | 2,018 | 23,586 | 32.0% | +₹739,837 | ₹379,246 | 4/8 | 2.0x | +₹693,253 | +₹46,584 | +₹637,969 | ₹390,790 | +₹833,261 / +₹731,905 | +₹925,696 |
+| **30** | `H2c_BODY_025_ATR_025` | Min ATR >= 0.25% & PURE Body >= 0.25% | 1,081 | 13,970 | 32.1% | +₹695,981 | ₹78,912 | 6/8 | 8.8x | +₹614,850 | +₹81,131 | +₹497,516 | ₹192,643 | +₹763,138 / +₹566,276 | +₹822,305 |
+| **31** | `H3b_FLAG_BUF_25` | Flag Trigger >= Pole Top 25% | 2,005 | 23,364 | 32.1% | +₹678,646 | ₹428,427 | 4/8 | 1.6x | +₹628,576 | +₹50,070 | +₹558,189 | ₹450,022 | +₹769,223 / +₹650,821 | +₹860,198 |
+| **32** | `H0_BASELINE` | Current Baseline (Unfiltered) | 2,025 | 23,597 | 32.0% | +₹663,718 | ₹453,775 | 4/8 | 1.5x | +₹661,761 | +₹1,958 | +₹536,194 | ₹488,061 | +₹755,056 / +₹628,046 | +₹854,114 |
+| **33** | `M7_SPREAD_GATE_CORE` | M1 + NoFlip + OptScaleSpread | 861 | 12,035 | 33.0% | +₹656,246 | ₹259,625 | 4/8 | 2.5x | +₹451,755 | +₹204,490 | +₹566,383 | ₹318,543 | +₹753,536 / +₹664,860 | +₹741,660 |
+| **34** | `H5b_CAP_2_NO_FLIP` | Cap <= 2 & Block Opposite Flips | 1,267 | 17,162 | 32.1% | +₹639,010 | ₹257,232 | 4/8 | 2.5x | +₹567,877 | +₹71,133 | +₹496,796 | ₹344,812 | +₹717,777 / +₹581,229 | +₹766,299 |
+| **35** | `M8_BODY025_SPREAD_SCALED` | Midday + 15s + Flag15 + ATR0.25 + Body0.25 + Cap2NoFlip + Scaled | 486 | 7,316 | 34.1% | +₹638,443 | ₹143,702 | 5/8 | 4.4x | +₹386,764 | +₹251,679 | +₹546,568 | ₹180,408 | +₹695,358 / +₹603,679 | +₹686,290 |
+| **36** | `H5c_CAP_1` | Cap Alerts <= 1 per Symbol/Day | 841 | 12,071 | 32.7% | +₹538,728 | ₹171,920 | 5/8 | 3.1x | +₹477,784 | +₹60,944 | +₹381,118 | ₹280,822 | +₹600,276 / +₹444,251 | +₹638,604 |
+| **37** | `H5a_CAP_2` | Cap Alerts <= 2 per Symbol/Day | 1,442 | 18,656 | 31.8% | +₹513,646 | ₹374,218 | 5/8 | 1.4x | +₹491,113 | +₹22,533 | +₹360,045 | ₹440,983 | +₹609,195 / +₹461,100 | +₹680,821 |
+| **38** | `M3_SMART_IMPULSE` | M1 + 3Bar0.45 + ATR0.25 | 518 | 7,485 | 31.8% | +₹507,695 | ₹205,440 | 5/8 | 2.5x | +₹342,735 | +₹164,960 | +₹402,211 | ₹242,435 | +₹560,593 / +₹456,941 | +₹586,450 |
+| **39** | `M1_CORE_CLEAN` | Midday + 15s + Flag15 + Cap2 | 1,024 | 13,073 | 31.7% | +₹486,673 | ₹352,856 | 4/8 | 1.4x | +₹392,467 | +₹94,206 | +₹379,295 | ₹435,432 | +₹561,925 / +₹460,050 | +₹634,565 |
+| **40** | `H2a_MIN_ATR_030` | Min 5m ATR >= 0.30% | 853 | 11,381 | 32.0% | +₹485,657 | ₹242,827 | 6/8 | 2.0x | +₹509,053 | -₹23,396 | +₹314,675 | ₹313,309 | +₹572,858 / +₹403,435 | +₹604,979 |
+| **41** | `M2_BALANCED` | M1 + Min ATR >= 0.30% | 449 | 6,503 | 32.5% | +₹455,809 | ₹87,012 | 5/8 | 5.2x | +₹377,977 | +₹77,831 | +₹347,009 | ₹187,194 | +₹517,081 / +₹408,086 | +₹537,481 |
+| **42** | `M5_IMPULSE_SCALED` | M3 + Option Scaling | 518 | 7,890 | 32.6% | +₹392,356 | ₹295,373 | 5/8 | 1.3x | +₹230,191 | +₹162,166 | +₹333,152 | ₹316,519 | +₹441,600 / +₹382,466 | +₹473,952 |
+| **43** | `M6_HIGH_CONVICTION` | Midday + 15s + Flag25 + 3Bar0.45 + ATR0.30 + Cap2NoFlip + Scaled | 402 | 6,298 | 33.2% | +₹366,181 | ₹102,761 | 4/8 | 3.6x | +₹296,777 | +₹69,404 | +₹332,549 | ₹139,844 | +₹431,633 / +₹398,130 | +₹449,399 |
+| **44** | `M4_BALANCED_SCALED` | M2 + Option Scaling | 449 | 6,818 | 33.1% | +₹340,652 | ₹179,204 | 4/8 | 1.9x | +₹282,101 | +₹58,551 | +₹254,356 | ₹265,754 | +₹400,579 / +₹314,425 | +₹423,385 |
+| **45** | `H1_MIDDAY_FREEZE` | Midday Freeze Only (11:30-13:30) | 1,188 | 14,354 | 31.5% | +₹203,383 | ₹551,523 | 3/8 | 0.4x | +₹249,476 | -₹46,093 | +₹154,424 | ₹574,396 | +₹274,591 / +₹229,845 | +₹354,026 |
+
+---
+
+## 3. Day-by-Day Breakdown (`Nov 16 – Nov 26`, Key Experiments)
 
 Each cell shows **Paper Net (`v1` / `v2`)** on top and **Delayed Net** underneath (`All 20` tracks):
 
-| Experiment | `Nov 16` | `Nov 17` | `Nov 18` | `Nov 19` | `Nov 20` | `Nov 23` *(Expiry)* | `Nov 25` *(Choppy)* | 7-Day Total |
-|---|---|---|---|---|---|---|---|---|
-| **`H0_BASELINE`** *(P)*<br>*(Delayed)* | `-74,753` `(+3.9k/-78.7k)`<br>`-84,214` | `+540,062` `(+364.2k/+175.8k)`<br>`+533,256` | `+248,529` `(+196.8k/+51.7k)`<br>`+242,527` | `+230,611` `(+163.3k/+67.3k)`<br>`+204,592` | `+136,379` `(+108.0k/+28.4k)`<br>`+107,179` | `-57,533` `(-31.8k/-25.7k)`<br>`-56,708` | `-51,796` `(+54.4k/-106.2k)`<br>`-118,426` | **`+971,498`**<br>**`+828,205`** |
-| **`W2_15S_FLAG25_OPT_SPREAD`** *(P)*<br>*(Delayed)* | `-54,535` `(+8.7k/-63.2k)`<br>`-60,747` | **`+647,132`** `(+436.1k/+211.1k)`<br>`+645,676` | `+344,497` `(+258.3k/+86.2k)`<br>`+338,487` | **`+304,092`** `(+228.5k/+75.6k)`<br>`+289,281` | **`+217,814`** `(+135.0k/+82.8k)`<br>`+206,663` | `-67,771` `(-35.9k/-31.9k)`<br>`-67,771` | **`+120,218`** `(+181.9k/-61.6k)`<br>**`+69,899`** | **`+1,511,447`**<br>**`+1,421,488`** |
-| **`W1_15S_OPT_SPREAD`** *(P)*<br>*(Delayed)* | `-13,845` `(+38.4k/-52.3k)`<br>`-18,558` | `+631,957` `(+417.0k/+215.0k)`<br>`+626,436` | `+344,497` `(+258.3k/+86.2k)`<br>`+338,487` | `+266,571` `(+197.6k/+68.9k)`<br>`+253,475` | **`+218,481`** `(+135.9k/+82.6k)`<br>`+202,276` | `-67,771` `(-35.9k/-31.9k)`<br>`-67,771` | `+103,974` `(+184.6k/-80.6k)`<br>`+42,622` | **`+1,483,864`**<br>**`+1,376,967`** |
-| **`H6b_OPT_SCALE_SPREAD`** *(P)*<br>*(Delayed)* | **`+12,048`** `(+55.7k/-43.7k)`<br>**`+5,829`** | `+565,428` `(+366.0k/+199.4k)`<br>`+551,184` | `+317,511` `(+239.2k/+78.3k)`<br>`+315,558` | `+271,006` `(+204.3k/+66.7k)`<br>`+260,030` | `+146,629` `(+103.9k/+42.7k)`<br>`+131,263` | `-54,938` `(-28.5k/-26.5k)`<br>`-54,488` | `+71,960` `(+121.7k/-49.8k)`<br>`-27,806` | **`+1,329,644`**<br>**`+1,181,570`** |
-| **`W3_15S_FLAG25_3BAR045_OPT_SPREAD`** *(P)*<br>*(Delayed)* | `-52,123` `(-22.4k/-29.7k)`<br>`-57,033` | `+584,959` `(+359.5k/+225.4k)`<br>`+576,139` | **`+409,178`** `(+288.2k/+121.0k)`<br>**`+404,064`** | `+158,829` `(+124.9k/+33.9k)`<br>`+144,735` | `+175,156` `(+94.4k/+80.7k)`<br>`+174,686` | **`+18,424`** `(+10.9k/+7.5k)`<br>**`+18,424`** | **`+28,429`** `(+84.2k/-55.8k)`<br>`-7,220` | **`+1,322,853`**<br>**`+1,253,793`** |
-| **`W4_3BAR045_OPT_SPREAD`** *(P)*<br>*(Delayed)* | **`+8,675`** `(+20.5k/-11.8k)`<br>**`+3,537`** | `+506,878` `(+307.4k/+199.5k)`<br>`+483,200` | `+371,150` `(+262.2k/+109.0k)`<br>`+368,087` | `+120,787` `(+96.0k/+24.8k)`<br>`+106,343` | `+100,710` `(+60.6k/+40.2k)`<br>`+94,760` | **`+31,256`** `(+18.3k/+13.0k)`<br>**`+31,706`** | `-37,962` `(+50.1k/-88.1k)`<br>`-98,915` | **`+1,101,494`**<br>**`+988,718`** |
-| **`W5_15S_FLAG25_NOFLIP_OPT_SPREAD`** *(P)*<br>*(Delayed)* | `-118,544` `(-47.5k/-71.1k)`<br>`-124,438` | `+509,176` `(+319.3k/+189.9k)`<br>`+514,430` | `+344,624` `(+253.9k/+90.7k)`<br>`+345,972` | `+277,117` `(+183.3k/+93.8k)`<br>`+267,581` | `+175,197` `(+130.2k/+45.0k)`<br>`+160,853` | `-67,400` `(-35.9k/-31.5k)`<br>`-67,400` | **`+141,705`** `(+186.9k/-45.2k)`<br>**`+96,514`** | **`+1,261,876`**<br>**`+1,193,512`** |
-| **`H4a_ELAPSED_15S`** *(P)*<br>*(Delayed)* | `-56,939` `(+24.0k/-80.9k)`<br>`-66,632` | `+615,378` `(+412.8k/+202.6k)`<br>`+620,282` | `+263,362` `(+205.6k/+57.8k)`<br>`+260,147` | `+238,455` `(+166.9k/+71.6k)`<br>`+221,177` | `+203,330` `(+140.5k/+62.8k)`<br>`+168,768` | `-68,183` `(-37.5k/-30.7k)`<br>`-68,183` | `-28,398` `(+77.6k/-106.0k)`<br>`-120,804` | **`+1,167,005`**<br>**`+1,014,754`** |
-| **`H2b_PURE_3BAR_045`** *(P)*<br>*(Delayed)* | `-52,830` `(-14.0k/-38.8k)`<br>`-61,815` | `+543,687` `(+326.3k/+217.4k)`<br>`+527,712` | `+301,306` `(+222.8k/+78.5k)`<br>`+295,144` | `+123,606` `(+98.7k/+24.9k)`<br>`+109,455` | `+97,197` `(+82.6k/+14.6k)`<br>`+83,382` | **`+25,386`** `(+15.6k/+9.8k)`<br>**`+26,211`** | `-9,738` `(+45.7k/-55.4k)`<br>`-73,530` | **`+1,028,615`**<br>**`+906,560`** |
-| **`H1_MIDDAY_FREEZE`** *(P)*<br>*(Delayed)* | `-62,582` `(-2.0k/-60.6k)`<br>`-63,669` | `+542,866` `(+334.5k/+208.4k)`<br>`+558,120` | `+96,669` `(+82.9k/+13.8k)`<br>`+94,258` | `+200,910` `(+150.2k/+50.7k)`<br>`+189,409` | `-2,754` `(+15.2k/-17.9k)`<br>`-11,670` | `-69,092` `(-36.6k/-32.5k)`<br>`-69,092` | **`-354,933`** `(-221.2k/-133.7k)`<br>`-372,762` | **`+351,084`**<br>**`+324,593`** |
+| Experiment | Nov 16 | Nov 17 | Nov 18 | Nov 19 | Nov 20 | Nov 23 | Nov 25 | Nov 26 | 8-Day Total |
+|---|---|---|---|---|---|---|---|---|---|
+| **`H0_BASELINE`** *(P)*<br>*(Delayed)* | `-₹107,246` `(-6.9k/-100.3k)`<br>`-₹124,420` | `+₹414,337` `(+290.4k/+124.0k)`<br>`+₹405,741` | `+₹155,057` `(+117.4k/+37.7k)`<br>`+₹144,784` | `+₹401,226` `(+231.2k/+170.0k)`<br>`+₹380,352` | `+₹254,121` `(+129.2k/+125.0k)`<br>`+₹217,799` | `-₹56,271` `(-31.0k/-25.2k)`<br>`-₹55,446` | `-₹85,068` `(+45.2k/-130.3k)`<br>`-₹158,246` | `-₹312,436` `(-113.6k/-198.9k)`<br>`-₹274,370` | **`+₹663,718`**<br>**`+₹536,194`** |
+| **`W1_15S_OPT_SPREAD`** *(P)*<br>*(Delayed)* | `+₹58,415` `(+79.4k/-20.9k)`<br>`+₹44,270` | `+₹629,223` `(+383.7k/+245.5k)`<br>`+₹619,416` | `+₹273,656` `(+194.3k/+79.4k)`<br>`+₹262,385` | `+₹422,551` `(+250.2k/+172.3k)`<br>`+₹394,597` | `+₹396,123` `(+188.4k/+207.7k)`<br>`+₹372,902` | `-₹26,060` `(-19.2k/-6.9k)`<br>`-₹26,060` | `+₹175,374` `(+164.5k/+10.9k)`<br>`+₹55,559` | `+₹102,812` `(+104.6k/-1.8k)`<br>`-₹10,993` | **`+₹2,032,094`**<br>**`+₹1,712,076`** |
+| **`W2_15S_FLAG25_OPT_SPREAD`** *(P)*<br>*(Delayed)* | `+₹7,091` `(+41.9k/-34.8k)`<br>`+₹8,827` | `+₹627,265` `(+379.4k/+247.8k)`<br>`+₹612,591` | `+₹273,656` `(+194.3k/+79.4k)`<br>`+₹262,385` | `+₹437,623` `(+256.3k/+181.3k)`<br>`+₹405,560` | `+₹393,336` `(+185.2k/+208.1k)`<br>`+₹369,079` | `-₹26,060` `(-19.2k/-6.9k)`<br>`-₹26,060` | `+₹178,296` `(+158.5k/+19.8k)`<br>`+₹54,591` | `+₹79,764` `(+93.3k/-13.6k)`<br>`+₹16,719` | **`+₹1,970,972`**<br>**`+₹1,703,692`** |
+| **`E10_W3_CAP3`** *(P)*<br>*(Delayed)* | `+₹1,661` `(+19.4k/-17.7k)`<br>`-₹3,664` | `+₹476,125` `(+276.0k/+200.1k)`<br>`+₹451,257` | `+₹355,727` `(+239.9k/+115.8k)`<br>`+₹353,765` | `+₹264,205` `(+169.8k/+94.4k)`<br>`+₹249,571` | `+₹294,529` `(+116.3k/+178.2k)`<br>`+₹281,658` | `+₹16,975` `(+7.9k/+9.1k)`<br>`+₹16,975` | `+₹83,868` `(+65.7k/+18.2k)`<br>`+₹51,178` | `+₹381,505` `(+330.4k/+51.1k)`<br>`+₹304,707` | **`+₹1,874,596`**<br>**`+₹1,705,447`** |
+| **`W3_15S_FLAG25_3BAR045_OPT_SPREAD`** *(P)*<br>*(Delayed)* | `+₹2,574` `(+25.8k/-23.2k)`<br>`-₹5,858` | `+₹608,638` `(+345.2k/+263.4k)`<br>`+₹604,643` | `+₹320,934` `(+219.0k/+101.9k)`<br>`+₹318,416` | `+₹235,914` `(+155.1k/+80.9k)`<br>`+₹220,577` | `+₹283,548` `(+114.3k/+169.2k)`<br>`+₹270,514` | `+₹16,975` `(+7.9k/+9.1k)`<br>`+₹16,975` | `+₹74,390` `(+52.5k/+21.9k)`<br>`+₹21,266` | `+₹299,108` `(+265.9k/+33.2k)`<br>`+₹186,505` | **`+₹1,842,081`**<br>**`+₹1,633,037`** |
+| **`E6_W3_ATR020`** *(P)*<br>*(Delayed)* | `+₹4,063` `(+20.1k/-16.0k)`<br>`-₹1,782` | `+₹633,809` `(+364.8k/+269.0k)`<br>`+₹616,483` | `+₹289,778` `(+206.2k/+83.6k)`<br>`+₹288,236` | `+₹151,099` `(+92.6k/+58.5k)`<br>`+₹140,959` | `+₹259,489` `(+97.8k/+161.7k)`<br>`+₹249,047` | `+₹16,975` `(+7.9k/+9.1k)`<br>`+₹16,975` | `+₹69,532` `(+49.3k/+20.2k)`<br>`+₹32,784` | `+₹363,622` `(+308.1k/+55.5k)`<br>`+₹296,002` | **`+₹1,788,366`**<br>**`+₹1,638,703`** |
+| **`E5_W2_ATR020`** *(P)*<br>*(Delayed)* | `+₹16,392` `(+42.7k/-26.3k)`<br>`+₹13,409` | `+₹563,544` `(+344.4k/+219.1k)`<br>`+₹550,709` | `+₹282,808` `(+199.7k/+83.1k)`<br>`+₹281,220` | `+₹181,961` `(+114.1k/+67.9k)`<br>`+₹170,680` | `+₹388,995` `(+185.5k/+203.5k)`<br>`+₹363,193` | `+₹11,519` `(+3.9k/+7.6k)`<br>`+₹11,519` | `+₹118,063` `(+102.8k/+15.2k)`<br>`+₹50,954` | `+₹197,900` `(+138.2k/+59.7k)`<br>`+₹113,349` | **`+₹1,761,182`**<br>**`+₹1,555,033`** |
+| **`E14_W2_GATE_ONLY_NOSCALE`** *(P)*<br>*(Delayed)* | `-₹31,023` `(+17.7k/-48.7k)`<br>`-₹41,664` | `+₹616,323` `(+377.8k/+238.5k)`<br>`+₹588,625` | `+₹188,247` `(+130.7k/+57.6k)`<br>`+₹183,690` | `+₹381,768` `(+213.6k/+168.1k)`<br>`+₹354,966` | `+₹351,347` `(+159.6k/+191.8k)`<br>`+₹319,073` | `-₹30,160` `(-21.1k/-9.0k)`<br>`-₹30,160` | `+₹237,141` `(+204.8k/+32.3k)`<br>`+₹117,354` | `+₹28,196` `(+25.6k/+2.6k)`<br>`-₹7,810` | **`+₹1,741,840`**<br>**`+₹1,484,074`** |
+| **`W5_15S_FLAG25_NOFLIP_OPT_SPREAD`** *(P)*<br>*(Delayed)* | `-₹81,005` `(-20.4k/-60.6k)`<br>`-₹87,969` | `+₹521,169` `(+313.4k/+207.7k)`<br>`+₹533,331` | `+₹299,404` `(+208.7k/+90.7k)`<br>`+₹293,584` | `+₹331,591` `(+183.4k/+148.2k)`<br>`+₹310,324` | `+₹379,522` `(+199.0k/+180.6k)`<br>`+₹351,827` | `-₹26,060` `(-19.2k/-6.9k)`<br>`-₹26,060` | `+₹182,393` `(+140.3k/+42.1k)`<br>`+₹171,637` | `+₹120,769` `(+85.0k/+35.7k)`<br>`+₹50,537` | **`+₹1,727,783`**<br>**`+₹1,597,211`** |
+| **`H6b_OPT_SCALE_SPREAD`** *(P)*<br>*(Delayed)* | `-₹3,431` `(+32.2k/-35.7k)`<br>`-₹12,196` | `+₹514,086` `(+314.3k/+199.8k)`<br>`+₹489,607` | `+₹262,067` `(+183.0k/+79.1k)`<br>`+₹254,370` | `+₹456,895` `(+256.9k/+200.0k)`<br>`+₹425,513` | `+₹305,549` `(+147.2k/+158.3k)`<br>`+₹276,523` | `-₹13,025` `(-11.8k/-1.2k)`<br>`-₹12,575` | `+₹83,670` `(+82.4k/+1.3k)`<br>`-₹19,491` | `+₹93,453` `(+84.5k/+8.9k)`<br>`-₹20,600` | **`+₹1,699,264`**<br>**`+₹1,381,151`** |
+| **`E2_15S_FLAG25_3BAR045_SCORING`** *(P)*<br>*(Delayed)* | `-₹84,409` `(-31.0k/-53.4k)`<br>`-₹90,817` | `+₹606,070` `(+349.1k/+257.0k)`<br>`+₹602,806` | `+₹201,768` `(+138.2k/+63.5k)`<br>`+₹196,732` | `+₹217,331` `(+146.0k/+71.3k)`<br>`+₹202,927` | `+₹260,613` `(+127.5k/+133.1k)`<br>`+₹243,580` | `+₹14,766` `(+9.9k/+4.9k)`<br>`+₹14,766` | `+₹47,994` `(+94.4k/-46.4k)`<br>`+₹46,572` | `+₹85,350` `(+158.6k/-73.3k)`<br>`+₹11,658` | **`+₹1,349,484`**<br>**`+₹1,228,225`** |
+| **`H4a_ELAPSED_15S`** *(P)*<br>*(Delayed)* | `-₹67,220` `(+24.3k/-91.6k)`<br>`-₹73,094` | `+₹539,202` `(+346.6k/+192.6k)`<br>`+₹510,967` | `+₹164,059` `(+122.3k/+41.8k)`<br>`+₹155,725` | `+₹366,570` `(+219.6k/+146.9k)`<br>`+₹348,096` | `+₹346,137` `(+173.6k/+172.6k)`<br>`+₹313,570` | `-₹67,123` `(-36.7k/-30.4k)`<br>`-₹67,123` | `+₹24,922` `(+101.9k/-77.0k)`<br>`-₹54,522` | `-₹144,723` `(-15.7k/-129.0k)`<br>`-₹238,681` | **`+₹1,161,823`**<br>**`+₹894,937`** |
+| **`H2b_PURE_3BAR_045`** *(P)*<br>*(Delayed)* | `-₹100,793` `(-40.2k/-60.6k)`<br>`-₹110,384` | `+₹487,396` `(+289.3k/+198.1k)`<br>`+₹464,787` | `+₹196,593` `(+138.6k/+58.0k)`<br>`+₹194,547` | `+₹230,072` `(+147.2k/+82.9k)`<br>`+₹221,461` | `+₹169,640` `(+86.0k/+83.7k)`<br>`+₹146,976` | `+₹25,619` `(+15.6k/+10.0k)`<br>`+₹26,444` | `-₹19,098` `(+45.4k/-64.5k)`<br>`-₹93,864` | `-₹9,903` `(+98.2k/-108.1k)`<br>`-₹26,095` | **`+₹979,525`**<br>**`+₹823,872`** |
+| **`H1_MIDDAY_FREEZE`** *(P)*<br>*(Delayed)* | `-₹116,940` `(-40.6k/-76.3k)`<br>`-₹119,183` | `+₹418,716` `(+272.7k/+146.0k)`<br>`+₹430,834` | `-₹2,025` `(+12.9k/-14.9k)`<br>`-₹9,798` | `+₹380,517` `(+219.2k/+161.4k)`<br>`+₹368,394` | `+₹74,639` `(+34.9k/+39.7k)`<br>`+₹58,572` | `-₹68,092` `(-35.8k/-32.2k)`<br>`-₹68,092` | `-₹339,718` `(-218.8k/-120.9k)`<br>`-₹376,929` | `-₹143,714` `(+5.1k/-148.8k)`<br>`-₹129,375` | **`+₹203,383`**<br>**`+₹154,424`** |
 
 ---
 
-## 4. Deep Dive on Each Individual Hypothesis
+## 4. Deep Dive on Single & Combined Hypotheses (Tick-by-Tick Findings)
 
-### 4.1 Option Convexity Scaling & ATR/Spread Gate (`H6a` & `H6b`) — **#1 Single Lever**
-- **Mechanism tested:**
-  - `H6a_OPT_SCALE`: Normalized premium (`prem_pct = entry_ask / spot`, reference `1.5%`) computes `scale = clamp(0.015 / prem_pct, 0.45, 1.25)`. Scales `target_pct * scale` and spreads-aware `sl_pct = max(clamp(spread_pct * 2.5, 3.5%, 12%), min(orig_sl * 1.25, orig_sl * max(0.75, scale)))`. Fixes cheap high-delta OTM options aiming too low and expensive high-strike/low-leverage ITM options aiming for unreachable `+15%–25%` option spikes on normal spot moves.
-  - `H6b_OPT_SCALE_SPREAD`: Adds a pre-entry micro-structure gate (`exp_opt_move = (0.5 * ATR / spot) / prem_pct < 2.0 * spread_pct`), blocking options whose bid–ask spread consumes half an average 5m ATR swing.
-- **Result & Verdict:**
-  - `H6a` alone lifted Paper Net from `+₹971,498 → +₹1,118,620` (`+15.1%`), **but still bled on choppy `Nov 25` (`-₹94,777`)**.
-  - Adding the spread/ATR gate (`H6b`) rejected just **`92`** low-conviction/wide-spread opps (`1,477 → 1,385`), turning `Nov 16` (`-₹74.8k → +₹12.0k`) and `Nov 25` (`-₹51.8k → +₹72.0k`) positive! Total Paper jumped to **`+₹1,329,644` (`+36.9%`)**, Delayed to **`+₹1,181,570` (`+42.7%`)**, and **MaxDD fell in half (`₹109,330 → ₹54,938`)** with `6/7` green days.
-  - **Crucial edge case observed:** On **`Nov 25` Paper-Delayed**, `H6b` alone turned `-₹27,806` (vs `+₹71,960` Paper) because 400 wide/noisy equity signals still crossed the ATM gate; combining it with `15s + Flag25` (`W2`) pushed `Nov 25` **Delayed to `+₹69,899`** and **Paper to `+₹120,218`**!
+### 4.1 Option Convexity Scaling & ATR/Spread Gate (`H6a`, `H6b`, `E14`, `W1`, `W2`)
+- **`E1` (`15s+Flag25` Scoring Only): `+₹1,046,055`** → adding **only** ATR/Spread pre-entry gate (`E14_W2_GATE_ONLY_NOSCALE`, keeping fixed target/SL) jumps P&L to **`+₹1,741,840`** (`+₹695,785`), proving that gating options whose spread exceeds half an expected 5m ATR swing is massive on its own.
+- Adding **Option Convexity Target/SL Scaling** (`E14 → W2`) lifts Paper by another **`+₹229,133`** (`+₹1,741,840 → +₹1,970,972`) and Delayed by **`+₹219,618`** while compressing Paper MaxDD from `₹31,023 → ₹26,060`.
+- **`H6b_OPT_SCALE_SPREAD`** alone turns `H0_BASELINE` from `+₹663,718` (`4/8` green, `₹453,775` DD) into **`+₹1,699,264`** (`6/8` green, `₹13,025` DD!). Tightening spread cap further from `3% → 2%` in **`E13_W2_SPREAD2PCT`** over-filters entries (`opps 1,825 → 1,556`, P&L drops `+₹1,970,972 → +₹1,282,102`), confirming **`max_spread_pct = 0.03` (`3%`)** paired with the ATR/Spread ratio gate is strictly better than a blanket `2%` cap.
 
 ### 4.2 Bar-Elapsed Gate (`H4a: 15s` vs `H4b: 30s`)
-- **Hypothesis tested:** Prevent tick bursts in the first few seconds of a 5m bar from artificially inflating extrapolated RVOL before price structure stabilizes.
-- **Result:**
-  - **`H4a_ELAPSED_15S`** (**+₹1,167,005** Paper / **+₹1,014,754** Delayed): Improved **`+₹195,507` (`+20.1%`)** over Baseline while rejecting only 31 raw opportunities (`1,477 → 1,446`). Biggest winners were trending days (`Nov 17`: `+540k → +615k`; `Nov 20`: `+136k → +203k`).
-  - **`H4b_ELAPSED_30S`** (**+₹824,119** Paper / **+₹595,188** Delayed): Dropped **`-₹147,379`** vs Baseline and crushed `v2` (`+112.6k → +9.7k` Paper, `-48.6k` Delayed). Waiting a full `30s` delayed entry past the crisp initial breakout impulse (`Nov 17`: `-76k` vs Baseline; `Nov 18`: `-58k`).
-  - **Conclusion:** Your intuition to test `15s` instead of `30s` was spot-on — **`15s` is strictly optimal**.
+- **`H4a_ELAPSED_15S`:** `+₹1,161,823` Paper / `+₹894,937` Delayed (**`+₹498,105`** over `H0_BASELINE`), rejecting just `45` raw opps (`2,025 → 1,980`) while cutting Paper MaxDD from `₹453,775 → ₹186,925`.
+- **`H4b_ELAPSED_30S`:** `+₹777,272` Paper / **`+₹401,396` Delayed** (`₹755,650` DD). Waiting 30s consistently degrades entries and delayed slippage compared to `15s`. **`15s` remains optimal.**
 
-### 4.3 `PURE` Breakout Quality vs Single-Candle Traps (`H2a`, `H2b`, `H2c`)
-- **Hypothesis tested:** Baseline `PURE` breakouts (`max_candle_pct_change`, `min_volume_thrust_mult`) fire even inside sleepy, narrow ranges or after trivial single-bar ticks.
-  - `H2a_MIN_ATR_030`: Global 5m `ATR / close >= 0.30%`.
-  - `H2b_PURE_3BAR_045`: **Non-trapping impulse alternative** — requires current price to have expanded `>= 0.45%` from the **3-bar swing extreme** (`min(prev 3 lows)` for `BULL`, `max(prev 3 highs)` for `BEAR`), avoiding the `0.4–0.5%` single-bar exhaustion trap while filtering dead drift.
-  - `H2c_BODY_025_ATR_025`: Global `ATR >= 0.25%` AND current bar `|close - open| / open >= 0.25%`.
-- **Results & Gross vs Net Impact:**
+### 4.3 `PURE` Impulse Floors (`3Bar 0.35 / 0.45 / 0.60`, `Body 0.25 / 0.35`, `ATR 0.20 / 0.30`)
+- **Sensitivity along `W2 + 3Bar`:** `W2 (no 3Bar)` = `+₹1,970,972` (DD `₹26,060`) | `E3 (0.35%)` = `+₹1,707,674` (DD `₹41,664`) | **`W3 (0.45%)` = `+₹1,842,081` (`₹0` DD, `8/8` green)** | `E4 (0.60%)` = `+₹1,536,886` (`₹0` DD in **both** P & D, `12,201` trades!).
+- **Single-Bar Body `>= 0.35%` (`E15`):** `+₹1,696,922` Paper / **`+₹1,586,805` Delayed (`₹660` DD in P & D, highest WR top-15 at `35.8%`, `93.5%` delayed retention, `915` opps = `-55%` spam!)**.
+- **Global `ATR >= 0.20%` (`E5`, `E6` vs `ATR >= 0.30%` `H2a`):** `H2a_MIN_ATR_030` choked signal flow too hard (`+₹485,657`). By contrast, `ATR >= 0.20%` removes *only* the `<0.20%` dead zone: **`E5_W2_ATR020` (`+₹1,761,182` P / `+₹1,555,033` D) achieved `8/8` GREEN DAYS & `₹0` DD in BOTH Paper and Delayed!** And `E6_W3_ATR020` earned `+₹1,788,366` P / `+₹1,638,703` D (`8/8` green P, `₹1,782` D DD).
 
-| Variant | Opps | Trades | Gross P&L | Brokerage | Paper Net | MaxDD | Expiry `Nov 23` | `v1` Green Days |
-|---|---:|---:|---:|---:|---:|---:|---:|---|
-| `H0_BASELINE` | 1,477 | 19,080 | +₹2,116,298 | ₹1,144,800 (54.1%) | +₹971,498 | ₹109,330 | -₹57,533 | 6/7 |
-| `H2a_MIN_ATR_030` | 604 | 8,270 | +₹1,284,155 | ₹496,200 (38.6%) | +₹787,955 | ₹79,034 | **+₹16,471** | 6/7 |
-| **`H2b_PURE_3BAR_045`** | **970** | **13,251** | +₹1,823,675 | **₹795,060 (43.6%)** | **+₹1,028,615** | **₹52,830** | **+₹25,386** | 6/7 |
-| `H2c_BODY_025_ATR_025` | 776 | 10,379 | +₹1,291,780 | ₹622,740 (48.2%) | +₹669,040 | ₹99,222 | **+₹13,328** | **7/7 (₹0 DD!)** |
-
-- **Verdict:**
-  - Notice that in `H0_BASELINE`, **₹1,144,800 (54.1% of gross profits!) went to brokerage**.
-  - **`H2b_PURE_3BAR_045` is the standout `PURE` upgrade**: it beats Baseline net profit while cutting trades by `-30.5%` (saving `₹349,740` in fees), slices overall MaxDD in half (`₹52,830`), more than **doubles `v2` net profit** (`+₹112.6k → +₹251.0k` Paper, `+₹51.4k → +₹206.6k` Delayed), and turns **expiry day (`Nov 23`) from `-₹57.5k` to `+₹25.4k` (`W4` reaches `+₹31.3k` at 53% WR)**!
-  - `H2a_MIN_ATR_030` is too restrictive globally (`-59%` opps), cutting winners on quiet-ATR days (`Nov 17`, `Nov 19`, `Nov 20`).
-
-### 4.4 OLS Flag Zone Buffer (`H3a: Top 35%`, `H3b: Top 25%`, `H3c: Full Pole`)
-- **Hypothesis tested:** Current scoring triggers a `BULL` OLS flag breakout as soon as price escapes the downward-sloping flag trendline — often near the middle of the pole before reclaiming pole resistance — whereas requiring full `pole_high` waits too long and misses the core move.
-- **Result:**
-  - `H3a_FLAG_BUF_15` (**+₹996,127** Paper) and **`H3b_FLAG_BUF_25` (+₹1,019,668** Paper) both beat Baseline (`+₹971,498`), improving `Nov 19` (`+230.6k → +268.1k`), `Nov 20` (`+136.4k → +146.8k`), and `Nov 25` (`-51.8k → -21.5k`, `v1 +54.4k → +94.2k`).
-  - `H3c_FLAG_FULL_POLE` (**+₹928,583** Paper / **+₹730,551** Delayed, DD doubled to **`₹242,818`**): Exactly as you suspected, waiting for full `pole_high` entered too late (`Nov 25` dropped to `-₹170,062`) and suffered worse delayed fills.
-  - **Verdict:** **`H3b` (upper 25% of pole height, i.e., `trig >= pole_h - 0.25 * pole_ht` for BULL / `<= pole_l + 0.25 * pole_ht` for BEAR)** synergizes strongly with `15s` + `OptScale`: adding `Flag25` to `W1` (`→ W2`) added another **`+₹27,583` Paper / `+₹44,521` Delayed** cleanly across trending + choppy days.
-
-### 4.5 Midday Freeze (`11:30–13:30`) & Per-Symbol Daily Caps (`H1`, `H5a`–`H5c`)
-- **`H1_MIDDAY_FREEZE` (`+₹351,084` Paper, DD `₹426,779`, 3/7 green):**
-  - Why did Midday Freeze fail so badly across the dataset? Look at the daily delta (`H1 - H0`):
-    - `Nov 16`: `+₹12,171` (slightly less chop loss)
-    - `Nov 17`: `+₹2,804` (neutral)
-    - **`Nov 18`: `-₹151,860`** (`+248.5k → +96.7k`)
-    - `Nov 19`: `-₹29,701`
-    - **`Nov 20`: `-₹139,133`** (`+136.4k → -2.8k`)
-    - `Nov 23`: `-₹11,559`
-    - **`Nov 25`: `-₹303,137`** (`-51.8k → -354.9k`, `v1` flipped from `+54.4k` to `-221.2k`!)
-  - In our system, morning chop (`09:30–11:30`) stops out noisy open swings; **midday (`11:30–13:30`) is frequently where secondary clean trends and recoveries develop**. Hard-freezing entries blindly threw away the recovery leg while locking in morning stop-outs. (Midday freeze should still be configurable via config/UI per your improvements list, just **disabled by default** in momentum profiles!)
-- **Hard Per-Symbol Caps (`H5a: Cap<=2` = `+₹813,029`, `H5c: Cap<=1` = `+₹318,394`, `H5b: Cap<=2 + NoFlip` = `+₹646,018`):**
-  - Capping winning leaders to 1–2 alerts cut `Nov 17` net profit in half (`+540k → +329k` at Cap 2, `+253k` at Cap 1).
-  - **Nuance on `block_flips` (`W5` vs `W2`):** Blocking opposite-direction intraday flips *without* a hard symbol cap (`W5_15S_FLAG25_NOFLIP_OPT_SPREAD`) made **`Nov 25` the highest single-day choppy score (`+₹141,705` Paper / `+₹96,514` Delayed)**, because whipsaw days flip BULL→BEAR→BULL on the same stock repeatedly! However, on strong reversal/sector days (`Nov 16` and `Nov 17`), blocking flips hurt (`W5` netted `+₹1,261,876` vs `W2` `+₹1,511,447`). If used at all, a **time cooldown** (e.g., 20–30m cooldown on opposite direction per symbol) is strictly preferable to a full-session flip ban.
+### 4.4 Midday Freeze (`11:30–13:30`), Early Cutoff (`14:00`), Per-Symbol Caps & Flip Cooldown
+- **Midday Freeze (`H1_MIDDAY_FREEZE`) Confirmed Toxic For Momentum:** Drops Baseline `+₹663,718 → +₹203,383` (`-69.4%`), spikes DD `₹453,775 → ₹551,523`, and makes every `M1–M9` mix finish near the bottom of the 45-experiment table.
+- **Early Afternoon Freeze (`14:00`, `E11`, `E12`) vs `15:00` (`W2`, `W3`):** Freezing entries after `14:00` trimmed ~20% of trades and cut DD on `W2` (`₹26,060 → ₹4,914`), at the cost of ~`₹259k–₹287k` lower Paper net profit (`+₹1,970,972 → +₹1,683,618`).
+- **Per-Symbol Cap `<= 3` (`E9`, `E10`) Is Sweet Spot vs `Cap <= 2` (`H5a`):** On `W3`, **`E10_W3_CAP3` actually INCREASED net profit in both Paper (`+₹32.5k`) AND Delayed (`+₹72.4k`: `+₹1,633,037 → +₹1,705,447`) while reducing trades (`17,000 → 16,179`) and maintaining `8/8` green (`₹0` Paper DD)!**
+- **30m Flip Cooldown (`E7`, `E8`) vs Hard Session Ban (`W5`):** `E7` (`+₹1,753,985`) outperformed full-session ban `W5` (`+₹1,727,783`) on Paper (`3x` lower DD: `₹26k` vs `₹81k`), while `E8` had nearly identical `7/8` (`₹623` DD) performance cleanly preserving reversal days.
 
 ---
 
-## 5. Per-Track Anatomy (`v1` vs `v2`, Baseline vs `W2` & `W3`)
+## 5. Cross-Experiment Track Consistency, Highest Highs & Lowest Drawdown Matrices
 
-Total 7-day Net P&L and Win Rate by track (`Paper` / `Paper-Delayed`):
+### 5.1 Average Performance & Consistency Across All 45 Experiments (`8 Days` Each)
 
-| Profile | Track | Baseline (`H0`)<br>Trades / WR / Paper / Delayed | **`W2` (Max Return)**<br>Trades / WR / Paper / Delayed | **`W3` (High Eff / Low DD)**<br>Trades / WR / Paper / Delayed | Assessment |
-|---|---|---:|---:|---:|---|
-| **`v1`** | `trend_pullback_ATM` | 999 / 38.2% / +₹107,821 / +₹90,583 | 983 / 39.4% / **+₹131,667 / +₹129,064** | 677 / 39.6% / +₹99,559 / +₹108,265 | Core Star |
-| **`v1`** | `trend_pullback_ITM` | 909 / 37.5% / +₹84,160 / +₹69,509 | 903 / 38.8% / **+₹124,041 / +₹120,328** | 630 / 36.8% / +₹100,091 / +₹104,586 | Core Star |
-| **`v1`** | `composite_shared_ITM` | 947 / 37.7% / +₹67,490 / +₹35,689 | 947 / 39.8% / **+₹120,083 / +₹113,368** | 647 / 39.3% / +₹91,376 / +₹103,196 | Massive Delayed Boost (`+3.2x`) |
-| **`v1`** | `fast_momentum_ATM` | 1001 / 33.2% / +₹56,950 / +₹58,032 | 1002 / 35.5% / **+₹114,355 / +₹111,473** | 693 / 35.1% / +₹91,793 / +₹85,027 | Doubles on OptScale |
-| **`v1`** | `composite_shared_ATM` | 1017 / 36.8% / +₹77,476 / +₹68,819 | 1005 / 38.3% / **+₹114,194 / +₹109,329** | 689 / 38.2% / +₹78,486 / +₹81,083 | Core Star |
-| **`v1`** | `fixed_target_ATM` | 1073 / 40.0% / +₹83,277 / +₹75,982 | 1048 / 40.6% / **+₹98,348 / +₹98,258** | 720 / 42.5% / +₹75,962 / +₹70,062 | Consistent Winner |
-| **`v1`** | `composite_shared_OTM` | 959 / 35.9% / +₹52,060 / +₹62,301 | 944 / 37.0% / **+₹95,859 / +₹87,895** | 663 / 36.3% / +₹65,657 / +₹50,613 | Strong Lift |
-| **`v1`** | `fixed_target_ITM` | 998 / 44.3% / +₹74,447 / +₹70,656 | 983 / 44.6% / **+₹93,224 / +₹87,127** | 686 / 45.9% / +₹71,039 / +₹58,980 | Highest WR Track |
-| **`v1`** | `fast_momentum_ITM` | 929 / 32.1% / +₹76,957 / +₹70,096 | 930 / 33.7% / +₹87,010 / **+₹104,807** | 643 / 33.4% / +₹74,730 / +₹78,918 | Consistent Winner |
-| **`v1`** | `trend_pullback_OTM` | 946 / 39.1% / +₹73,208 / +₹70,777 | 914 / 40.0% / **+₹83,850 / +₹82,075** | 646 / 39.0% / +₹73,868 / +₹74,974 | Consistent Winner |
-| **`v1`** | `fast_momentum_OTM` | 941 / 33.4% / +₹52,024 / +₹52,161 | 939 / 35.3% / **+₹80,774 / +₹85,026** | 652 / 34.8% / +₹68,847 / +₹65,454 | Consistent Winner |
-| **`v1`** | `fixed_target_OTM` | 1018 / 36.2% / +₹52,985 / +₹52,226 | 972 / 35.7% / **+₹69,066 / +₹56,798** | 674 / 37.2% / +₹48,353 / +₹46,371 | Solid OTM |
-| **`v2`** | `volatility_expansion_ATM` | 1169 / 21.7% / +₹81,718 / +₹60,656 | 1190 / 21.6% / **+₹128,190 / +₹117,821** | 800 / 23.5% / +₹125,644 / **+₹118,141** | Top `v2` Star |
-| **`v2`** | `adaptive_regime_ATM` | 1014 / 34.7% / +₹71,988 / +₹75,034 | 1088 / 40.7% / **+₹126,502 / +₹107,424** | 725 / 41.1% / +₹109,214 / +₹106,804 | Top `v2` Star (`H6b`: `+138.9k`) |
-| **`v2`** | `trend_pullback_v2_ITM1` | 973 / 37.5% / +₹81,432 / +₹76,396 | 975 / 37.5% / **+₹116,614 / +₹108,706** | 663 / 36.7% / +₹96,541 / +₹85,303 | Core `v2` Winner |
-| **`v2`** | `micro_chandelier_ITM1` | 1247 / 27.7% / +₹54,810 / +₹39,852 | 1191 / 31.4% / +₹91,559 / +₹86,249 | 801 / 32.3% / **+₹98,312 / +₹90,338** | Strong `v2` Winner |
-| **`v2`** | `opening_thrust_convex_ATM` | 87 / 32.2% / +₹23,475 / +₹22,600 | 79 / 34.2% / +₹25,284 / +₹25,074 | 78 / 35.9% / **+₹26,570 / +₹26,360** | Best Risk-Adj (`~₹340/trade`) |
-| **`v2`** | `delta_scalp_ITM2` | 1324 / 19.3% / `-₹40,630` / `-₹59,420` | 1257 / 28.3% / `-₹14,985` / `-₹28,811` | 838 / 30.2% / **+₹22,028 / +₹10,139** | Fixed only by `W3` |
-| **`v2`** | `gamma_runner_OTM2` | 706 / 25.9% / `-₹56,767` / `-₹55,188` | 680 / 27.2% / `-₹67,945` / `-₹68,936` | 529 / 29.1% / `-₹34,212` / `-₹39,285` | **Structurally Unprofitable** |
-| **`v2`** | `structural_convexity_ATM` | 823 / 14.8% / `-₹103,383` / `-₹108,555` | 834 / 14.4% / `-₹106,244` / `-₹111,588` | 579 / 15.9% / `-₹61,005` / `-₹71,535` | **Structurally Unprofitable** |
+> **How to read this matrix:** Each row aggregates one execution track across **all 45 parameter/scoring environments** (`45 × 8 = 360` simulated sessions per track), exposing which tracks make money *universally* vs. which depend on specific filters.
 
-### Key Structural Observations on Tracks
-1. **Most Consistently Best Track Overall — `trend_pullback_ATM` (`v1`):**
-   - **Profitable in `30/30` experiments** in both `paper` and `paper_delayed`, with the **#1 highest 30-experiment average Net P&L (`+₹79,020` Paper / `+₹72,899` Delayed)** and worst-case experiment still **`+₹11,418`**.
-   - **Zero Daily Drawdown (`7/7` green days, `₹0` DD)** in **`H0_BASELINE` (`+₹107,821`)**, **`W2` (`+₹131,667` Paper / `+₹129,064` Delayed)**, and **`W3` (`+₹99,559` Paper / `+₹108,265` Delayed)** — even staying positive on expiry day (`2026-11-23`) and choppy `2026-11-25` across all three!
-   - **Close runners-up on pure consistency:** `fixed_target_ATM` (`v1`, highest `5.97/7` average green days across all 30 experiments, lowest avg DD `₹3,296`, `7/7` green under both `W2` and `W3`) and **`adaptive_regime_ATM`** (**#1 most consistent `v2` track**: `30/30` positive, `5.57/7` avg green days, avg `₹7,886` DD, `7/7` green with `₹0` DD under `W3` at `+₹109,214`).
-2. **Why 3 `v2` Tracks Consistently Bleed:**
-   - `structural_convexity_ATM` (`14.8%` WR, `0/30` profitable experiments) and `gamma_runner_OTM2` (`25.9%` WR, `0/30` profitable experiments) lose steadily across every single scoring filter and execution mode because wide fixed structural stops / aggressive OTM convexity targets get chopped out 75–85% of the time in intraday F&O option pricing.
-   - `delta_scalp_ITM2` fails on raw/noisy signals (`5/30` profitable experiments; `19.3%` WR, `-₹59.4k` Delayed in Baseline) because tight scalps cannot overcome ITM2 spread + latency unless filtered by `W3`'s strong 3-bar impulse (`30.2%` WR, `+₹22,028` Paper / `+₹10,139` Delayed).
-3. **Pruning Impact:**
-   - Retiring/disabling just the bottom 2–3 `v2` tracks (`structural_convexity_ATM`, `gamma_runner_OTM2`, and optionally `delta_scalp_ITM2`) lifts 7-day Net P&L immediately by **`+₹189,175` Paper / `+₹209,336` Delayed** on `W2` (reaching **`+₹1.70M` Paper / `+₹1.63M` Delayed**!) with dramatically smoother daily curves.
+| Rank | Profile | Track | Pos /45 (P / D) | Avg 45 (Paper) | Med 45 (P) | Avg 45 (Delayed) | Del Ret% | Paper Range (`Min .. Max` across 45) | Avg Grn/8 | Grn Day% | Avg DD | Max DD | Zero-DD Exps | Best / Worst Day (P) | Calmar | Daily Sharpe |
+|---:|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|---:|---:|
+| **1** | `v2` | **`volatility_expansion_ATM`** | 45/45 / 45/45 | **+₹107,827** | +₹102,186 | +₹96,246 | 89.3% | `+₹23,544 .. +₹198,840` | 5.98/8 | 74.7% | ₹16,717 | ₹55,477 | 1/45 | `+₹52,347 / -₹39,336` | 6.5x | 0.70 |
+| **2** | `v1` | **`trend_pullback_ATM`** | 45/45 / 45/45 | **+₹98,032** | +₹96,599 | +₹90,834 | 92.7% | `+₹30,088 .. +₹151,438` | 6.96/8 | 86.9% | ₹3,565 | ₹21,756 | 20/45 | `+₹40,486 / -₹21,756` | 27.5x | 1.10 |
+| **3** | `v1` | **`composite_shared_ATM`** | 45/45 / 45/45 | **+₹87,714** | +₹86,056 | +₹75,708 | 86.3% | `+₹22,113 .. +₹152,386` | 7.13/8 | 89.2% | ₹3,924 | ₹22,512 | 22/45 | `+₹42,888 / -₹22,512` | 22.4x | 1.06 |
+| **4** | `v1` | **`fixed_target_ATM`** | 45/45 / 45/45 | **+₹86,155** | +₹93,679 | +₹75,721 | 87.9% | `+₹30,683 .. +₹126,523` | 7.33/8 | 91.7% | ₹2,855 | ₹20,009 | 27/45 | `+₹30,366 / -₹20,009` | 30.2x | 1.22 |
+| **5** | `v2` | **`adaptive_regime_ATM`** | 44/45 / 44/45 | **+₹85,742** | +₹87,080 | +₹73,321 | 85.5% | `-₹2,244 .. +₹153,370` | 6.16/8 | 76.9% | ₹12,647 | ₹43,560 | 6/45 | `+₹49,815 / -₹43,560` | 6.8x | 0.70 |
+| **6** | `v1` | **`fast_momentum_ATM`** | 45/45 / 45/45 | **+₹76,645** | +₹76,570 | +₹66,395 | 86.6% | `+₹23,121 .. +₹130,882` | 6.64/8 | 83.1% | ₹5,557 | ₹42,208 | 18/45 | `+₹45,749 / -₹25,534` | 13.8x | 0.83 |
+| **7** | `v2` | **`micro_chandelier_ITM1`** | 45/45 / 44/45 | **+₹69,159** | +₹60,606 | +₹55,539 | 80.3% | `+₹11,434 .. +₹131,592` | 5.49/8 | 68.6% | ₹17,055 | ₹78,021 | 1/45 | `+₹41,741 / -₹41,536` | 4.1x | 0.57 |
+| **8** | `v2` | **`trend_pullback_v2_ITM1`** | 44/45 / 43/45 | **+₹65,835** | +₹70,032 | +₹58,949 | 89.5% | `-₹3,610 .. +₹141,439` | 5.09/8 | 63.6% | ₹17,452 | ₹35,649 | 0/45 | `+₹45,338 / -₹32,691` | 3.8x | 0.50 |
+| **9** | `v1` | **`composite_shared_ITM`** | 45/45 / 45/45 | **+₹65,730** | +₹71,274 | +₹60,226 | 91.6% | `+₹1,489 .. +₹119,754` | 5.67/8 | 70.8% | ₹14,861 | ₹52,358 | 2/45 | `+₹52,595 / -₹30,118` | 4.4x | 0.58 |
+| **10** | `v1` | **`fast_momentum_ITM`** | 45/45 / 45/45 | **+₹64,461** | +₹60,679 | +₹56,029 | 86.9% | `+₹8,372 .. +₹118,601` | 5.40/8 | 67.5% | ₹15,237 | ₹53,284 | 2/45 | `+₹46,428 / -₹27,844` | 4.2x | 0.56 |
+| **11** | `v1` | **`trend_pullback_ITM`** | 44/45 / 43/45 | **+₹60,518** | +₹56,142 | +₹52,939 | 87.5% | `-₹3,401 .. +₹119,242` | 5.20/8 | 65.0% | ₹17,554 | ₹46,994 | 3/45 | `+₹44,934 / -₹39,993` | 3.4x | 0.50 |
+| **12** | `v1` | **`fast_momentum_OTM`** | 45/45 / 45/45 | **+₹59,973** | +₹62,918 | +₹51,840 | 86.4% | `+₹12,831 .. +₹101,730` | 5.96/8 | 74.4% | ₹6,020 | ₹19,109 | 0/45 | `+₹42,890 / -₹19,109` | 10.0x | 0.78 |
+| **13** | `v1` | **`fixed_target_ITM`** | 42/45 / 43/45 | **+₹59,642** | +₹63,853 | +₹51,624 | 86.6% | `-₹3,187 .. +₹103,729` | 5.64/8 | 70.6% | ₹18,410 | ₹41,625 | 0/45 | `+₹45,754 / -₹30,646` | 3.2x | 0.52 |
+| **14** | `v2` | **`structural_convexity_ATM`** | 45/45 / 45/45 | **+₹56,559** | +₹61,322 | +₹53,111 | 93.9% | `+₹13,564 .. +₹94,566` | 4.89/8 | 61.1% | ₹20,192 | ₹36,888 | 0/45 | `+₹73,480 / -₹32,884` | 2.8x | 0.37 |
+| **15** | `v1` | **`trend_pullback_OTM`** | 45/45 / 45/45 | **+₹55,517** | +₹54,985 | +₹46,312 | 83.4% | `+₹5,430 .. +₹116,053` | 5.78/8 | 72.2% | ₹7,065 | ₹27,072 | 4/45 | `+₹36,842 / -₹26,776` | 7.9x | 0.71 |
+| **16** | `v1` | **`composite_shared_OTM`** | 45/45 / 45/45 | **+₹51,653** | +₹52,470 | +₹40,550 | 78.5% | `+₹11,017 .. +₹99,869` | 5.78/8 | 72.2% | ₹6,274 | ₹20,820 | 3/45 | `+₹39,223 / -₹20,820` | 8.2x | 0.70 |
+| **17** | `v1` | **`fixed_target_OTM`** | 45/45 / 45/45 | **+₹33,622** | +₹34,728 | +₹26,942 | 80.1% | `+₹3,830 .. +₹62,355` | 5.42/8 | 67.8% | ₹8,243 | ₹20,658 | 0/45 | `+₹21,727 / -₹19,176` | 4.1x | 0.56 |
+| **18** | `v2` | **`opening_thrust_convex_ATM`** | 45/45 / 45/45 | **+₹22,190** | +₹25,559 | +₹22,188 | 100.0% | `+₹8,519 .. +₹30,037` | 4.98/8 | 62.2% | ₹13,517 | ₹21,570 | 0/45 | `+₹16,788 / -₹19,707` | 1.6x | 0.37 |
+| **19** | `v2` | **`delta_scalp_ITM2`** | 23/45 / 23/45 | **+₹2,601** | +₹9,068 | -₹16,132 | -620.2% | `-₹128,231 .. +₹99,113` | 4.73/8 | 59.2% | ₹44,224 | ₹134,234 | 0/45 | `+₹36,812 / -₹67,164` | 0.1x | 0.02 |
+| **20** | `v2` | **`gamma_runner_OTM2`** | 0/45 / 0/45 | **-₹79,678** | -₹76,379 | -₹81,556 | 0.0% | `-₹115,817 .. -₹47,141` | 2.00/8 | 25.0% | ₹79,678 | ₹115,817 | 0/45 | `+₹28,412 / -₹50,515` | -1.0x | -0.70 |
 
-### 5.1 Trackwise Consistency Across All 30 Experiments
+### 5.2 Multi-Objective Track Spotlights (Consistency vs. Highest Highs vs. Lowest Drawdown)
 
-> **Legend:** `Pos /30` = number of the 30 tested configurations where the track finished net-positive over the 7 days (`Paper` / `Delayed`); `Avg 30 P / D` = mean 7-day Net P&L across all 30 experiments; `Min..Max (P)` = worst to best 7-day Paper P&L across the 30 configs; `Avg Green` = mean green days out of 7; `Avg DD` = mean peak-to-trough daily drawdown across the 30 experiments.
+| Objective Criterion | #1 Champion Track | Key Proof Metrics (Across 45 Experiments) | Runner-Up | Notable Specialist |
+|---|---|---|---|---|
+| **Most Consistent (All Conditions)** | **`fixed_target_ATM`** (`v1`) | `45/45` positive P&D, **`7.33/8` (`91.7%`) green days**, **`27/45` zero-DD runs**, highest floor (**`Min = +₹30,683`** even in worst freeze runs), `Sharpe = 1.22` | **`composite_shared_ATM`** (`45/45`, `7.13/8` green, `22/45` zero-DD, `Avg +₹87,714`) | **`trend_pullback_ATM`** (`45/45`, `6.96/8` green, `Min +₹30,088`, `Avg +₹98,032`) |
+| **Highest Highs (8d Peak & Mean)** | **`volatility_expansion_ATM`** (`v2`) | **`#1` Avg 8d P&L (`+₹107,827` P / `+₹96,246` D)**, **`#1` Peak 8d (`+₹198,840` on `W5`)**, `45/45` positive, `BestDay +₹52,347` | **`adaptive_regime_ATM`** (`Peak +₹153,370` on `E9`, `BestDay +₹49,815`) | **`structural_convexity_ATM`** (**`#1` single-day outlier `+₹73,480`**, `45/45` positive!) |
+| **Lowest Drawdown & Highest Calmar** | **`fixed_target_ATM`** (`v1`) | Lowest `AvgDD = ₹2,855`, `WorstDay = -₹20,009`, `Calmar = 30.2x`, `Zero-DD = 27/45` | **`trend_pullback_ATM`** (`AvgDD = ₹3,565`, `Calmar = 27.5x`, `Avg +₹98,032`) | **`composite_shared_ATM`** (`AvgDD = ₹3,924`, `Calmar = 22.4x`, `Zero-DD = 22/45`) |
+| **Best Delayed Resilience (Live Execution)** | **`trend_pullback_ATM`** (`v1`) | **`92.7%` Delayed Retention (`+₹98.0k → +₹90.8k` avg)** + **`opening_thrust_convex_ATM`** **`99.99%` (`+₹22,190 → +₹22,188`)** | **`structural_convexity_ATM`** (`93.9%` retention) | **`composite_shared_ITM`** (`91.6%` retention) & `trend_pullback_v2_ITM1` (`89.5%`) |
+| **Structurally Unprofitable (Retire)** | **`gamma_runner_OTM2`** (`v2`) | **`0/45` profitable in P & D (`Avg -₹79,678` P / `-₹81,556` D, `2.0/8` green)** | `delta_scalp_ITM2` (`23/45` P; only works under `OptScale` / `W3`) | Removing just `gamma_runner_OTM2` adds **`+₹47k..+₹116k`** across every config! |
 
-| Rank | Profile | Track | Pos /30 (P / D) | Avg 30 (Paper) | Avg 30 (Delayed) | Paper Range (`Min .. Max`) | Avg Green | Avg DD | `H0` Green / DD | `W2` Green / DD | `W3` Green / DD |
-|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| **1** | **`v1`** | **`trend_pullback_ATM`** | **30/30 / 30/30** | **+₹79,020** | **+₹72,899** | `+₹11,418 .. +₹134,945` | 5.87 / 7 | ₹3,444 | **7/7 / ₹0** | **7/7 / ₹0** | **7/7 / ₹0** |
-| **2** | **`v2`** | `volatility_expansion_ATM` | 30/30 / 30/30 | +₹71,781 | +₹63,391 | `+₹30,165 .. +₹128,190` | 4.60 / 7 | ₹18,145 | 4/7 / ₹28,250 | 5/7 / ₹8,289 | 6/7 / ₹430 |
-| **3** | **`v2`** | **`adaptive_regime_ATM`** | **30/30 / 30/30** | +₹68,165 | +₹62,343 | `+₹12,640 .. +₹138,883` | 5.57 / 7 | ₹7,886 | 6/7 / ₹9,518 | 6/7 / ₹9,151 | **7/7 / ₹0** |
-| **4** | **`v1`** | `trend_pullback_ITM` | 30/30 / 30/30 | +₹66,510 | +₹62,277 | `+₹6,626 .. +₹131,564` | 4.57 / 7 | ₹13,001 | 4/7 / ₹13,382 | 5/7 / ₹9,608 | 6/7 / ₹4,609 |
-| **5** | **`v1`** | **`fixed_target_ATM`** | **30/30 / 30/30** | +₹63,222 | +₹56,193 | `+₹11,603 .. +₹106,547` | **5.97 / 7** | **₹3,296** | 6/7 / ₹22 | **7/7 / ₹0** | **7/7 / ₹0** |
-| **6** | **`v1`** | `composite_shared_ATM` | 30/30 / 30/30 | +₹63,222 | +₹54,873 | `+₹6,894 .. +₹114,194` | 5.60 / 7 | ₹4,363 | 5/7 / ₹208 | **7/7 / ₹0** | 5/7 / ₹3,944 |
-| **7** | **`v2`** | `trend_pullback_v2_ITM1` | 30/30 / 30/30 | +₹59,933 | +₹55,361 | `+₹9,178 .. +₹118,232` | 4.33 / 7 | ₹16,077 | 5/7 / ₹14,104 | 5/7 / ₹9,908 | 6/7 / ₹6,978 |
-| **8** | **`v1`** | `fast_momentum_ATM` | 30/30 / 30/30 | +₹59,823 | +₹53,730 | `+₹10,980 .. +₹114,805` | 5.33 / 7 | ₹5,690 | 4/7 / ₹8,243 | **7/7 / ₹0** | **7/7 / ₹0** |
-| **9** | **`v1`** | `composite_shared_ITM` | 30/30 / 30/30 | +₹59,520 | +₹53,242 | `+₹7,727 .. +₹120,083` | 4.57 / 7 | ₹13,476 | 5/7 / ₹9,431 | 5/7 / ₹10,849 | 5/7 / ₹5,200 |
-| **10** | **`v1`** | `fast_momentum_ITM` | 30/30 / 30/30 | +₹58,700 | +₹56,315 | `+₹7,813 .. +₹105,372` | 4.20 / 7 | ₹14,637 | 4/7 / ₹14,896 | 4/7 / ₹12,235 | 6/7 / ₹7,040 |
-| **11** | **`v2`** | `micro_chandelier_ITM1` | 30/30 / 30/30 | +₹51,554 | +₹45,565 | `+₹20,912 .. +₹98,312` | 4.13 / 7 | ₹17,819 | 3/7 / ₹32,390 | 4/7 / ₹12,162 | **7/7 / ₹0** |
-| **12** | **`v1`** | `trend_pullback_OTM` | 30/30 / 30/30 | +₹48,446 | +₹44,899 | `+₹12,484 .. +₹91,441` | 5.40 / 7 | ₹4,234 | 6/7 / ₹904 | 5/7 / ₹531 | 5/7 / ₹2,202 |
-| **13** | **`v1`** | `fixed_target_ITM` | 29/30 / 29/30 | +₹47,997 | +₹43,587 | `-₹3,522 .. +₹93,224` | 4.40 / 7 | ₹16,016 | 5/7 / ₹13,793 | 5/7 / ₹8,007 | 5/7 / ₹2,508 |
-| **14** | **`v1`** | `fast_momentum_OTM` | 30/30 / 30/30 | +₹47,081 | +₹42,617 | `+₹10,564 .. +₹84,959` | 5.27 / 7 | ₹5,063 | 6/7 / ₹6,555 | 5/7 / ₹3,612 | 5/7 / ₹5,253 |
-| **15** | **`v1`** | `composite_shared_OTM` | 30/30 / 30/30 | +₹45,008 | +₹40,216 | `+₹7,687 .. +₹95,859` | 5.40 / 7 | ₹4,599 | 6/7 / ₹2,814 | 6/7 / **₹0** | 5/7 / ₹1,099 |
-| **16** | **`v1`** | `fixed_target_OTM` | 30/30 / 30/30 | +₹37,741 | +₹32,419 | `+₹10,290 .. +₹69,066` | 5.33 / 7 | ₹3,183 | **7/7 / ₹0** | 6/7 / **₹0** | 4/7 / ₹2,047 |
-| **17** | **`v2`** | `opening_thrust_convex_ATM` | 30/30 / 30/30 | +₹24,668 | +₹24,059 | `+₹10,796 .. +₹30,834` | 3.97 / 7 | ₹10,189 | 4/7 / ₹10,754 | 4/7 / ₹9,275 | 4/7 / ₹9,275 |
-| **18** | **`v2`** | `delta_scalp_ITM2` | 5/30 / 3/30 | -₹19,067 | -₹29,082 | `-₹65,342 .. +₹22,028` | 3.53 / 7 | ₹42,406 | 4/7 / ₹62,335 | 4/7 / ₹44,773 | 4/7 / ₹27,190 |
-| **19** | **`v2`** | `gamma_runner_OTM2` | 0/30 / 0/30 | -₹44,230 | -₹45,653 | `-₹69,952 .. -₹19,009` | 2.00 / 7 | ₹45,928 | 3/7 / ₹57,878 | 1/7 / ₹67,945 | 3/7 / ₹34,212 |
-| **20** | **`v2`** | `structural_convexity_ATM` | 0/30 / 0/30 | -₹76,666 | -₹79,141 | `-₹120,202 .. -₹10,642` | 1.63 / 7 | ₹80,776 | 2/7 / ₹103,383 | 2/7 / ₹107,613 | 2/7 / ₹82,197 |
+### 5.3 Per-Day Trackwise Net P&L Matrix — Champion `W1_15S_OPT_SPREAD` (Paper / Delayed)
 
-### 5.2 Per-Day Trackwise Net P&L Matrix
+| Profile | Track | Nov 16 | Nov 17 | Nov 18 | Nov 19 | Nov 20 | Nov 23 | Nov 25 | Nov 26 | 8d Total (P / D) | Grn | DD |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `v2` | `volatility_expansion_ATM` | -₹4,759 | +₹49,129 | +₹29,770 | +₹32,557 | +₹43,674 | +₹214 | +₹7,298 | +₹33,910 | **+₹191,793 / +₹173,567** | 7/8 | ₹4,759 |
+| `v1` | `composite_shared_ATM` | +₹9,880 | +₹31,895 | +₹23,740 | +₹23,592 | +₹24,426 | +₹590 | +₹20,089 | +₹15,562 | **+₹149,774 / +₹107,196** | 8/8 | ₹0 |
+| `v1` | `trend_pullback_ATM` | +₹11,168 | +₹33,817 | +₹21,216 | +₹26,631 | +₹17,430 | +₹845 | +₹27,154 | +₹5,818 | **+₹144,078 / +₹133,776** | 8/8 | ₹0 |
+| `v2` | `adaptive_regime_ATM` | +₹14,604 | +₹49,815 | +₹16,711 | +₹23,574 | +₹41,424 | -₹6,052 | +₹11,168 | -₹9,006 | **+₹142,239 / +₹108,749** | 6/8 | ₹9,006 |
+| `v2` | `trend_pullback_v2_ITM1` | -₹1,903 | +₹45,338 | +₹14,508 | +₹35,312 | +₹28,960 | -₹5,542 | +₹26,496 | -₹9,257 | **+₹133,912 / +₹141,448** | 5/8 | ₹9,257 |
+| `v1` | `fixed_target_ATM` | +₹13,942 | +₹26,680 | +₹16,103 | +₹21,671 | +₹20,474 | +₹440 | +₹14,403 | +₹12,810 | **+₹126,523 / +₹109,661** | 8/8 | ₹0 |
+| `v1` | `fast_momentum_ATM` | +₹9,755 | +₹34,187 | +₹2,659 | +₹26,775 | +₹21,915 | +₹590 | +₹17,244 | +₹13,314 | **+₹126,439 / +₹97,588** | 8/8 | ₹0 |
+| `v2` | `micro_chandelier_ITM1` | +₹6,303 | +₹37,179 | +₹30,492 | +₹26,908 | +₹21,362 | -₹1,478 | -₹1,909 | +₹4,661 | **+₹123,519 / +₹108,049** | 6/8 | ₹3,386 |
+| `v1` | `composite_shared_ITM` | +₹9,566 | +₹46,334 | +₹22,004 | +₹30,872 | +₹13,632 | -₹6,065 | +₹2,848 | +₹562 | **+₹119,754 / +₹112,466** | 7/8 | ₹6,065 |
+| `v1` | `trend_pullback_ITM` | +₹5,916 | +₹44,142 | +₹21,117 | +₹28,027 | +₹15,804 | -₹4,565 | +₹20,421 | -₹11,619 | **+₹119,242 / +₹98,810** | 6/8 | ₹11,619 |
+| `v1` | `trend_pullback_OTM` | +₹2,046 | +₹23,287 | +₹12,379 | +₹12,511 | +₹10,187 | +₹0 | +₹25,332 | +₹30,311 | **+₹116,053 / +₹85,091** | 7/8 | ₹0 |
+| `v1` | `fixed_target_ITM` | +₹9,376 | +₹44,990 | +₹27,513 | +₹22,321 | +₹12,927 | -₹5,806 | -₹15,085 | +₹5,506 | **+₹101,742 / +₹97,798** | 6/8 | ₹20,891 |
+| `v1` | `composite_shared_OTM` | +₹710 | +₹20,434 | +₹5,607 | +₹7,187 | +₹12,398 | +₹0 | +₹28,204 | +₹25,329 | **+₹99,869 / +₹71,181** | 7/8 | ₹0 |
+| `v1` | `fast_momentum_ITM` | +₹5,744 | +₹35,247 | +₹23,762 | +₹33,255 | +₹14,652 | -₹5,206 | -₹4,848 | -₹5,400 | **+₹97,206 / +₹101,313** | 5/8 | ₹15,454 |
+| `v1` | `fast_momentum_OTM` | -₹1,653 | +₹25,190 | +₹4,608 | +₹11,527 | +₹12,972 | +₹0 | +₹20,902 | +₹16,827 | **+₹90,373 / +₹80,317** | 6/8 | ₹1,653 |
+| `v2` | `structural_convexity_ATM` | -₹11,761 | +₹36,543 | +₹6,187 | +₹22,113 | +₹42,548 | +₹2,080 | +₹8,349 | -₹19,460 | **+₹86,600 / +₹77,214** | 6/8 | ₹19,460 |
+| `v2` | `delta_scalp_ITM2` | +₹3,782 | +₹28,398 | +₹6,526 | +₹33,155 | +₹14,508 | +₹1,961 | -₹15,555 | +₹13,659 | **+₹86,433 / +₹57,898** | 7/8 | ₹15,555 |
+| `v1` | `fixed_target_OTM` | +₹2,915 | +₹17,521 | +₹13,598 | +₹5,848 | +₹11,606 | +₹0 | +₹7,858 | -₹4,452 | **+₹54,894 / +₹44,064** | 6/8 | ₹4,452 |
+| `v2` | `opening_thrust_convex_ATM` | +₹11,304 | +₹12,910 | +₹0 | +₹11,348 | +₹762 | +₹1,950 | -₹10,444 | -₹3,571 | **+₹24,259 / +₹24,636** | 5/8 | ₹14,015 |
+| `v2` | `gamma_runner_OTM2` | -₹38,520 | -₹13,812 | -₹24,843 | -₹12,634 | +₹14,460 | -₹15 | -₹14,551 | -₹12,692 | **-₹102,606 / -₹118,746** | 1/8 | ₹102,606 |
 
-#### A. Under Champion `W2_15S_FLAG25_OPT_SPREAD` (`Paper` / `Paper-Delayed`)
+### 5.4 Per-Day Trackwise Net P&L Matrix — Zero-DD Champion `E10_W3_CAP3` (Paper / Delayed)
 
-| Profile | Track | `Nov 16` | `Nov 17` | `Nov 18` | `Nov 19` | `Nov 20` | `Nov 23` *(Expiry)* | `Nov 25` | 7-Day Total (P / D) | Green (P/D) | DD (P/D) |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `v1` | `trend_pullback_ATM` | +₹6,352 | +₹33,847 | +₹28,265 | +₹20,927 | +₹15,112 | +₹645 | +₹26,519 | **+₹131,667 / +₹129,064** | **7/7 / 7/7** | **₹0 / ₹0** |
-| `v2` | `volatility_expansion_ATM` | -₹8,289 | +₹47,254 | +₹30,473 | +₹25,472 | +₹29,764 | -₹4,986 | +₹8,503 | **+₹128,190 / +₹117,821** | 5/7 / 5/7 | ₹8,289 / ₹9,273 |
-| `v2` | `adaptive_regime_ATM` | +₹9,403 | +₹44,663 | +₹18,353 | +₹22,172 | +₹28,886 | -₹9,151 | +₹12,175 | **+₹126,502 / +₹107,424** | 6/7 / 5/7 | ₹9,151 / ₹12,405 |
-| `v1` | `trend_pullback_ITM` | -₹4,276 | +₹52,563 | +₹24,088 | +₹32,032 | +₹13,318 | -₹9,608 | +₹15,922 | **+₹124,041 / +₹120,328** | 5/7 / 5/7 | ₹9,608 / ₹9,608 |
-| `v1` | `composite_shared_ITM` | -₹4,721 | +₹50,165 | +₹27,709 | +₹34,889 | +₹8,716 | -₹10,849 | +₹14,174 | **+₹120,083 / +₹113,368** | 5/7 / 5/7 | ₹10,849 / ₹10,849 |
-| `v2` | `trend_pullback_v2_ITM1` | -₹9,908 | +₹47,083 | +₹21,425 | +₹34,129 | +₹17,393 | -₹7,903 | +₹14,395 | **+₹116,614 / +₹108,706** | 5/7 / 5/7 | ₹9,908 / ₹9,547 |
-| `v1` | `fast_momentum_ATM` | +₹5,248 | +₹35,533 | +₹11,895 | +₹22,335 | +₹18,639 | +₹390 | +₹20,316 | **+₹114,355 / +₹111,473** | **7/7 / 7/7** | **₹0 / ₹0** |
-| `v1` | `composite_shared_ATM` | +₹2,174 | +₹36,724 | +₹16,403 | +₹17,362 | +₹17,248 | +₹390 | +₹23,893 | **+₹114,194 / +₹109,329** | **7/7 / 7/7** | **₹0 / ₹0** |
-| `v1` | `fixed_target_ATM` | +₹10,080 | +₹25,686 | +₹20,490 | +₹14,364 | +₹16,905 | +₹240 | +₹10,583 | **+₹98,348 / +₹98,258** | **7/7 / 7/7** | **₹0 / ₹0** |
-| `v1` | `composite_shared_OTM` | +₹1,529 | +₹37,100 | +₹16,889 | +₹7,287 | +₹10,311 | +₹0 | +₹22,744 | **+₹95,859 / +₹87,895** | 6/7 / 5/7 | ₹0 / ₹1,019 |
-| `v1` | `fixed_target_ITM` | -₹282 | +₹39,556 | +₹32,285 | +₹23,722 | +₹4,748 | -₹8,007 | +₹1,204 | **+₹93,224 / +₹87,127** | 5/7 / 5/7 | ₹8,007 / ₹11,113 |
-| `v2` | `micro_chandelier_ITM1` | -₹3,265 | +₹34,182 | +₹37,040 | +₹24,860 | +₹10,904 | -₹6,039 | -₹6,123 | **+₹91,559 / +₹86,249** | 4/7 / 4/7 | ₹12,162 / ₹16,304 |
-| `v1` | `fast_momentum_ITM` | -₹6,557 | +₹35,322 | +₹30,260 | +₹38,015 | +₹2,205 | -₹9,079 | -₹3,156 | **+₹87,010 / +₹104,807** | 4/7 / 5/7 | ₹12,235 / ₹9,079 |
-| `v1` | `trend_pullback_OTM` | -₹531 | +₹31,989 | +₹19,272 | +₹8,772 | +₹8,506 | +₹0 | +₹15,843 | **+₹83,850 / +₹82,075** | 5/7 / 5/7 | ₹531 / ₹1,402 |
-| `v1` | `fast_momentum_OTM` | -₹3,612 | +₹33,519 | +₹12,010 | +₹6,513 | +₹9,664 | +₹0 | +₹22,680 | **+₹80,774 / +₹85,026** | 5/7 / 5/7 | ₹3,612 / ₹6,119 |
-| `v1` | `fixed_target_OTM` | +₹3,259 | +₹24,061 | +₹18,726 | +₹2,237 | +₹9,648 | +₹0 | +₹11,135 | **+₹69,066 / +₹56,798** | 6/7 / 6/7 | ₹0 / ₹0 |
-| `v2` | `opening_thrust_convex_ATM` | +₹5,953 | +₹17,836 | +₹0 | +₹10,760 | -₹1,940 | +₹1,950 | -₹9,275 | **+₹25,284 / +₹25,074** | 4/7 / 4/7 | ₹9,275 / ₹9,498 |
-| `v2` | `delta_scalp_ITM2` | -₹10,242 | +₹9,169 | +₹4,991 | +₹21,671 | +₹4,199 | -₹7,450 | -₹37,323 | `-₹14,985 / -₹28,811` | 4/7 / 4/7 | ₹44,773 / ₹51,905 |
-| `v2` | `gamma_runner_OTM2` | -₹31,258 | -₹6,083 | -₹9,101 | -₹10,589 | +₹4,658 | -₹232 | -₹15,340 | `-₹67,945 / -₹68,936` | 1/7 / 1/7 | ₹67,945 / ₹68,936 |
-| `v2` | `structural_convexity_ATM` | -₹15,593 | +₹16,962 | -₹16,973 | -₹52,836 | -₹11,070 | +₹1,918 | -₹28,652 | `-₹106,244 / -₹111,588` | 2/7 / 2/7 | ₹107,613 / ₹111,588 |
-
-#### B. Under Low-DD / Expiry-Proof `W3_15S_FLAG25_3BAR045_OPT_SPREAD` (`Paper`)
-
-| Profile | Track | `Nov 16` | `Nov 17` | `Nov 18` | `Nov 19` | `Nov 20` | `Nov 23` *(Expiry)* | `Nov 25` | 7-Day Total (P) | Green | DD |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `v2` | `volatility_expansion_ATM` | -₹430 | +₹45,112 | +₹32,013 | +₹14,593 | +₹26,406 | +₹1,784 | +₹6,167 | **+₹125,644** | 6/7 | ₹430 |
-| `v2` | `adaptive_regime_ATM` | +₹6,677 | +₹32,409 | +₹26,355 | +₹6,574 | +₹26,137 | +₹706 | +₹10,356 | **+₹109,214** | **7/7** | **₹0** |
-| `v1` | `trend_pullback_ITM` | -₹4,609 | +₹40,557 | +₹24,959 | +₹10,753 | +₹8,322 | +₹1,914 | +₹18,196 | **+₹100,091** | 6/7 | ₹4,609 |
-| `v1` | `trend_pullback_ATM` | +₹3,240 | +₹28,724 | +₹32,137 | +₹16,672 | +₹10,747 | +₹1,125 | +₹6,913 | **+₹99,559** | **7/7** | **₹0** |
-| `v2` | `micro_chandelier_ITM1` | +₹1,407 | +₹30,756 | +₹38,446 | +₹18,306 | +₹8,605 | +₹92 | +₹701 | **+₹98,312** | **7/7** | **₹0** |
-| `v2` | `trend_pullback_v2_ITM1` | -₹6,978 | +₹41,489 | +₹25,566 | +₹10,423 | +₹19,782 | +₹1,954 | +₹4,304 | **+₹96,541** | 6/7 | ₹6,978 |
-| `v1` | `fast_momentum_ATM` | +₹1,749 | +₹31,182 | +₹17,259 | +₹14,994 | +₹14,357 | +₹870 | +₹11,381 | **+₹91,793** | **7/7** | **₹0** |
-| `v1` | `composite_shared_ITM` | -₹5,200 | +₹39,768 | +₹33,121 | +₹17,500 | +₹5,228 | +₹1,584 | -₹626 | **+₹91,376** | 5/7 | ₹5,200 |
-| `v1` | `composite_shared_ATM` | -₹3,944 | +₹26,227 | +₹31,743 | +₹9,337 | +₹14,684 | +₹870 | -₹431 | **+₹78,486** | 5/7 | ₹3,944 |
-| `v1` | `fixed_target_ATM` | +₹4,936 | +₹19,585 | +₹22,699 | +₹13,717 | +₹12,909 | +₹720 | +₹1,397 | **+₹75,962** | **7/7** | **₹0** |
-| `v1` | `fast_momentum_ITM` | -₹7,040 | +₹27,979 | +₹29,630 | +₹16,170 | +₹1,545 | +₹2,442 | +₹4,003 | **+₹74,730** | 6/7 | ₹7,040 |
-| `v1` | `trend_pullback_OTM` | -₹2,202 | +₹29,851 | +₹18,907 | +₹7,404 | +₹5,406 | +₹0 | +₹14,502 | **+₹73,868** | 5/7 | ₹2,202 |
-| `v1` | `fixed_target_ITM` | -₹2,449 | +₹31,536 | +₹26,926 | +₹14,185 | +₹1,978 | +₹1,370 | -₹2,508 | **+₹71,039** | 5/7 | ₹2,508 |
-| `v1` | `fast_momentum_OTM` | -₹5,253 | +₹32,723 | +₹14,784 | +₹4,883 | +₹6,422 | +₹0 | +₹15,288 | **+₹68,847** | 5/7 | ₹5,253 |
-| `v1` | `composite_shared_OTM` | -₹1,099 | +₹27,129 | +₹18,294 | +₹1,335 | +₹6,332 | +₹0 | +₹13,666 | **+₹65,657** | 5/7 | ₹1,099 |
-| `v1` | `fixed_target_OTM` | -₹549 | +₹24,260 | +₹17,756 | -₹2,047 | +₹6,513 | +₹0 | +₹2,420 | **+₹48,353** | 4/7 | ₹2,047 |
-| `v2` | `opening_thrust_convex_ATM` | +₹5,953 | +₹18,346 | +₹0 | +₹11,470 | -₹1,875 | +₹1,950 | -₹9,275 | **+₹26,570** | 4/7 | ₹9,275 |
-| `v2` | `delta_scalp_ITM2` | -₹17 | +₹10,710 | +₹13,569 | +₹15,084 | +₹9,872 | -₹2,198 | -₹24,992 | **+₹22,028** | 4/7 | ₹27,190 |
-| `v2` | `gamma_runner_OTM2` | -₹24,029 | +₹13,139 | -₹4,561 | -₹10,352 | +₹2,803 | +₹1,008 | -₹12,219 | `-₹34,212` | 3/7 | ₹34,212 |
-| `v2` | `structural_convexity_ATM` | -₹12,286 | +₹33,478 | -₹10,426 | -₹32,172 | -₹11,018 | +₹2,232 | -₹30,812 | `-₹61,005` | 2/7 | ₹82,197 |
+| Profile | Track | Nov 16 | Nov 17 | Nov 18 | Nov 19 | Nov 20 | Nov 23 | Nov 25 | Nov 26 | 8d Total (P / D) | Grn | DD |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `v2` | `volatility_expansion_ATM` | -₹1,472 | +₹36,430 | +₹30,676 | +₹16,610 | +₹35,187 | +₹1,676 | +₹6,599 | +₹37,931 | **+₹163,637 / +₹153,536** | 7/8 | ₹1,472 |
+| `v2` | `adaptive_regime_ATM` | +₹13,498 | +₹26,419 | +₹26,771 | +₹10,708 | +₹34,177 | +₹641 | +₹17,512 | +₹8,766 | **+₹138,492 / +₹132,156** | 8/8 | ₹0 |
+| `v1` | `trend_pullback_ATM` | +₹3,644 | +₹21,851 | +₹27,007 | +₹19,790 | +₹15,971 | +₹1,125 | +₹15,158 | +₹31,813 | **+₹136,360 / +₹134,510** | 8/8 | ₹0 |
+| `v1` | `fast_momentum_ATM` | +₹3,746 | +₹23,502 | +₹12,289 | +₹15,577 | +₹20,482 | +₹870 | +₹8,667 | +₹45,749 | **+₹130,882 / +₹112,858** | 8/8 | ₹0 |
+| `v2` | `micro_chandelier_ITM1` | +₹6,709 | +₹26,557 | +₹33,981 | +₹17,949 | +₹16,483 | -₹15 | +₹6,350 | +₹19,966 | **+₹127,979 / +₹110,563** | 7/8 | ₹15 |
+| `v1` | `composite_shared_ATM` | +₹8,465 | +₹20,522 | +₹11,139 | +₹15,255 | +₹20,086 | +₹870 | +₹6,773 | +₹42,888 | **+₹125,998 / +₹103,362** | 8/8 | ₹0 |
+| `v1` | `composite_shared_ITM` | +₹2,152 | +₹25,620 | +₹34,949 | +₹22,853 | +₹5,116 | +₹608 | +₹7,367 | +₹12,841 | **+₹111,504 / +₹111,414** | 8/8 | ₹0 |
+| `v1` | `fast_momentum_ITM` | +₹3,072 | +₹24,016 | +₹28,164 | +₹19,547 | +₹5,840 | +₹1,208 | -₹1,994 | +₹30,364 | **+₹110,216 / +₹95,554** | 7/8 | ₹1,994 |
+| `v2` | `trend_pullback_v2_ITM1` | -₹4,475 | +₹25,497 | +₹23,629 | +₹15,479 | +₹27,217 | +₹1,151 | +₹19,537 | +₹1,313 | **+₹109,348 / +₹110,487** | 7/8 | ₹4,475 |
+| `v1` | `fixed_target_ATM` | +₹4,883 | +₹16,718 | +₹18,453 | +₹18,611 | +₹17,076 | +₹720 | +₹4,404 | +₹28,357 | **+₹109,222 / +₹102,073** | 8/8 | ₹0 |
+| `v1` | `trend_pullback_ITM` | +₹2,538 | +₹32,155 | +₹26,861 | +₹15,530 | +₹6,638 | +₹1,849 | +₹13,551 | +₹7,671 | **+₹106,793 / +₹96,663** | 8/8 | ₹0 |
+| `v1` | `fixed_target_ITM` | +₹6,858 | +₹29,564 | +₹28,705 | +₹18,271 | +₹5,300 | +₹608 | -₹5,291 | +₹16,866 | **+₹100,880 / +₹91,669** | 7/8 | ₹5,291 |
+| `v1` | `fast_momentum_OTM` | -₹4,963 | +₹25,546 | +₹10,968 | +₹6,606 | +₹6,102 | +₹0 | +₹14,764 | +₹35,391 | **+₹94,415 / +₹78,620** | 6/8 | ₹4,963 |
+| `v1` | `trend_pullback_OTM` | -₹3,677 | +₹19,541 | +₹14,471 | +₹10,582 | +₹4,577 | +₹0 | +₹6,523 | +₹33,404 | **+₹85,422 / +₹70,616** | 6/8 | ₹3,677 |
+| `v2` | `delta_scalp_ITM2` | +₹6,382 | +₹24,126 | +₹11,628 | +₹21,851 | +₹16,243 | +₹375 | -₹6,054 | +₹10,649 | **+₹85,200 / +₹64,572** | 7/8 | ₹6,054 |
+| `v1` | `composite_shared_OTM` | -₹2,827 | +₹19,610 | +₹13,804 | +₹6,936 | +₹4,405 | +₹0 | -₹1,026 | +₹34,565 | **+₹75,466 / +₹60,979** | 5/8 | ₹2,827 |
+| `v2` | `structural_convexity_ATM` | -₹13,319 | +₹47,322 | +₹7,093 | +₹13,972 | +₹36,979 | +₹2,332 | -₹6,187 | -₹19,361 | **+₹68,831 / +₹86,964** | 5/8 | ₹25,548 |
+| `v1` | `fixed_target_OTM` | -₹4,510 | +₹17,402 | +₹13,128 | +₹246 | +₹4,700 | +₹0 | -₹3,233 | +₹10,453 | **+₹38,185 / +₹33,202** | 5/8 | ₹4,510 |
+| `v2` | `opening_thrust_convex_ATM` | +₹11,884 | +₹13,420 | +₹0 | +₹12,025 | +₹1,482 | +₹1,950 | -₹9,144 | -₹2,366 | **+₹29,252 / +₹28,873** | 5/8 | ₹11,510 |
+| `v2` | `gamma_runner_OTM2` | -₹36,926 | +₹308 | -₹17,989 | -₹14,194 | +₹10,469 | +₹1,008 | -₹10,408 | -₹5,754 | **-₹73,486 / -₹73,225** | 3/8 | ₹73,486 |
 
 ---
 
-## 6. Recommended Next Steps for Discussion
+## 6. Recommended Operating Profiles & Promotion Roadmap
 
-Before making any edits to production code or configs, here are the concrete choices to review together:
-
-1. **Choose the Target Operating Profile (`W2` vs `W3`):**
-   - **Option A — `W2` (`15s Elapsed` + `OLS Flag Top 25% of Pole` + `Option Convexity Scaling & Spread Gate`):** Maximizes raw net profit (**`+₹1.51M` Paper / `+₹1.42M` Delayed** across all 20 tracks; **`+₹1.70M` / `+₹1.63M`** pruned) while retaining high signal throughput (`~193` opps/day average). Expect occasional expiry-day drag unless expiry has a stricter intraday rule.
-   - **Option B — `W3` (`W2` + `PURE Net 3-Bar Expansion >= 0.45%`):** Sacrifices only ~12% peak return (**`+₹1.32M` Paper / `+₹1.25M` Delayed** across all 20 tracks) in exchange for **32% fewer trades, `₹363k` lower brokerage, lowest drawdown (`₹52.1k`), `6/7` green days, `+₹383k` on `v2`, and profitable Expiry Day (`Nov 23`)**!
-   - **Dynamic Alternative (Expiry-Aware Profile):** Run **`W2`** on regular sessions (`Mon–Wed/Fri` or non-expiry days) and automatically toggle **`PURE 3-Bar >= 0.45%` (`W3`) on Weekly/Monthly Expiry Days** (where `W2` lost `-₹67.8k` on `Nov 23` vs `W3`'s **`+₹18.4k`** and `W4`'s **`+₹31.3k`**)! Combining `W2` on non-expiry days + `W3` on expiry day yields `+₹1,597,642` Paper / `+₹1,507,682` Delayed across all 20 tracks — beating both!
-
-2. **Codebase Promotion Path (When Ready to Implement):**
-   - Add `min_candle_elapsed_sec: 15.0`, `flag_pole_buffer_pct: 0.25`, and optional `pure_min_3bar_expansion_pct: 0.0045` to `ScoringEngine3` & `config/scoring.json` (plus an optional `is_expiry_day` strict-impulse mode).
-   - Move `Option Convexity Target/SL Scaling` and `ATR/Spread Gate` natively into `BaseTrack` (enabled/configured per track in `config/tracks/`).
-   - Decide whether to disable/archive `structural_convexity_ATM`, `gamma_runner_OTM2`, and keep `delta_scalp_ITM2` only under high-conviction impulse filters.
-   - Keep **Midday Freeze (`11:30–13:30`)** implemented cleanly as an *opt-in* config flag (`false` by default for momentum profiles), since empirical testing proved blanket freezing severely hurts follow-through sessions.
+1. **Choose Target Profile:**
+   - **Option A — Max Return (`W1_15S_OPT_SPREAD` or `W2_15S_FLAG25_OPT_SPREAD`):** Highest net profit (`+₹2,032,094` / `+₹1,970,972` across all 20 tracks, `7/8` green days, `₹26,060` DD); `W2` retains `86.4%` in Delayed (`+₹1,703,692`).
+   - **Option B — Zero-DD Live Production Standard (`E10_W3_CAP3` or `E5_W2_ATR020`):** **`E10_W3_CAP3` delivers `8/8` green days with `₹0` Paper MaxDD (`+₹1,874,596` P / `+₹1,705,447` D)** with `31.4%` fewer trades and `₹445,080` lower brokerage than Baseline. **`E5_W2_ATR020`** (`+₹1,761,182` P / `+₹1,555,033` D) achieves **`₹0` MaxDD in BOTH Paper and Delayed**!
+2. **Track Portfolio Surgery:** Immediately retire **`gamma_runner_OTM2`** (`0/45` positive across every rule set). Keep **`delta_scalp_ITM2`** gated behind `W3`/`E10` (`OptScale + 3Bar`) or allocate core capital to top consistent ATM/ITM1 performers (`fixed_target_ATM`, `trend_pullback_ATM`, `composite_shared_ATM`, `volatility_expansion_ATM`, `adaptive_regime_ATM`).
+3. **Expiry-Day Switch & Midday Freeze Flag:** Keep `midday_freeze.enabled = false` by default for momentum (proven `#1` P&L destroyer when forced on globally), and toggle `3-Bar >= 0.45% + Cap <= 3` (`E10`/`W3`) on high-chop / expiry regimes (`Nov 23 + Nov 26` combined: `E10` makes **`+₹398,480`**, vs `W1` `+₹76,752` and `H0` `-₹368,707`!).
 
 ---
 
-## 7. Complete Cached Economics, Slippage & Marginal Attribution (All 30 Runs)
+## 7. Complete Cost, Slippage & Risk-Adjusted Economics (All 45 Experiments)
 
-### 7.1 Full Cost, Slippage & Risk-Adjusted Efficiency Table (`Paper` & `Paper-Delayed`)
-
-> **Legend:** `GP` = Gross P&L (pre-brokerage); `Brok (%GP)` = brokerage paid (`₹60/round-trip`) and % of Gross consumed; `P-Net / D-Net` = 7-day Net P&L; `Slip (%Ret)` = `P-Net - D-Net` slippage cost and Delayed retention % (`D-Net / P-Net`); `₹/Tr (P/D)` = net expectancy per trade; `Ret/DD` = `P-Net / Paper MaxDD`.
-
-| Experiment ID | Opps | Tr (P / D) | WR% (P / D) | Paper Gross | Brok (`% GP`) | Paper Net | Delayed Net | Slippage (`% Ret`) | ₹/Trade (P / D) | MaxDD (P) | Ret/DD |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `W2_15S_FLAG25_OPT_SPREAD` | 1,349 | 18,864 / 18,812 | 34.7 / 34.6 | +₹2,643,287 | ₹1,131,840 (42.8%) | **+₹1,511,447** | **+₹1,421,488** | +₹89,959 (94.0%) | +₹80.1 / +₹75.6 | ₹67,771 | 22.3x |
-| `W1_15S_OPT_SPREAD` | 1,355 | 18,964 / 18,922 | 34.7 / 34.4 | +₹2,621,704 | ₹1,137,840 (43.4%) | +₹1,483,864 | +₹1,376,967 | +₹106,897 (92.8%) | +₹78.2 / +₹72.8 | ₹67,771 | 21.9x |
-| `H6b_OPT_SCALE_SPREAD` | 1,385 | 19,252 / 19,203 | 34.3 / 34.0 | +₹2,484,764 | ₹1,155,120 (46.5%) | +₹1,329,644 | +₹1,181,570 | +₹148,075 (88.9%) | +₹69.1 / +₹61.5 | ₹54,938 | 24.2x |
-| `W3_15S_FLAG25_3BAR045_OPT_SPREAD` | 889 | 13,033 / 13,025 | **35.2 / 35.1** | +₹2,104,833 | ₹781,980 (**37.2%**) | +₹1,322,853 | +₹1,253,793 | +₹69,060 (**94.8%**) | **+₹101.5 / +₹96.3** | ₹52,123 | 25.4x |
-| `W5_15S_FLAG25_NOFLIP_OPT_SPREAD` | 1,021 | 15,013 / 14,976 | 34.6 / 34.4 | +₹2,162,656 | ₹900,780 (41.7%) | +₹1,261,876 | +₹1,193,512 | +₹68,364 (94.6%) | +₹84.1 / +₹79.7 | ₹118,544 | 10.6x |
-| `H4a_ELAPSED_15S` | 1,446 | 18,763 / 18,735 | 33.1 / 32.8 | +₹2,292,785 | ₹1,125,780 (49.1%) | +₹1,167,005 | +₹1,014,754 | +₹152,250 (87.0%) | +₹62.2 / +₹54.2 | ₹96,581 | 12.1x |
-| `H6a_OPT_SCALE` | 1,477 | 19,644 / 19,578 | 33.9 / 33.6 | +₹2,297,260 | ₹1,178,640 (51.3%) | +₹1,118,620 | +₹972,379 | +₹146,240 (86.9%) | +₹56.9 / +₹49.7 | ₹149,715 | 7.5x |
-| `W4_3BAR045_OPT_SPREAD` | 923 | 13,425 / 13,420 | 34.4 / 34.3 | +₹1,906,994 | ₹805,500 (42.2%) | +₹1,101,494 | +₹988,718 | +₹112,776 (89.8%) | +₹82.0 / +₹73.7 | ₹37,962 | **29.0x** |
-| `H2b_PURE_3BAR_045` | 970 | 13,251 / 13,207 | 33.2 / 33.1 | +₹1,823,675 | ₹795,060 (43.6%) | +₹1,028,615 | +₹906,560 | +₹122,054 (88.1%) | +₹77.6 / +₹68.6 | ₹52,830 | 19.5x |
-| `H3b_FLAG_BUF_25` | 1,465 | 18,895 / 18,881 | 32.8 / 32.3 | +₹2,153,368 | ₹1,133,700 (52.6%) | +₹1,019,668 | +₹821,316 | +₹198,351 (80.5%) | +₹54.0 / +₹43.5 | ₹112,462 | 9.1x |
-| `H3a_FLAG_BUF_15` | 1,469 | 18,995 / 18,978 | 32.8 / 32.4 | +₹2,135,827 | ₹1,139,700 (53.4%) | +₹996,127 | +₹804,243 | +₹191,884 (80.7%) | +₹52.4 / +₹42.4 | ₹103,076 | 9.7x |
-| `H0_BASELINE` | 1,477 | 19,080 / 19,028 | 32.8 / 32.4 | +₹2,116,298 | ₹1,144,800 (54.1%) | +₹971,498 | +₹828,205 | +₹143,293 (85.3%) | +₹50.9 / +₹43.5 | ₹109,330 | 8.9x |
-| `H3c_FLAG_FULL_POLE` | 1,430 | 18,483 / 18,461 | 33.0 / 32.6 | +₹2,037,563 | ₹1,108,980 (54.4%) | +₹928,583 | +₹730,551 | +₹198,032 (78.7%) | +₹50.2 / +₹39.6 | ₹242,818 | 3.8x |
-| `W6_BODY025_ATR025_OPT_SPREAD` | 733 | 10,496 / 10,498 | 34.6 / 34.4 | +₹1,485,593 | ₹629,760 (42.4%) | +₹855,833 | +₹761,490 | +₹94,343 (89.0%) | +₹81.5 / +₹72.5 | **₹21,500** | **39.8x** |
-| `H4b_ELAPSED_30S` | 1,427 | 18,703 / 18,677 | 32.7 / 32.3 | +₹1,946,299 | ₹1,122,180 (57.7%) | +₹824,119 | +₹595,188 | +₹228,931 (72.2%) | +₹44.1 / +₹31.9 | ₹187,045 | 4.4x |
-| `H5a_CAP_2` | 1,078 | 14,903 / 14,889 | 33.0 / 32.6 | +₹1,707,209 | ₹894,180 (52.4%) | +₹813,029 | +₹671,716 | +₹141,312 (82.6%) | +₹54.6 / +₹45.1 | ₹115,794 | 7.0x |
-| `H2a_MIN_ATR_030` | 604 | 8,270 / 8,234 | 33.3 / 32.9 | +₹1,284,155 | ₹496,200 (38.6%) | +₹787,955 | +₹658,647 | +₹129,308 (83.6%) | +₹95.3 / +₹80.0 | ₹79,034 | 10.0x |
-| `M9_ALL_SIGNALS_SCALED` | 749 | 10,880 / 10,862 | 33.5 / 33.5 | +₹1,368,432 | ₹652,800 (47.7%) | +₹715,632 | +₹679,229 | +₹36,403 (94.9%) | +₹65.8 / +₹62.5 | ₹300,841 | 2.4x |
-| `H2c_BODY_025_ATR_025` | 776 | 10,379 / 10,337 | 33.0 / 32.7 | +₹1,291,780 | ₹622,740 (48.2%) | +₹669,040 | +₹565,583 | +₹103,457 (84.5%) | +₹64.5 / +₹54.7 | ₹99,222 | 6.7x |
-| `H5b_CAP_2_NO_FLIP` | 944 | 13,407 / 13,392 | 32.6 / 32.2 | +₹1,450,438 | ₹804,420 (55.5%) | +₹646,018 | +₹537,389 | +₹108,629 (83.2%) | +₹48.2 / +₹40.1 | ₹117,620 | 5.5x |
-| `M1_CORE_CLEAN` | 735 | 10,202 / 10,186 | 32.2 / 32.0 | +₹1,222,604 | ₹612,120 (50.1%) | +₹610,484 | +₹513,743 | +₹96,741 (84.2%) | +₹59.8 / +₹50.4 | ₹265,067 | 2.3x |
-| `M2_BALANCED` | 294 | 4,529 / 4,525 | 33.1 / 33.0 | +₹752,436 | ₹271,740 (**36.1%**) | +₹480,696 | +₹436,259 | +₹44,436 (90.8%) | **+₹106.1 / +₹96.4** | ₹68,058 | 7.1x |
-| `M7_SPREAD_GATE_CORE` | 629 | 9,389 / 9,387 | 32.5 / 32.4 | +₹997,994 | ₹563,340 (56.4%) | +₹434,654 | +₹357,653 | +₹77,001 (82.3%) | +₹46.3 / +₹38.1 | ₹362,092 | 1.2x |
-| `M4_BALANCED_SCALED` | 294 | 4,664 / 4,665 | 34.0 / 33.8 | +₹704,130 | ₹279,840 (39.7%) | +₹424,290 | +₹390,975 | +₹33,315 (92.1%) | +₹91.0 / +₹83.8 | ₹80,551 | 5.3x |
-| `M6_HIGH_CONVICTION` | 269 | 4,342 / 4,340 | 33.6 / 33.6 | +₹635,260 | ₹260,520 (41.0%) | +₹374,740 | +₹357,050 | +₹17,690 (95.3%) | +₹86.3 / +₹82.3 | ₹79,864 | 4.7x |
-| `H1_MIDDAY_FREEZE` | 830 | 11,105 / 11,100 | 31.4 / 31.4 | +₹1,017,384 | ₹666,300 (**65.5%**) | +₹351,084 | +₹324,593 | +₹26,491 (92.5%) | +₹31.6 / +₹29.2 | **₹426,779** | 0.8x |
-| `M3_SMART_IMPULSE` | 348 | 5,264 / 5,249 | 31.9 / 32.0 | +₹645,558 | ₹315,840 (48.9%) | +₹329,718 | +₹313,284 | +₹16,433 (95.0%) | +₹62.6 / +₹59.7 | ₹233,101 | 1.4x |
-| `H5c_CAP_1` | 632 | 9,311 / 9,303 | 32.3 / 31.8 | +₹877,054 | ₹558,660 (63.7%) | +₹318,394 | +₹213,016 | +₹105,377 (66.9%) | +₹34.2 / +₹22.9 | ₹211,055 | 1.5x |
-| `M8_BODY025_SPREAD_SCALED` | 321 | 5,087 / 5,084 | 33.4 / 33.2 | +₹579,655 | ₹305,220 (52.7%) | +₹274,435 | +₹213,254 | +₹61,181 (77.7%) | +₹53.9 / +₹41.9 | ₹233,661 | 1.2x |
-| `M5_IMPULSE_SCALED` | 348 | 5,439 / 5,436 | 32.3 / 32.5 | +₹547,781 | ₹326,340 (59.6%) | +₹221,441 | +₹220,166 | +₹1,275 (99.4%) | +₹40.7 / +₹40.5 | ₹346,371 | 0.6x |
-
-### 7.2 Marginal Attribution & Interaction Effects
-- **`H0 → H4a_ELAPSED_15S` (`+₹195,507` Paper / `+₹186,549` Delayed):** Dropping the first `15s` of every 5m bar only removes 31 opps (`1,477 → 1,446`), yet raises GP by `+₹176,487` and lowers brokerage by `₹19,020`.
-- **`H0 → H6a_OPT_SCALE` (`+₹147,122` Paper / `+₹144,174` Delayed) → `H6b_OPT_SCALE_SPREAD` (`+₹211,024` additional Paper / `+₹209,191` Delayed):** Option target/SL convexity scaling adds edge across trending days, while the ATM `ATR / Spread` gate selectively prunes **92** illiquid/wide-spread entries (`1,477 → 1,385`), flipping `Nov 16` and `Nov 25` positive and halving MaxDD (`₹149.7k → ₹54.9k`).
-- **Synergy (`H6b → W1 → W2`):** Adding `15s Elapsed` onto `H6b` adds **`+₹154,220` Paper / `+₹195,397` Delayed** (`W1`). Adding `Flag Top 25%` (`W1 → W2`) trims only 6 opps (`1,355 → 1,349`) yet adds **`+₹27,583` Paper / `+₹44,521` Delayed**, proving delayed-execution resilience (`94.0%` retention vs `85.3%` Baseline).
-- **Slippage Inversion on High-Conviction ITM Tracks:** Under `H0_BASELINE`, `v1_ITM` suffered **`+₹57,104` delayed slippage** (`+₹303,054 → +₹245,950`). Under `W2` and `W3`, `v1_ITM` delayed fills actually beat instant paper fills (**`W2: -₹1,273` slippage**; **`W3: -₹8,444` slippage**!), because non-spike breakout confirmations frequently retrace a fraction of a tick during the `100–250ms` order delay before continuing higher.
+| Rank | Experiment ID | Opps | Tr (P / D) | WR% (P / D) | Paper Gross | Brokerage (`% GP`) | Paper Net | Delayed Net | Slippage (`Ret%`) | ₹/Trade (P / D) | MaxDD (P / D) | Ret/DD (P) |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | `W1_15S_OPT_SPREAD` | 1,836 | 23,469 / 23,337 | 34.3 / 34.0 | +₹3,440,234 | ₹1,408,140 (40.9%) | +₹2,032,094 | +₹1,712,076 | +₹320,018 (84.3%) | +₹86.6 / +₹73.4 | ₹26,060 / ₹26,060 | 78.0x |
+| 2 | `W2_15S_FLAG25_OPT_SPREAD` | 1,825 | 23,316 / 23,186 | 34.3 / 34.0 | +₹3,369,932 | ₹1,398,960 (41.5%) | +₹1,970,972 | +₹1,703,692 | +₹267,280 (86.4%) | +₹84.5 / +₹73.5 | ₹26,060 / ₹26,060 | 75.6x |
+| 3 | `E10_W3_CAP3` | 1,140 | 16,179 / 16,134 | 35.4 / 35.3 | +₹2,845,336 | ₹970,740 (34.1%) | +₹1,874,596 | +₹1,705,447 | +₹169,149 (91.0%) | +₹115.9 / +₹105.7 | ₹0 / ₹3,664 | ∞ |
+| 4 | `W3_15S_FLAG25_3BAR045_OPT_SPREAD` | 1,212 | 17,000 / 16,939 | 35.1 / 34.9 | +₹2,862,081 | ₹1,020,000 (35.6%) | +₹1,842,081 | +₹1,633,037 | +₹209,044 (88.7%) | +₹108.4 / +₹96.4 | ₹0 / ₹5,858 | ∞ |
+| 5 | `E6_W3_ATR020` | 1,100 | 15,420 / 15,375 | 35.1 / 35.1 | +₹2,713,566 | ₹925,200 (34.1%) | +₹1,788,366 | +₹1,638,703 | +₹149,662 (91.6%) | +₹116.0 / +₹106.6 | ₹0 / ₹1,782 | ∞ |
+| 6 | `E9_W2_CAP3` | 1,636 | 21,596 / 21,483 | 34.2 / 33.9 | +₹3,078,103 | ₹1,295,760 (42.1%) | +₹1,782,343 | +₹1,548,208 | +₹234,135 (86.9%) | +₹82.5 / +₹72.1 | ₹54,415 / ₹57,656 | 32.8x |
+| 7 | `E5_W2_ATR020` | 1,439 | 18,716 / 18,582 | 34.4 / 34.1 | +₹2,884,142 | ₹1,122,960 (38.9%) | +₹1,761,182 | +₹1,555,033 | +₹206,149 (88.3%) | +₹94.1 / +₹83.7 | ₹0 / ₹0 | ∞ |
+| 8 | `E7_W2_FLIPCD30` | 1,774 | 22,737 / 22,640 | 34.1 / 33.8 | +₹3,118,205 | ₹1,364,220 (43.8%) | +₹1,753,985 | +₹1,548,595 | +₹205,390 (88.3%) | +₹77.1 / +₹68.4 | ₹26,060 / ₹82,171 | 67.3x |
+| 9 | `E14_W2_GATE_ONLY_NOSCALE` | 1,825 | 22,266 / 22,116 | 33.3 / 32.8 | +₹3,077,800 | ₹1,335,960 (43.4%) | +₹1,741,840 | +₹1,484,074 | +₹257,766 (85.2%) | +₹78.2 / +₹67.1 | ₹31,023 / ₹41,664 | 56.1x |
+| 10 | `E8_W3_FLIPCD30` | 1,188 | 16,757 / 16,708 | 35.0 / 35.0 | +₹2,742,957 | ₹1,005,420 (36.7%) | +₹1,737,537 | +₹1,577,307 | +₹160,231 (90.8%) | +₹103.7 / +₹94.4 | ₹623 / ₹9,071 | 2788.8x |
+| 11 | `W5_15S_FLAG25_NOFLIP_OPT_SPREAD` | 1,357 | 18,822 / 18,760 | 34.6 / 34.4 | +₹2,857,103 | ₹1,129,320 (39.5%) | +₹1,727,783 | +₹1,597,211 | +₹130,572 (92.4%) | +₹91.8 / +₹85.1 | ₹81,005 / ₹87,969 | 21.3x |
+| 12 | `E3_W2_3BAR035` | 1,520 | 20,051 / 19,931 | 34.1 / 33.8 | +₹2,910,734 | ₹1,203,060 (41.3%) | +₹1,707,674 | +₹1,486,197 | +₹221,478 (87.0%) | +₹85.2 / +₹74.6 | ₹41,664 / ₹50,782 | 41.0x |
+| 13 | `H6b_OPT_SCALE_SPREAD` | 1,880 | 23,814 / 23,693 | 33.8 / 33.4 | +₹3,128,104 | ₹1,428,840 (45.7%) | +₹1,699,264 | +₹1,381,151 | +₹318,113 (81.3%) | +₹71.4 / +₹58.3 | ₹13,025 / ₹52,667 | 130.5x |
+| 14 | `E15_15S_FLAG25_BODY035_SCALED` | 915 | 13,150 / 13,116 | 35.8 / 35.8 | +₹2,485,922 | ₹789,000 (31.7%) | +₹1,696,922 | +₹1,586,805 | +₹110,117 (93.5%) | +₹129.0 / +₹121.0 | ₹660 / ₹660 | 2571.1x |
+| 15 | `E11_W2_FREEZE1400` | 1,396 | 18,325 / 18,209 | 34.8 / 34.3 | +₹2,783,118 | ₹1,099,500 (39.5%) | +₹1,683,618 | +₹1,444,902 | +₹238,717 (85.8%) | +₹91.9 / +₹79.4 | ₹4,914 / ₹10,659 | 342.6x |
+| 16 | `E12_W3_FREEZE1400` | 978 | 13,841 / 13,800 | 35.3 / 35.1 | +₹2,413,530 | ₹830,460 (34.4%) | +₹1,583,070 | +₹1,429,954 | +₹153,116 (90.3%) | +₹114.4 / +₹103.6 | ₹27,606 / ₹34,995 | 57.3x |
+| 17 | `E4_W2_3BAR060` | 824 | 12,201 / 12,164 | 35.2 / 35.0 | +₹2,268,946 | ₹732,060 (32.3%) | +₹1,536,886 | +₹1,398,631 | +₹138,255 (91.0%) | +₹126.0 / +₹115.0 | ₹0 / ₹0 | ∞ |
+| 18 | `W4_3BAR045_OPT_SPREAD` | 1,264 | 17,530 / 17,435 | 34.1 / 34.0 | +₹2,453,287 | ₹1,051,800 (42.9%) | +₹1,401,487 | +₹1,241,896 | +₹159,592 (88.6%) | +₹79.9 / +₹71.2 | ₹24,993 / ₹67,658 | 56.1x |
+| 19 | `E2_15S_FLAG25_3BAR045_SCORING` | 1,298 | 16,730 / 16,636 | 33.2 / 33.0 | +₹2,353,284 | ₹1,003,800 (42.7%) | +₹1,349,484 | +₹1,228,225 | +₹121,260 (91.0%) | +₹80.7 / +₹73.8 | ₹84,409 / ₹90,817 | 16.0x |
+| 20 | `E13_W2_SPREAD2PCT` | 1,556 | 18,258 / 18,122 | 32.9 / 32.7 | +₹2,377,582 | ₹1,095,480 (46.1%) | +₹1,282,102 | +₹1,113,562 | +₹168,540 (86.9%) | +₹70.2 / +₹61.4 | ₹35,885 / ₹41,891 | 35.7x |
+| 21 | `H4a_ELAPSED_15S` | 1,980 | 23,181 / 23,039 | 32.6 / 32.3 | +₹2,552,683 | ₹1,390,860 (54.5%) | +₹1,161,823 | +₹894,937 | +₹266,886 (77.0%) | +₹50.1 / +₹38.8 | ₹186,925 / ₹360,326 | 6.2x |
+| 22 | `W6_BODY025_ATR025_OPT_SPREAD` | 1,024 | 14,076 / 14,072 | 34.2 / 33.8 | +₹1,980,666 | ₹844,560 (42.6%) | +₹1,136,106 | +₹939,378 | +₹196,728 (82.7%) | +₹80.7 / +₹66.8 | ₹47,295 / ₹51,750 | 24.0x |
+| 23 | `E1_15S_FLAG25_SCORING_ONLY` | 1,969 | 23,031 / 22,905 | 32.4 / 32.1 | +₹2,427,915 | ₹1,381,860 (56.9%) | +₹1,046,055 | +₹810,403 | +₹235,652 (77.5%) | +₹45.4 / +₹35.4 | ₹261,708 / ₹392,666 | 4.0x |
+| 24 | `H2b_PURE_3BAR_045` | 1,350 | 17,281 / 17,183 | 32.4 / 32.2 | +₹2,016,385 | ₹1,036,860 (51.4%) | +₹979,525 | +₹823,872 | +₹155,654 (84.1%) | +₹56.7 / +₹47.9 | ₹100,793 / ₹119,959 | 9.7x |
+| 25 | `H6a_OPT_SCALE` | 2,025 | 24,655 / 24,521 | 33.1 / 32.8 | +₹2,450,555 | ₹1,479,300 (60.4%) | +₹971,255 | +₹730,848 | +₹240,407 (75.2%) | +₹39.4 / +₹29.8 | ₹373,825 / ₹503,400 | 2.6x |
+| 26 | `M9_ALL_SIGNALS_SCALED` | 1,066 | 14,055 / 14,036 | 33.4 / 33.3 | +₹1,806,703 | ₹843,300 (46.7%) | +₹963,403 | +₹865,690 | +₹97,713 (89.9%) | +₹68.5 / +₹61.7 | ₹245,494 / ₹325,723 | 3.9x |
+| 27 | `H3c_FLAG_FULL_POLE` | 1,944 | 22,717 / 22,623 | 32.5 / 31.9 | +₹2,216,963 | ₹1,363,020 (61.5%) | +₹853,943 | +₹475,818 | +₹378,125 (55.7%) | +₹37.6 / +₹21.0 | ₹364,883 / ₹645,893 | 2.3x |
+| 28 | `H4b_ELAPSED_30S` | 1,949 | 23,013 / 22,765 | 32.2 / 31.6 | +₹2,158,052 | ₹1,380,780 (64.0%) | +₹777,272 | +₹401,396 | +₹375,876 (51.6%) | +₹33.8 / +₹17.6 | ₹451,520 / ₹755,650 | 1.7x |
+| 29 | `H3a_FLAG_BUF_15` | 2,018 | 23,586 / 23,459 | 32.0 / 31.8 | +₹2,154,997 | ₹1,415,160 (65.7%) | +₹739,837 | +₹637,969 | +₹101,868 (86.2%) | +₹31.4 / +₹27.2 | ₹379,246 / ₹390,790 | 2.0x |
+| 30 | `H2c_BODY_025_ATR_025` | 1,081 | 13,970 / 13,844 | 32.1 / 31.5 | +₹1,534,181 | ₹838,200 (54.6%) | +₹695,981 | +₹497,516 | +₹198,464 (71.5%) | +₹49.8 / +₹35.9 | ₹78,912 / ₹192,643 | 8.8x |
+| 31 | `H3b_FLAG_BUF_25` | 2,005 | 23,364 / 23,292 | 32.1 / 31.7 | +₹2,080,486 | ₹1,401,840 (67.4%) | +₹678,646 | +₹558,189 | +₹120,458 (82.3%) | +₹29.0 / +₹24.0 | ₹428,427 / ₹450,022 | 1.6x |
+| 32 | `H0_BASELINE` | 2,025 | 23,597 / 23,451 | 32.0 / 31.8 | +₹2,079,538 | ₹1,415,820 (68.1%) | +₹663,718 | +₹536,194 | +₹127,524 (80.8%) | +₹28.1 / +₹22.9 | ₹453,775 / ₹488,061 | 1.5x |
+| 33 | `M7_SPREAD_GATE_CORE` | 861 | 12,035 / 12,016 | 33.0 / 32.9 | +₹1,378,346 | ₹722,100 (52.4%) | +₹656,246 | +₹566,383 | +₹89,862 (86.3%) | +₹54.5 / +₹47.1 | ₹259,625 / ₹318,543 | 2.5x |
+| 34 | `H5b_CAP_2_NO_FLIP` | 1,267 | 17,162 / 17,108 | 32.1 / 32.0 | +₹1,668,730 | ₹1,029,720 (61.7%) | +₹639,010 | +₹496,796 | +₹142,214 (77.7%) | +₹37.2 / +₹29.0 | ₹257,232 / ₹344,812 | 2.5x |
+| 35 | `M8_BODY025_SPREAD_SCALED` | 486 | 7,316 / 7,305 | 34.1 / 33.9 | +₹1,077,403 | ₹438,960 (40.7%) | +₹638,443 | +₹546,568 | +₹91,875 (85.6%) | +₹87.3 / +₹74.8 | ₹143,702 / ₹180,408 | 4.4x |
+| 36 | `H5c_CAP_1` | 841 | 12,071 / 12,079 | 32.7 / 32.3 | +₹1,262,987 | ₹724,260 (57.3%) | +₹538,728 | +₹381,118 | +₹157,609 (70.7%) | +₹44.6 / +₹31.6 | ₹171,920 / ₹280,822 | 3.1x |
+| 37 | `H5a_CAP_2` | 1,442 | 18,656 / 18,604 | 31.8 / 31.5 | +₹1,633,007 | ₹1,119,360 (68.5%) | +₹513,646 | +₹360,045 | +₹153,602 (70.1%) | +₹27.5 / +₹19.4 | ₹374,218 / ₹440,983 | 1.4x |
+| 38 | `M3_SMART_IMPULSE` | 518 | 7,485 / 7,477 | 31.8 / 31.6 | +₹956,795 | ₹449,100 (46.9%) | +₹507,695 | +₹402,211 | +₹105,484 (79.2%) | +₹67.8 / +₹53.8 | ₹205,440 / ₹242,435 | 2.5x |
+| 39 | `M1_CORE_CLEAN` | 1,024 | 13,073 / 13,022 | 31.7 / 31.5 | +₹1,271,053 | ₹784,380 (61.7%) | +₹486,673 | +₹379,295 | +₹107,378 (77.9%) | +₹37.2 / +₹29.1 | ₹352,856 / ₹435,432 | 1.4x |
+| 40 | `H2a_MIN_ATR_030` | 853 | 11,381 / 11,325 | 32.0 / 31.6 | +₹1,168,517 | ₹682,860 (58.4%) | +₹485,657 | +₹314,675 | +₹170,982 (64.8%) | +₹42.7 / +₹27.8 | ₹242,827 / ₹313,309 | 2.0x |
+| 41 | `M2_BALANCED` | 449 | 6,503 / 6,501 | 32.5 / 32.2 | +₹845,989 | ₹390,180 (46.1%) | +₹455,809 | +₹347,009 | +₹108,799 (76.1%) | +₹70.1 / +₹53.4 | ₹87,012 / ₹187,194 | 5.2x |
+| 42 | `M5_IMPULSE_SCALED` | 518 | 7,890 / 7,863 | 32.6 / 32.6 | +₹865,756 | ₹473,400 (54.7%) | +₹392,356 | +₹333,152 | +₹59,205 (84.9%) | +₹49.7 / +₹42.4 | ₹295,373 / ₹316,519 | 1.3x |
+| 43 | `M6_HIGH_CONVICTION` | 402 | 6,298 / 6,294 | 33.2 / 33.0 | +₹744,061 | ₹377,880 (50.8%) | +₹366,181 | +₹332,549 | +₹33,632 (90.8%) | +₹58.1 / +₹52.8 | ₹102,761 / ₹139,844 | 3.6x |
+| 44 | `M4_BALANCED_SCALED` | 449 | 6,818 / 6,811 | 33.1 / 32.9 | +₹749,732 | ₹409,080 (54.6%) | +₹340,652 | +₹254,356 | +₹86,296 (74.7%) | +₹50.0 / +₹37.3 | ₹179,204 / ₹265,754 | 1.9x |
+| 45 | `H1_MIDDAY_FREEZE` | 1,188 | 14,354 / 14,303 | 31.5 / 31.5 | +₹1,064,623 | ₹861,240 (80.9%) | +₹203,383 | +₹154,424 | +₹48,959 (75.9%) | +₹14.2 / +₹10.8 | ₹551,523 / ₹574,396 | 0.4x |
 
 ---
 
-## 8. Regime-Grouped Performance (Batch Report Analytical Prototype)
+## 8. Regime-Grouped Performance (`TREND 4D` vs `CHOP 2D` vs `EXPIRY 2D`)
 
-Grouping the 7 sessions into **3 market regimes** illustrates the exact slicing planned for `IMPROVEMENTS.md §2` Batch Simulation Reports:
-- **`TREND (4D)`** — `Nov 17`, `Nov 18`, `Nov 19`, `Nov 20` (clean trend follow-through)
-- **`CHOP / REVERSAL (2D)`** — `Nov 16`, `Nov 25` (high-frequency two-way chop / reversals)
-- **`EXPIRY (1D)`** — `Nov 23` (thin option books / expiry pinning & gamma spikes)
+- **`TREND (4D)`:** `Nov 17`, `Nov 18`, `Nov 19`, `Nov 20`
+- **`CHOP / REVERSAL (2D)`:** `Nov 16`, `Nov 25`
+- **`EXPIRY (2D)`:** `Nov 23`, `Nov 26`
 
-| Experiment ID | `TREND 4D` Paper (`v1` / `v2`) | `TREND 4D` Delayed | `CHOP 2D` Paper (`v1` / `v2`) | `CHOP 2D` Delayed | `EXPIRY 1D` Paper (`v1` / `v2`) | `EXPIRY 1D` Delayed |
+| Experiment ID | `TREND 4D` Paper (`v1` / `v2`) | `TREND 4D` Delayed | `CHOP 2D` Paper (`v1` / `v2`) | `CHOP 2D` Delayed | `EXPIRY 2D` Paper (`v1` / `v2`) | `EXPIRY 2D` Delayed |
 |---|---:|---:|---:|---:|---:|---:|
-| **`W2_15S_FLAG25_OPT_SPREAD`** | **+₹1,513,535** (`+1,057.8k / +455.7k`) | **+₹1,480,107** | +₹65,683 (`+190.5k / -124.8k`) | +₹9,152 | `-₹67,771` (`-35.9k / -31.9k`) | `-₹67,771` |
-| `W1_15S_OPT_SPREAD` | +₹1,461,506 (`+1,008.8k / +452.7k`) | +₹1,420,674 | **+₹90,129** (`+223.0k / -132.9k`) | **+₹24,064** | `-₹67,771` (`-35.9k / -31.9k`) | `-₹67,771` |
-| **`W3_15S_FLAG25_3BAR045_OPT_SPREAD`** | +₹1,328,123 (`+867.1k / +461.0k`) | +₹1,299,623 | `-₹23,694` (`+61.8k / -85.5k`) | `-₹64,254` | **+₹18,424** (`+10.9k / +7.5k`) | **+₹18,424** |
-| `H6b_OPT_SCALE_SPREAD` | +₹1,300,575 (`+913.4k / +387.1k`) | +₹1,258,035 | +₹84,008 (`+177.5k / -93.5k`) | `-₹21,977` | `-₹54,938` (`-28.5k / -26.5k`) | `-₹54,488` |
-| `W4_3BAR045_OPT_SPREAD` | +₹1,099,526 (`+726.2k / +373.4k`) | +₹1,052,390 | `-₹29,288` (`+70.6k / -99.9k`) | `-₹95,378` | **+₹31,256** (`+18.3k / +13.0k`) | **+₹31,706** |
-| `W5_15S_FLAG25_NOFLIP_OPT_SPREAD` | +₹1,306,114 (`+886.7k / +419.4k`) | +₹1,288,836 | +₹23,161 (`+139.4k / -116.3k`) | `-₹27,924` | `-₹67,400` (`-35.9k / -31.5k`) | `-₹67,400` |
-| `H4a_ELAPSED_15S` | +₹1,320,524 (`+925.8k / +394.8k`) | +₹1,270,373 | `-₹85,337` (`+101.6k / -186.9k`) | `-₹187,435` | `-₹68,183` (`-37.5k / -30.7k`) | `-₹68,183` |
-| `H2b_PURE_3BAR_045` | +₹1,065,796 (`+730.4k / +335.4k`) | +₹1,015,693 | `-₹62,568` (`+31.6k / -94.2k`) | `-₹135,344` | **+₹25,386** (`+15.6k / +9.8k`) | **+₹26,211** |
-| **`H0_BASELINE`** | +₹1,155,580 (`+832.4k / +323.2k`) | +₹1,087,554 | `-₹126,550` (`+58.3k / -184.8k`) | `-₹202,641` | `-₹57,533` (`-31.8k / -25.7k`) | `-₹56,708` |
-| `H2a_MIN_ATR_030` | +₹776,500 (`+553.0k / +223.5k`) | +₹756,976 | `-₹5,015` (`+109.0k / -114.0k`) | `-₹115,625` | +₹16,471 (`+6.6k / +9.9k`) | +₹17,296 |
-| `W6_BODY025_ATR025_OPT_SPREAD` | +₹810,268 (`+565.7k / +244.5k`) | +₹772,464 | +₹26,369 (`+89.5k / -63.1k`) | `-₹30,620` | +₹19,196 (`+9.3k / +9.9k`) | +₹19,646 |
-| `M9_ALL_SIGNALS_SCALED` | +₹1,064,701 (`+719.4k / +345.3k`) | +₹1,092,858 | `-₹267,130` (`-104.1k / -163.0k`) | `-₹331,690` | `-₹81,939` (`-42.3k / -39.6k`) | `-₹81,939` |
-| `H1_MIDDAY_FREEZE` | +₹837,691 (`+582.7k / +255.0k`) | +₹830,117 | `-₹417,515` (`-223.3k / -194.2k`) | `-₹436,432` | `-₹69,092` (`-36.6k / -32.5k`) | `-₹69,092` |
-
-> **Regime Takeaway:** `W2` and `W1` are the **only** full-suite configs green on `CHOP 2D` in **both** Paper and Delayed (`+₹65.7k / +₹9.2k` and `+₹90.1k / +₹24.1k`), whereas every `3-Bar >= 0.45%` / `ATR >= 0.25%–0.30%` filter is green on **`EXPIRY 1D`** (`W4 +₹31.3k`, `H2b +₹25.4k`, `W6 +₹19.2k`, `W3 +₹18.4k`). Meanwhile `H1_MIDDAY_FREEZE` turns `CHOP 2D` from `-₹126.6k` to **`-₹417.5k`** (`3.3x` worse!).
+| `H0_BASELINE` | **+₹1,224,740** (`+768.1k / +456.6k`) | +₹1,148,676 | **-₹192,315** (`+38.3k / -230.6k`) | -₹282,666 | **-₹368,707** (`-144.6k / -224.1k`) | -₹329,815 |
+| `W1_15S_OPT_SPREAD` | **+₹1,721,553** (`+1016.7k / +704.9k`) | +₹1,649,300 | **+₹233,790** (`+243.9k / -10.1k`) | +₹99,829 | **+₹76,752** (`+85.4k / -8.6k`) | -₹37,053 |
+| `W2_15S_FLAG25_OPT_SPREAD` | **+₹1,731,881** (`+1015.3k / +716.6k`) | +₹1,649,615 | **+₹185,387** (`+200.3k / -14.9k`) | +₹63,418 | **+₹53,704** (`+74.1k / -20.4k`) | -₹9,341 |
+| `E10_W3_CAP3` | **+₹1,390,586** (`+802.1k / +588.5k`) | +₹1,336,251 | **+₹85,530** (`+85.0k / +0.5k`) | +₹47,514 | **+₹398,480** (`+338.2k / +60.3k`) | +₹321,682 |
+| `W3_15S_FLAG25_3BAR045_OPT_SPREAD` | **+₹1,449,034** (`+833.6k / +615.4k`) | +₹1,414,150 | **+₹76,964** (`+78.3k / -1.3k`) | +₹15,407 | **+₹316,083** (`+273.7k / +42.3k`) | +₹203,480 |
+| `E6_W3_ATR020` | **+₹1,334,174** (`+761.3k / +572.8k`) | +₹1,294,725 | **+₹73,595** (`+69.4k / +4.2k`) | +₹31,002 | **+₹380,597** (`+316.0k / +64.6k`) | +₹312,977 |
+| `E5_W2_ATR020` | **+₹1,417,309** (`+843.7k / +573.7k`) | +₹1,365,802 | **+₹134,454** (`+145.5k / -11.1k`) | +₹64,363 | **+₹209,419** (`+142.1k / +67.3k`) | +₹124,868 |
+| `E14_W2_GATE_ONLY_NOSCALE` | **+₹1,537,685** (`+881.7k / +656.0k`) | +₹1,446,354 | **+₹206,119** (`+222.6k / -16.4k`) | +₹75,689 | **-₹1,964** (`+4.5k / -6.5k`) | -₹37,970 |
+| `W5_15S_FLAG25_NOFLIP_OPT_SPREAD` | **+₹1,531,686** (`+904.5k / +627.2k`) | +₹1,489,066 | **+₹101,388** (`+119.9k / -18.5k`) | +₹83,668 | **+₹94,709** (`+65.8k / +28.9k`) | +₹24,477 |
+| `H6b_OPT_SCALE_SPREAD` | **+₹1,538,598** (`+901.4k / +637.2k`) | +₹1,446,013 | **+₹80,239** (`+114.6k / -34.4k`) | -₹31,687 | **+₹80,428** (`+72.7k / +7.7k`) | -₹33,175 |
+| `E2_15S_FLAG25_3BAR045_SCORING` | **+₹1,285,782** (`+760.9k / +524.9k`) | +₹1,246,045 | **-₹36,415** (`+63.4k / -99.8k`) | -₹44,245 | **+₹100,117** (`+168.5k / -68.4k`) | +₹26,424 |
+| `H4a_ELAPSED_15S` | **+₹1,415,968** (`+862.1k / +553.9k`) | +₹1,328,358 | **-₹42,298** (`+126.3k / -168.6k`) | -₹127,616 | **-₹211,846** (`-52.4k / -159.4k`) | -₹305,804 |
+| `H2b_PURE_3BAR_045` | **+₹1,083,701** (`+661.0k / +422.7k`) | +₹1,027,771 | **-₹119,892** (`+5.1k / -125.0k`) | -₹204,248 | **+₹15,716** (`+113.8k / -98.1k`) | +₹349 |
+| `H1_MIDDAY_FREEZE` | **+₹871,847** (`+539.6k / +332.2k`) | +₹848,003 | **-₹456,658** (`-259.4k / -197.3k`) | -₹496,112 | **-₹211,806** (`-30.8k / -181.0k`) | -₹197,467 |
 
 ---
 
 ## 9. Track Family, Moneyness & Win/Loss/Flat Micro-Statistics
 
-### 9.1 Strategy Family & Moneyness Totals (`H0`, `H6b`, `W2`, `W3`)
+### 9.1 Strategy Family & Moneyness Totals (`H0_BASELINE`, `H6b`, `W1`, `W2`, `E10_W3_CAP3`, `W3`)
 
-| Group | `H0_BASELINE` (`Tr / P-Net / D-Net`) | `H6b_OPT_SCALE_SPREAD` | `W2_15S_FLAG25_OPT_SPREAD` | `W3_15S_FLAG25_3BAR045_OPT_SPREAD` | Key Observation |
-|---|---:|---:|---:|---:|---|
-| `trend_pullback` (3) | 2,854 / +₹265,189 / +₹230,868 | 2,843 / +₹307,426 / +₹287,835 | 2,800 / **+₹339,558 / +₹331,467** | 1,953 / +₹273,518 / +₹287,824 | #1 `v1` family across all modes |
-| `composite_shared` (3) | 2,923 / +₹197,025 / +₹166,809 | 2,964 / +₹261,465 / +₹236,176 | 2,896 / **+₹330,136 / +₹310,592** | 1,999 / +₹235,519 / +₹234,892 | Largest family lift (`+67.6%` Paper, `+86.2%` Delayed) |
-| `fast_momentum` (3) | 2,871 / +₹185,931 / +₹180,290 | 2,923 / +₹265,718 / +₹244,578 | 2,871 / **+₹282,140 / +₹301,307** | 1,988 / +₹235,370 / +₹229,400 | `W2` Delayed beats Paper! |
-| `fixed_target` (3) | 3,089 / +₹210,709 / +₹198,864 | 3,073 / +₹227,803 / +₹210,060 | 3,003 / **+₹260,638 / +₹242,183** | 2,080 / +₹195,354 / +₹175,412 | Highest win rates, lowest variance |
-| **`v2_profitable_5`** | 4,490 / +₹313,424 / +₹274,537 | 4,616 / +₹461,305 / +₹415,323 | 4,523 / **+₹488,149 / +₹445,275** | 3,067 / +₹456,280 / +₹426,945 | Beats any individual `v1` family! |
-| **`v2_losing_3`** | 2,853 / `-₹200,780` / `-₹223,163` | 2,833 / `-₹194,072` / `-₹212,402` | 2,771 / `-₹189,175` / `-₹209,336` | 1,946 / **`-₹73,188`** / `-₹100,681` | Only `W3` cuts losses by >60% |
-| `v1_ITM` (4) | 3,783 / +₹303,054 / +₹245,950 | 3,828 / +₹357,696 / +₹335,860 | 3,763 / **+₹424,358 / +₹425,631** | 2,606 / +₹337,236 / +₹345,680 | **Negative slippage (`-₹1.3k` W2, `-₹8.4k` W3)** |
-| `v1_ATM` (4) | 4,090 / +₹325,524 / +₹293,416 | 4,130 / +₹432,369 / +₹391,001 | 4,038 / **+₹458,564 / +₹448,124** | 2,779 / +₹345,800 / +₹344,436 | Highest total `v1` P&L |
-| `v1_OTM` (4) | 3,864 / +₹230,276 / +₹237,465 | 3,845 / +₹272,347 / +₹251,788 | 3,769 / **+₹329,550 / +₹311,794** | 2,635 / +₹256,725 / +₹237,412 | `+43.1%` lift from `W2` convexity |
+| Group | `H0_BASELINE` (`Tr / P / D`) | `H6b_OPT_SCALE_SPREAD` (`Tr / P / D`) | `W1_15S_OPT_SPREAD` (`Tr / P / D`) | `W2_15S_FLAG25_OPT_SPREAD` (`Tr / P / D`) | `E10_W3_CAP3` (`Tr / P / D`) | `W3_15S_FLAG25_3BAR045_OPT_SPREAD` (`Tr / P / D`) |
+|---|---:|---:|---:|---:|---:|---:|
+| `trend_pullback` (3) | 3,495 / +₹157,236 / +₹141,344 | 3,505 / +₹273,791 / +₹276,299 | 3,482 / +₹379,372 / +₹317,678 | 3,439 / +₹369,341 / +₹325,563 | 2,440 / +₹328,575 / +₹301,790 | 2,569 / +₹341,358 / +₹294,057 |
+| `composite_shared` (3) | 3,651 / +₹157,137 / +₹138,150 | 3,681 / +₹303,750 / +₹224,044 | 3,652 / +₹369,397 / +₹290,842 | 3,594 / +₹333,118 / +₹299,837 | 2,542 / +₹312,968 / +₹275,755 | 2,672 / +₹300,558 / +₹263,435 |
+| `fast_momentum` (3) | 3,569 / +₹140,532 / +₹123,365 | 3,643 / +₹271,440 / +₹220,724 | 3,586 / +₹314,018 / +₹279,218 | 3,576 / +₹321,107 / +₹272,631 | 2,526 / +₹335,513 / +₹287,032 | 2,649 / +₹303,414 / +₹270,426 |
+| `fixed_target` (3) | 3,969 / +₹206,855 / +₹171,088 | 3,940 / +₹239,738 / +₹194,986 | 3,844 / +₹283,159 / +₹251,522 | 3,822 / +₹266,175 / +₹247,804 | 2,684 / +₹248,287 / +₹226,943 | 2,827 / +₹240,330 / +₹213,730 |
+| **`v1` All (12)** | 14,684 / +₹661,761 / +₹573,948 | 14,769 / +₹1,088,719 / +₹916,053 | 14,564 / +₹1,345,946 / +₹1,139,261 | 14,431 / +₹1,289,741 / +₹1,145,835 | 10,192 / +₹1,225,343 / +₹1,091,520 | 10,717 / +₹1,185,660 / +₹1,041,647 |
+| **`v2` Core 6 (excl. gamma & delta)** | 6,378 / +₹192,354 / +₹171,180 | 6,654 / +₹643,291 / +₹535,832 | 6,567 / +₹702,321 / +₹633,663 | 6,535 / +₹696,370 / +₹595,975 | 4,379 / +₹637,539 / +₹622,580 | 4,598 / +₹645,571 / +₹595,673 |
+| `v2` All (8) | 8,913 / +₹1,958 / -₹37,753 | 9,045 / +₹610,545 / +₹465,098 | 8,905 / +₹686,148 / +₹572,815 | 8,885 / +₹681,231 / +₹557,857 | 5,987 / +₹649,253 / +₹613,927 | 6,283 / +₹656,421 / +₹591,390 |
+| `v1_ATM` (4) | 5,028 / +₹316,946 / +₹260,109 | 5,238 / +₹459,494 / +₹373,129 | 5,169 / +₹546,814 / +₹448,221 | 5,097 / +₹520,800 / +₹497,773 | 3,593 / +₹502,462 / +₹452,803 | 3,757 / +₹474,511 / +₹426,669 |
+| `v1_ITM` (4) | 4,624 / +₹167,746 / +₹139,124 | 4,431 / +₹358,016 / +₹296,504 | 4,368 / +₹437,943 / +₹410,388 | 4,349 / +₹439,766 / +₹385,913 | 3,071 / +₹429,393 / +₹395,300 | 3,226 / +₹404,036 / +₹391,585 |
+| `v1_OTM` (4) | 5,032 / +₹177,069 / +₹174,714 | 5,100 / +₹271,209 / +₹246,420 | 5,027 / +₹361,189 / +₹280,652 | 4,985 / +₹329,175 / +₹262,149 | 3,528 / +₹293,488 / +₹243,417 | 3,734 / +₹307,112 / +₹223,393 |
 
-### 9.2 Full Trade-Outcome Breakdown (`Wins >2.5%` / `Losses <0%` / `Flat 0–2.5%` & `₹/Trade`)
+### 9.2 Full Trade-Outcome Micro-Stats (`Wins >2.5%` / `Losses <0%` / `Flat 0–2.5%` & `₹/Trade`)
 
-| Track | `H0_BASELINE` (`W / L / Flat \| GP \| ₹/Tr`) | `W2` (`W / L / Flat \| GP \| Slip \| ₹/Tr`) | `W3` (`W / L / Flat \| GP \| Slip \| ₹/Tr`) |
-|---|---|---|---|
-| `trend_pullback_ATM` | 382 / 430 / 187 \| +₹167,761 \| +₹107.9 | 387 / 407 / 189 \| +₹190,647 \| +₹2,603 \| +₹133.9 | 268 / 293 / 116 \| +₹140,179 \| -₹8,706 \| +₹147.1 |
-| `trend_pullback_ITM` | 341 / 412 / 156 \| +₹138,700 \| +₹92.6 | 350 / 400 / 153 \| +₹178,221 \| +₹3,712 \| +₹137.4 | 232 / 287 / 111 \| +₹137,891 \| -₹4,494 \| **+₹158.9** |
-| `composite_shared_ITM` | 357 / 478 / 112 \| +₹124,310 \| +₹71.3 | 377 / 462 / 108 \| +₹176,903 \| +₹6,715 \| +₹126.8 | 254 / 320 / 73 \| +₹130,196 \| -₹11,820 \| +₹141.2 |
-| `fast_momentum_ATM` | 332 / 550 / 119 \| +₹117,010 \| +₹56.9 | 356 / 533 / 113 \| +₹174,475 \| +₹2,882 \| +₹114.1 | 243 / 377 / 73 \| +₹133,373 \| +₹6,766 \| +₹132.5 |
-| `composite_shared_ATM` | 374 / 511 / 132 \| +₹138,496 \| +₹76.2 | 385 / 492 / 128 \| +₹174,494 \| +₹4,865 \| +₹113.6 | 263 / 340 / 86 \| +₹119,826 \| -₹2,597 \| +₹113.9 |
-| `fixed_target_ATM` | 429 / 544 / 100 \| +₹147,657 \| +₹77.6 | 426 / 521 / 101 \| +₹161,228 \| +₹90 \| +₹93.8 | 306 / 354 / 60 \| +₹119,162 \| +₹5,901 \| +₹105.5 |
-| `composite_shared_OTM` | 344 / 480 / 135 \| +₹109,600 \| +₹54.3 | 349 / 454 / 141 \| +₹152,499 \| +₹7,964 \| +₹101.5 | 241 / 325 / 97 \| +₹105,437 \| +₹15,044 \| +₹99.0 |
-| `fixed_target_ITM` | 442 / 477 / 79 \| +₹134,327 \| +₹74.6 | 438 / 465 / 80 \| +₹152,204 \| +₹6,097 \| +₹94.8 | 315 / 320 / 51 \| +₹112,199 \| +₹12,059 \| +₹103.6 |
-| `fast_momentum_ITM` | 298 / 536 / 95 \| +₹132,697 \| +₹82.8 | 313 / 527 / 90 \| +₹142,810 \| -₹17,797 \| +₹93.6 | 215 / 371 / 57 \| +₹113,310 \| -₹4,189 \| +₹116.2 |
-| `trend_pullback_OTM` | 370 / 416 / 160 \| +₹129,968 \| +₹77.4 | 366 / 386 / 162 \| +₹138,690 \| +₹1,776 \| +₹91.7 | 252 / 272 / 122 \| +₹112,628 \| -₹1,106 \| +₹114.3 |
-| `fast_momentum_OTM` | 314 / 506 / 121 \| +₹108,484 \| +₹55.3 | 331 / 486 / 122 \| +₹137,114 \| -₹4,252 \| +₹86.0 | 227 / 343 / 82 \| +₹107,967 \| +₹3,393 \| +₹105.6 |
-| `fixed_target_OTM` | 369 / 543 / 106 \| +₹114,065 \| +₹52.0 | 347 / 511 / 114 \| +₹127,386 \| +₹12,268 \| +₹71.1 | 251 / 352 / 71 \| +₹88,793 \| +₹1,982 \| +₹71.7 |
-| `volatility_expansion_ATM` | 254 / 549 / 366 \| +₹151,858 \| +₹69.9 | 257 / 547 / 386 \| +₹199,590 \| +₹10,369 \| +₹107.7 | 188 / 366 / 246 \| +₹173,644 \| +₹7,503 \| +₹157.1 |
-| `adaptive_regime_ATM` | 352 / 548 / 114 \| +₹132,828 \| +₹71.0 | 443 / 544 / 101 \| +₹191,782 \| +₹19,078 \| +₹116.3 | 298 / 370 / 57 \| +₹152,714 \| +₹2,410 \| +₹150.6 |
-| `trend_pullback_v2_ITM1` | 365 / 446 / 162 \| +₹139,812 \| +₹83.7 | 366 / 450 / 159 \| +₹175,114 \| +₹7,908 \| +₹119.6 | 243 / 314 / 106 \| +₹136,321 \| +₹11,238 \| +₹145.6 |
-| `micro_chandelier_ITM1` | 346 / 603 / 298 \| +₹129,630 \| +₹44.0 | 374 / 555 / 262 \| +₹163,019 \| +₹5,310 \| +₹76.9 | 259 / 367 / 175 \| +₹146,372 \| +₹7,974 \| +₹122.7 |
-| `opening_thrust_convex_ATM` | 28 / 51 / 8 \| +₹28,695 \| +₹269.8 | 27 / 46 / 6 \| +₹30,024 \| +₹210 \| +₹320.1 | 28 / 44 / 6 \| +₹31,250 \| +₹210 \| **+₹340.6** |
-| `delta_scalp_ITM2` | 255 / 717 / 352 \| +₹38,810 \| -₹30.7 | 356 / 648 / 253 \| +₹60,435 \| +₹13,826 \| -₹11.9 | 253 / 421 / 164 \| +₹72,308 \| +₹11,889 \| +₹26.3 |
-| `gamma_runner_OTM2` | 183 / 451 / 72 \| -₹14,407 \| -₹80.4 | 185 / 421 / 74 \| -₹27,145 \| +₹991 \| -₹99.9 | 154 / 318 / 57 \| -₹2,472 \| +₹5,073 \| -₹64.7 |
-| `structural_convexity_ATM` | 122 / 661 / 40 \| -₹54,003 \| -₹125.6 | 120 / 669 / 45 \| -₹56,204 \| +₹5,344 \| -₹127.4 | 92 / 462 / 25 \| -₹26,265 \| +₹10,530 \| -₹105.4 |
+| Track | `H0_BASELINE` (`W / L / Flat | GP | ₹/Tr`) | `W1` (`W / L / Flat | GP | Slip | ₹/Tr`) | `W2` (`W / L / Flat | GP | Slip | ₹/Tr`) | `E10_W3_CAP3` (`W / L / Flat | GP | Slip | ₹/Tr`) |
+|---|---|---|---|---|
+| `volatility_expansion_ATM` | 302 / 730 / 462 \| +₹146,928 \| +₹38.3 | 334 / 725 / 510 \| +₹285,933 \| +₹18,226 \| +₹122.2 | 334 / 723 / 503 \| +₹286,664 \| +₹21,760 \| +₹123.8 | 237 / 467 / 314 \| +₹224,717 \| +₹10,101 \| +₹160.7 |
+| `trend_pullback_ATM` | 428 / 525 / 238 \| +₹156,928 \| +₹71.8 | 456 / 523 / 258 \| +₹218,298 \| +₹10,301 \| +₹116.5 | 449 / 512 / 255 \| +₹224,398 \| +₹17,960 \| +₹124.5 | 325 / 368 / 166 \| +₹187,900 \| +₹1,850 \| +₹158.7 |
+| `composite_shared_ATM` | 451 / 627 / 169 \| +₹156,486 \| +₹65.5 | 486 / 626 / 186 \| +₹227,654 \| +₹42,579 \| +₹115.4 | 472 / 607 / 177 \| +₹219,334 \| +₹2,720 \| +₹114.6 | 347 / 434 / 116 \| +₹179,818 \| +₹22,636 \| +₹140.5 |
+| `fixed_target_ATM` | 571 / 670 / 128 \| +₹184,315 \| +₹74.6 | 575 / 654 / 129 \| +₹208,003 \| +₹16,862 \| +₹93.2 | 565 / 657 / 132 \| +₹199,217 \| +₹4,258 \| +₹87.1 | 422 / 439 / 87 \| +₹166,102 \| +₹7,149 \| +₹115.2 |
+| `adaptive_regime_ATM` | 385 / 641 / 160 \| +₹117,526 \| +₹39.1 | 523 / 642 / 140 \| +₹220,539 \| +₹33,489 \| +₹109.0 | 525 / 649 / 134 \| +₹223,171 \| +₹28,814 \| +₹110.6 | 366 / 430 / 88 \| +₹191,532 \| +₹6,335 \| +₹156.7 |
+| `fast_momentum_ATM` | 391 / 678 / 152 \| +₹120,896 \| +₹39.0 | 438 / 683 / 155 \| +₹202,999 \| +₹28,851 \| +₹99.1 | 434 / 687 / 150 \| +₹183,671 \| -₹1,911 \| +₹84.5 | 316 / 481 / 92 \| +₹184,222 \| +₹18,024 \| +₹147.2 |
+| `micro_chandelier_ITM1` | 405 / 828 / 420 \| +₹117,836 \| +₹11.3 | 460 / 741 / 392 \| +₹219,099 \| +₹15,471 \| +₹77.5 | 458 / 738 / 386 \| +₹218,126 \| +₹21,071 \| +₹77.9 | 319 / 477 / 235 \| +₹189,840 \| +₹17,416 \| +₹124.1 |
+| `trend_pullback_v2_ITM1` | 396 / 515 / 185 \| +₹90,591 \| +₹22.7 | 412 / 524 / 191 \| +₹201,532 \| -₹7,536 \| +₹118.8 | 410 / 529 / 186 \| +₹195,376 \| +₹22,068 \| +₹113.7 | 273 / 361 / 129 \| +₹155,128 \| -₹1,139 \| +₹143.3 |
+| `composite_shared_ITM` | 402 / 591 / 164 \| +₹108,996 \| +₹34.2 | 397 / 530 / 161 \| +₹185,034 \| +₹7,288 \| +₹110.1 | 406 / 533 / 146 \| +₹177,338 \| +₹13,205 \| +₹103.4 | 291 / 369 / 105 \| +₹157,404 \| +₹90 \| +₹145.8 |
+| `fast_momentum_ITM` | 338 / 651 / 131 \| +₹106,449 \| +₹35.0 | 351 / 601 / 118 \| +₹161,406 \| -₹4,108 \| +₹90.8 | 350 / 599 / 119 \| +₹176,047 \| +₹23,701 \| +₹104.8 | 260 / 429 / 72 \| +₹155,876 \| +₹14,662 \| +₹144.8 |
+| `trend_pullback_ITM` | 376 / 513 / 219 \| +₹95,043 \| +₹25.8 | 372 / 469 / 200 \| +₹181,702 \| +₹20,431 \| +₹114.5 | 369 / 465 / 199 \| +₹178,557 \| +₹11,291 \| +₹112.9 | 256 / 338 / 133 \| +₹150,413 \| +₹10,130 \| +₹146.9 |
+| `fast_momentum_OTM` | 387 / 679 / 162 \| +₹127,327 \| +₹43.7 | 403 / 656 / 181 \| +₹164,773 \| +₹10,057 \| +₹72.9 | 407 / 653 / 177 \| +₹175,950 \| +₹26,687 \| +₹82.2 | 288 / 479 / 109 \| +₹146,975 \| +₹15,795 \| +₹107.8 |
+| `fixed_target_ITM` | 534 / 591 / 114 \| +₹134,699 \| +₹48.7 | 503 / 552 / 114 \| +₹171,882 \| +₹3,945 \| +₹87.0 | 497 / 549 / 117 \| +₹168,764 \| +₹5,656 \| +₹85.1 | 363 / 368 / 87 \| +₹149,960 \| +₹9,212 \| +₹123.3 |
+| `structural_convexity_ATM` | 291 / 451 / 93 \| +₹79,787 \| +₹35.6 | 315 / 436 / 102 \| +₹137,780 \| +₹9,386 \| +₹101.5 | 312 / 435 / 99 \| +₹131,219 \| +₹7,040 \| +₹95.1 | 220 / 282 / 69 \| +₹103,091 \| -₹18,133 \| +₹120.5 |
+| `trend_pullback_OTM` | 439 / 538 / 219 \| +₹114,965 \| +₹36.1 | 453 / 516 / 235 \| +₹188,293 \| +₹30,962 \| +₹96.4 | 447 / 518 / 225 \| +₹172,726 \| +₹14,526 \| +₹85.1 | 306 / 380 / 168 \| +₹136,662 \| +₹14,806 \| +₹100.0 |
+| `composite_shared_OTM` | 433 / 651 / 163 \| +₹110,715 \| +₹28.8 | 426 / 644 / 196 \| +₹175,829 \| +₹28,688 \| +₹78.9 | 426 / 631 / 196 \| +₹152,086 \| +₹17,356 \| +₹61.4 | 306 / 449 / 125 \| +₹128,266 \| +₹14,487 \| +₹85.8 |
+| `fixed_target_OTM` | 497 / 726 / 138 \| +₹125,982 \| +₹32.6 | 464 / 705 / 148 \| +₹133,914 \| +₹10,830 \| +₹41.7 | 459 / 701 / 145 \| +₹127,513 \| +₹8,457 \| +₹37.7 | 336 / 493 / 89 \| +₹93,265 \| +₹4,983 \| +₹41.6 |
+| `opening_thrust_convex_ATM` | 39 / 68 / 7 \| +₹22,365 \| +₹136.2 | 41 / 73 / 6 \| +₹31,459 \| -₹378 \| +₹202.2 | 40 / 68 / 6 \| +₹33,914 \| -₹359 \| +₹237.5 | 40 / 65 / 7 \| +₹35,972 \| +₹379 \| +₹261.2 |
+| `delta_scalp_ITM2` | 290 / 988 / 504 \| +₹7,862 \| -₹55.6 | 456 / 792 / 396 \| +₹185,073 \| +₹28,536 \| +₹52.6 | 454 / 787 / 392 \| +₹186,146 \| +₹28,810 \| +₹54.0 | 311 / 514 / 228 \| +₹148,380 \| +₹20,628 \| +₹80.9 |
+| `gamma_runner_OTM2` | 198 / 479 / 76 \| -₹46,158 \| -₹121.3 | 186 / 429 / 79 \| -₹60,966 \| +₹16,139 \| -₹147.8 | 191 / 444 / 82 \| -₹60,286 \| -₹5,831 \| -₹144.1 | 150 / 345 / 60 \| -₹40,186 \| -₹261 \| -₹132.4 |
 
 ---
 
-## 10. All 30 Experiments Day-by-Day Matrix (`Paper` & `Paper-Delayed`)
+## 10. All 45 Experiments Day-by-Day Matrix (`Paper` & `Paper-Delayed`, `Nov 16 – Nov 26`)
 
-> **Design Blueprint for `IMPROVEMENTS.md §2` Batch Simulation Reports:** The multi-dimensional matrix format in Sections **5.1**, **5.2**, **8**, and **10** (Track Consistency Leaderboard + Day×Track Matrix + Regime Grouping + Side-by-Side `Paper` vs `Delayed` Slippage) is the target template for the automated Batch Report UI/API.
+| Experiment ID | `Nov 16` (P / D) | `Nov 17` (P / D) | `Nov 18` (P / D) | `Nov 19` (P / D) | `Nov 20` (P / D) | `Nov 23` (P / D) | `Nov 25` (P / D) | `Nov 26` (P / D) | 8d Total (P / D) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `W1_15S_OPT_SPREAD` | +₹58,415 / +₹44,270 | +₹629,223 / +₹619,416 | +₹273,656 / +₹262,385 | +₹422,551 / +₹394,597 | +₹396,123 / +₹372,902 | -₹26,060 / -₹26,060 | +₹175,374 / +₹55,559 | +₹102,812 / -₹10,993 | **+₹2,032,094 / +₹1,712,076** |
+| `W2_15S_FLAG25_OPT_SPREAD` | +₹7,091 / +₹8,827 | +₹627,265 / +₹612,591 | +₹273,656 / +₹262,385 | +₹437,623 / +₹405,560 | +₹393,336 / +₹369,079 | -₹26,060 / -₹26,060 | +₹178,296 / +₹54,591 | +₹79,764 / +₹16,719 | **+₹1,970,972 / +₹1,703,692** |
+| `E10_W3_CAP3` | +₹1,661 / -₹3,664 | +₹476,125 / +₹451,257 | +₹355,727 / +₹353,765 | +₹264,205 / +₹249,571 | +₹294,529 / +₹281,658 | +₹16,975 / +₹16,975 | +₹83,868 / +₹51,178 | +₹381,505 / +₹304,707 | **+₹1,874,596 / +₹1,705,447** |
+| `W3_15S_FLAG25_3BAR045_OPT_SPREAD` | +₹2,574 / -₹5,858 | +₹608,638 / +₹604,643 | +₹320,934 / +₹318,416 | +₹235,914 / +₹220,577 | +₹283,548 / +₹270,514 | +₹16,975 / +₹16,975 | +₹74,390 / +₹21,266 | +₹299,108 / +₹186,505 | **+₹1,842,081 / +₹1,633,037** |
+| `E6_W3_ATR020` | +₹4,063 / -₹1,782 | +₹633,809 / +₹616,483 | +₹289,778 / +₹288,236 | +₹151,099 / +₹140,959 | +₹259,489 / +₹249,047 | +₹16,975 / +₹16,975 | +₹69,532 / +₹32,784 | +₹363,622 / +₹296,002 | **+₹1,788,366 / +₹1,638,703** |
+| `E9_W2_CAP3` | -₹54,415 / -₹57,656 | +₹491,818 / +₹483,825 | +₹294,698 / +₹281,848 | +₹452,168 / +₹431,440 | +₹339,980 / +₹310,960 | -₹26,060 / -₹26,060 | +₹154,566 / +₹53,817 | +₹129,588 / +₹70,034 | **+₹1,782,343 / +₹1,548,208** |
+| `E5_W2_ATR020` | +₹16,392 / +₹13,409 | +₹563,544 / +₹550,709 | +₹282,808 / +₹281,220 | +₹181,961 / +₹170,680 | +₹388,995 / +₹363,193 | +₹11,519 / +₹11,519 | +₹118,063 / +₹50,954 | +₹197,900 / +₹113,349 | **+₹1,761,182 / +₹1,555,033** |
+| `E7_W2_FLIPCD30` | -₹7,371 / -₹6,908 | +₹603,720 / +₹618,272 | +₹246,798 / +₹232,417 | +₹419,703 / +₹393,573 | +₹386,286 / +₹357,305 | -₹26,060 / -₹26,060 | +₹127,370 / +₹62,167 | +₹3,537 / -₹82,171 | **+₹1,753,985 / +₹1,548,595** |
+| `E14_W2_GATE_ONLY_NOSCALE` | -₹31,023 / -₹41,664 | +₹616,323 / +₹588,625 | +₹188,247 / +₹183,690 | +₹381,768 / +₹354,966 | +₹351,347 / +₹319,073 | -₹30,160 / -₹30,160 | +₹237,141 / +₹117,354 | +₹28,196 / -₹7,810 | **+₹1,741,840 / +₹1,484,074** |
+| `E8_W3_FLIPCD30` | -₹623 / -₹9,071 | +₹615,611 / +₹599,072 | +₹295,907 / +₹290,247 | +₹209,109 / +₹193,380 | +₹275,543 / +₹266,078 | +₹16,975 / +₹16,975 | +₹68,785 / +₹49,162 | +₹256,230 / +₹171,464 | **+₹1,737,537 / +₹1,577,307** |
+| `W5_15S_FLAG25_NOFLIP_OPT_SPREAD` | -₹81,005 / -₹87,969 | +₹521,169 / +₹533,331 | +₹299,404 / +₹293,584 | +₹331,591 / +₹310,324 | +₹379,522 / +₹351,827 | -₹26,060 / -₹26,060 | +₹182,393 / +₹171,637 | +₹120,769 / +₹50,537 | **+₹1,727,783 / +₹1,597,211** |
+| `E3_W2_3BAR035` | -₹41,664 / -₹50,782 | +₹500,274 / +₹477,834 | +₹283,989 / +₹274,065 | +₹248,471 / +₹242,626 | +₹391,195 / +₹367,763 | +₹18,206 / +₹18,206 | +₹97,754 / +₹33,376 | +₹209,449 / +₹123,108 | **+₹1,707,674 / +₹1,486,197** |
+| `H6b_OPT_SCALE_SPREAD` | -₹3,431 / -₹12,196 | +₹514,086 / +₹489,607 | +₹262,067 / +₹254,370 | +₹456,895 / +₹425,513 | +₹305,549 / +₹276,523 | -₹13,025 / -₹12,575 | +₹83,670 / -₹19,491 | +₹93,453 / -₹20,600 | **+₹1,699,264 / +₹1,381,151** |
+| `E15_15S_FLAG25_BODY035_SCALED` | +₹56,637 / +₹48,206 | +₹471,412 / +₹453,168 | +₹316,136 / +₹317,337 | +₹198,006 / +₹195,072 | +₹221,900 / +₹206,459 | -₹660 / -₹660 | +₹322,796 / +₹282,259 | +₹110,695 / +₹84,965 | **+₹1,696,922 / +₹1,586,805** |
+| `E11_W2_FREEZE1400` | -₹4,914 / -₹10,659 | +₹429,489 / +₹419,674 | +₹282,994 / +₹272,565 | +₹284,436 / +₹264,297 | +₹353,379 / +₹323,854 | +₹9,040 / +₹9,040 | +₹258,405 / +₹127,254 | +₹70,790 / +₹38,877 | **+₹1,683,618 / +₹1,444,902** |
+| `E12_W3_FREEZE1400` | -₹27,606 / -₹34,995 | +₹429,936 / +₹414,216 | +₹314,568 / +₹318,259 | +₹206,032 / +₹194,604 | +₹290,134 / +₹276,372 | +₹14,238 / +₹14,238 | +₹198,416 / +₹143,083 | +₹157,352 / +₹104,178 | **+₹1,583,070 / +₹1,429,954** |
+| `E4_W2_3BAR060` | +₹58,154 / +₹58,889 | +₹470,732 / +₹447,260 | +₹262,901 / +₹243,485 | +₹225,832 / +₹215,861 | +₹143,233 / +₹156,723 | +₹4,926 / +₹4,926 | +₹209,104 / +₹159,670 | +₹162,003 / +₹111,817 | **+₹1,536,886 / +₹1,398,631** |
+| `W4_3BAR045_OPT_SPREAD` | -₹14,934 / -₹22,174 | +₹498,879 / +₹477,341 | +₹287,660 / +₹283,146 | +₹242,726 / +₹225,517 | +₹195,660 / +₹183,119 | +₹30,010 / +₹30,460 | -₹24,993 / -₹67,658 | +₹186,478 / +₹132,144 | **+₹1,401,487 / +₹1,241,896** |
+| `E2_15S_FLAG25_3BAR045_SCORING` | -₹84,409 / -₹90,817 | +₹606,070 / +₹602,806 | +₹201,768 / +₹196,732 | +₹217,331 / +₹202,927 | +₹260,613 / +₹243,580 | +₹14,766 / +₹14,766 | +₹47,994 / +₹46,572 | +₹85,350 / +₹11,658 | **+₹1,349,484 / +₹1,228,225** |
+| `E13_W2_SPREAD2PCT` | -₹35,885 / -₹41,891 | +₹479,949 / +₹494,313 | +₹114,757 / +₹105,601 | +₹142,287 / +₹134,800 | +₹209,753 / +₹198,670 | +₹4,928 / +₹4,928 | +₹232,537 / +₹164,218 | +₹133,778 / +₹52,923 | **+₹1,282,102 / +₹1,113,562** |
+| `H4a_ELAPSED_15S` | -₹67,220 / -₹73,094 | +₹539,202 / +₹510,967 | +₹164,059 / +₹155,725 | +₹366,570 / +₹348,096 | +₹346,137 / +₹313,570 | -₹67,123 / -₹67,123 | +₹24,922 / -₹54,522 | -₹144,723 / -₹238,681 | **+₹1,161,823 / +₹894,937** |
+| `W6_BODY025_ATR025_OPT_SPREAD` | -₹47,295 / -₹51,750 | +₹293,619 / +₹264,374 | +₹277,927 / +₹279,142 | +₹198,467 / +₹188,620 | +₹164,920 / +₹141,178 | +₹22,075 / +₹22,525 | +₹77,771 / -₹14,705 | +₹148,621 / +₹109,995 | **+₹1,136,106 / +₹939,378** |
+| `E1_15S_FLAG25_SCORING_ONLY` | -₹111,873 / -₹121,631 | +₹528,725 / +₹498,309 | +₹164,059 / +₹155,725 | +₹379,810 / +₹355,262 | +₹347,042 / +₹315,403 | -₹67,123 / -₹67,123 | +₹32,707 / -₹85,968 | -₹227,292 / -₹239,575 | **+₹1,046,055 / +₹810,403** |
+| `H2b_PURE_3BAR_045` | -₹100,793 / -₹110,384 | +₹487,396 / +₹464,787 | +₹196,593 / +₹194,547 | +₹230,072 / +₹221,461 | +₹169,640 / +₹146,976 | +₹25,619 / +₹26,444 | -₹19,098 / -₹93,864 | -₹9,903 / -₹26,095 | **+₹979,525 / +₹823,872** |
+| `H6a_OPT_SCALE` | -₹71,754 / -₹80,816 | +₹448,119 / +₹416,371 | +₹218,413 / +₹210,619 | +₹445,752 / +₹414,562 | +₹304,551 / +₹273,512 | -₹53,711 / -₹53,261 | -₹107,633 / -₹168,060 | -₹212,482 / -₹282,079 | **+₹971,255 / +₹730,848** |
+| `M9_ALL_SIGNALS_SCALED` | -₹2,068 / -₹1,447 | +₹579,675 / +₹601,025 | +₹16,347 / +₹6,742 | +₹405,608 / +₹385,928 | +₹204,519 / +₹199,164 | -₹39,566 / -₹39,566 | -₹205,928 / -₹265,854 | +₹4,816 / -₹20,303 | **+₹963,403 / +₹865,690** |
+| `H3c_FLAG_FULL_POLE` | -₹124,903 / -₹133,199 | +₹469,332 / +₹441,072 | +₹167,154 / +₹157,890 | +₹443,104 / +₹423,588 | +₹264,138 / +₹232,360 | -₹71,493 / -₹71,493 | -₹159,738 / -₹229,074 | -₹133,651 / -₹345,326 | **+₹853,943 / +₹475,818** |
+| `H4b_ELAPSED_30S` | -₹40,408 / -₹47,972 | +₹482,275 / +₹477,627 | +₹90,625 / +₹87,608 | +₹394,665 / +₹371,603 | +₹301,634 / +₹268,181 | -₹75,088 / -₹75,088 | -₹86,212 / -₹282,646 | -₹290,220 / -₹397,916 | **+₹777,272 / +₹401,396** |
+| `H3a_FLAG_BUF_15` | -₹106,986 / -₹124,420 | +₹414,337 / +₹405,741 | +₹155,057 / +₹144,784 | +₹401,226 / +₹380,352 | +₹255,450 / +₹222,303 | -₹56,158 / -₹55,333 | -₹57,200 / -₹104,044 | -₹265,888 / -₹231,413 | **+₹739,837 / +₹637,969** |
+| `H2c_BODY_025_ATR_025` | -₹57,277 / -₹62,305 | +₹280,714 / +₹244,729 | +₹209,193 / +₹214,472 | +₹176,635 / +₹164,669 | +₹137,500 / +₹114,208 | +₹13,561 / +₹14,386 | -₹78,912 / -₹138,241 | +₹14,566 / -₹54,402 | **+₹695,981 / +₹497,516** |
+| `H3b_FLAG_BUF_25` | -₹158,084 / -₹171,962 | +₹407,000 / +₹397,436 | +₹155,057 / +₹144,784 | +₹432,262 / +₹402,030 | +₹270,839 / +₹235,924 | -₹56,158 / -₹55,333 | -₹57,359 / -₹104,203 | -₹314,910 / -₹290,486 | **+₹678,646 / +₹558,189** |
+| `H0_BASELINE` | -₹107,246 / -₹124,420 | +₹414,337 / +₹405,741 | +₹155,057 / +₹144,784 | +₹401,226 / +₹380,352 | +₹254,121 / +₹217,799 | -₹56,271 / -₹55,446 | -₹85,068 / -₹158,246 | -₹312,436 / -₹274,370 | **+₹663,718 / +₹536,194** |
+| `M7_SPREAD_GATE_CORE` | -₹78,250 / -₹79,614 | +₹465,633 / +₹485,702 | -₹794 / -₹13,000 | +₹376,073 / +₹359,054 | +₹144,257 / +₹132,784 | -₹39,566 / -₹39,566 | -₹220,058 / -₹247,072 | +₹8,952 / -₹31,904 | **+₹656,246 / +₹566,383** |
+| `H5b_CAP_2_NO_FLIP` | -₹75,293 / -₹79,655 | +₹235,030 / +₹242,498 | +₹216,313 / +₹209,588 | +₹271,835 / +₹252,097 | +₹248,357 / +₹217,081 | -₹55,900 / -₹55,075 | -₹73,683 / -₹144,901 | -₹127,649 / -₹144,836 | **+₹639,010 / +₹496,796** |
+| `M8_BODY025_SPREAD_SCALED` | -₹13,247 / -₹17,648 | +₹342,910 / +₹348,851 | +₹44,966 / +₹43,468 | +₹141,594 / +₹140,806 | +₹127,920 / +₹121,478 | -₹4,725 / -₹4,725 | -₹138,977 / -₹175,683 | +₹138,003 / +₹90,021 | **+₹638,443 / +₹546,568** |
+| `H5c_CAP_1` | -₹92,015 / -₹95,179 | +₹233,366 / +₹231,501 | +₹184,777 / +₹183,223 | +₹264,813 / +₹251,256 | +₹113,079 / +₹91,140 | -₹70,437 / -₹70,437 | -₹101,482 / -₹162,456 | +₹6,628 / -₹47,929 | **+₹538,728 / +₹381,118** |
+| `H5a_CAP_2` | -₹173,359 / -₹175,275 | +₹235,083 / +₹216,732 | +₹201,639 / +₹191,575 | +₹364,025 / +₹342,497 | +₹260,477 / +₹225,498 | -₹56,271 / -₹55,446 | +₹18,677 / -₹11,370 | -₹336,624 / -₹374,167 | **+₹513,646 / +₹360,045** |
+| `M3_SMART_IMPULSE` | -₹48,831 / -₹48,900 | +₹342,142 / +₹364,423 | +₹87,121 / +₹84,077 | +₹141,984 / +₹140,791 | +₹52,538 / +₹43,046 | -₹6,345 / -₹6,345 | -₹199,095 / -₹236,090 | +₹138,181 / +₹61,209 | **+₹507,695 / +₹402,211** |
+| `M1_CORE_CLEAN` | -₹149,335 / -₹151,224 | +₹449,806 / +₹467,198 | +₹18,227 / +₹6,735 | +₹392,428 / +₹378,332 | +₹128,404 / +₹113,686 | -₹79,769 / -₹79,769 | -₹199,310 / -₹266,096 | -₹73,776 / -₹89,567 | **+₹486,673 / +₹379,295** |
+| `H2a_MIN_ATR_030` | -₹127,802 / -₹129,490 | +₹267,811 / +₹262,401 | +₹244,851 / +₹250,857 | +₹138,474 / +₹142,300 | +₹106,757 / +₹84,448 | +₹16,644 / +₹17,468 | +₹81,750 / -₹14,298 | -₹242,827 / -₹299,011 | **+₹485,657 / +₹314,675** |
+| `M2_BALANCED` | -₹47,559 / -₹49,458 | +₹275,757 / +₹283,083 | +₹47,675 / +₹47,397 | +₹196,605 / +₹195,366 | +₹64,834 / +₹57,814 | -₹6,345 / -₹6,345 | +₹11,854 / -₹43,987 | -₹87,012 / -₹136,862 | **+₹455,809 / +₹347,009** |
+| `M5_IMPULSE_SCALED` | -₹49,265 / -₹51,171 | +₹338,619 / +₹354,713 | +₹89,252 / +₹88,045 | +₹144,141 / +₹143,374 | +₹53,526 / +₹47,848 | -₹4,725 / -₹4,725 | -₹290,648 / -₹311,794 | +₹111,456 / +₹66,862 | **+₹392,356 / +₹333,152** |
+| `M6_HIGH_CONVICTION` | -₹17,097 / -₹17,486 | +₹249,613 / +₹258,599 | +₹37,280 / +₹38,927 | +₹133,148 / +₹132,298 | +₹65,998 / +₹60,055 | -₹4,725 / -₹4,725 | -₹26,726 / -₹31,391 | -₹71,309 / -₹103,728 | **+₹366,181 / +₹332,549** |
+| `M4_BALANCED_SCALED` | -₹35,439 / -₹37,686 | +₹258,494 / +₹267,614 | +₹34,691 / +₹36,444 | +₹207,547 / +₹206,799 | +₹54,562 / +₹46,939 | -₹4,725 / -₹4,725 | -₹22,516 / -₹67,323 | -₹151,963 / -₹193,705 | **+₹340,652 / +₹254,356** |
+| `H1_MIDDAY_FREEZE` | -₹116,940 / -₹119,183 | +₹418,716 / +₹430,834 | -₹2,025 / -₹9,798 | +₹380,517 / +₹368,394 | +₹74,639 / +₹58,572 | -₹68,092 / -₹68,092 | -₹339,718 / -₹376,929 | -₹143,714 / -₹129,375 | **+₹203,383 / +₹154,424** |
 
-| Experiment ID | `Nov 16` (P / D) | `Nov 17` (P / D) | `Nov 18` (P / D) | `Nov 19` (P / D) | `Nov 20` (P / D) | `Nov 23` (P / D) | `Nov 25` (P / D) |
-|---|---|---|---|---|---|---|---|
-| `H0_BASELINE` | -₹74,753 / -₹84,214 | +₹540,062 / +₹533,256 | +₹248,529 / +₹242,527 | +₹230,611 / +₹204,592 | +₹136,379 / +₹107,179 | -₹57,533 / -₹56,708 | -₹51,796 / -₹118,426 |
-| `H1_MIDDAY_FREEZE` | -₹62,582 / -₹63,669 | +₹542,866 / +₹558,120 | +₹96,669 / +₹94,258 | +₹200,910 / +₹189,409 | -₹2,754 / -₹11,670 | -₹69,092 / -₹69,092 | -₹354,933 / -₹372,762 |
-| `H2a_MIN_ATR_030` | -₹79,034 / -₹82,847 | +₹391,371 / +₹389,277 | +₹265,262 / +₹268,482 | +₹94,279 / +₹92,098 | +₹25,588 / +₹7,119 | +₹16,471 / +₹17,296 | +₹74,018 / -₹32,778 |
-| `H2b_PURE_3BAR_045` | -₹52,830 / -₹61,815 | +₹543,687 / +₹527,712 | +₹301,306 / +₹295,144 | +₹123,606 / +₹109,455 | +₹97,197 / +₹83,382 | +₹25,386 / +₹26,211 | -₹9,738 / -₹73,530 |
-| `H2c_BODY_025_ATR_025` | -₹7,804 / -₹12,743 | +₹373,836 / +₹364,408 | +₹238,734 / +₹237,523 | +₹123,536 / +₹109,528 | +₹26,630 / +₹3,685 | +₹13,328 / +₹14,154 | -₹99,222 / -₹150,973 |
-| `H3a_FLAG_BUF_15` | -₹74,753 / -₹84,214 | +₹555,264 / +₹536,523 | +₹248,529 / +₹242,527 | +₹230,611 / +₹204,592 | +₹139,553 / +₹106,795 | -₹57,421 / -₹56,596 | -₹45,655 / -₹145,384 |
-| `H3b_FLAG_BUF_25` | -₹112,462 / -₹119,637 | +₹547,619 / +₹530,327 | +₹248,529 / +₹242,527 | +₹268,104 / +₹249,394 | +₹146,799 / +₹116,912 | -₹57,421 / -₹56,596 | -₹21,500 / -₹141,611 |
-| `H3c_FLAG_FULL_POLE` | -₹81,449 / -₹90,483 | +₹592,142 / +₹569,327 | +₹230,724 / +₹224,077 | +₹280,478 / +₹256,900 | +₹149,507 / +₹115,545 | -₹72,756 / -₹72,756 | -₹170,062 / -₹272,061 |
-| `H4a_ELAPSED_15S` | -₹56,939 / -₹66,632 | +₹615,378 / +₹620,282 | +₹263,362 / +₹260,147 | +₹238,455 / +₹221,177 | +₹203,330 / +₹168,768 | -₹68,183 / -₹68,183 | -₹28,398 / -₹120,804 |
-| `H4b_ELAPSED_30S` | -₹55,904 / -₹61,358 | +₹463,697 / +₹460,711 | +₹190,444 / +₹187,815 | +₹229,998 / +₹202,545 | +₹182,930 / +₹156,219 | -₹76,178 / -₹76,178 | -₹110,867 / -₹274,566 |
-| `H5a_CAP_2` | -₹115,794 / -₹125,536 | +₹329,255 / +₹304,132 | +₹261,853 / +₹257,405 | +₹226,374 / +₹209,920 | +₹108,207 / +₹76,247 | -₹57,533 / -₹56,708 | +₹60,667 / +₹6,256 |
-| `H5b_CAP_2_NO_FLIP` | -₹57,842 / -₹67,698 | +₹268,955 / +₹259,875 | +₹283,692 / +₹281,713 | +₹155,497 / +₹141,054 | +₹113,337 / +₹87,360 | -₹57,162 / -₹56,337 | -₹60,458 / -₹108,577 |
-| `H5c_CAP_1` | -₹154,868 / -₹158,113 | +₹253,043 / +₹251,033 | +₹224,098 / +₹223,364 | +₹207,175 / +₹191,241 | -₹23,837 / -₹40,692 | -₹71,700 / -₹71,700 | -₹115,518 / -₹182,117 |
-| `H6a_OPT_SCALE` | -₹6,042 / -₹10,216 | +₹565,847 / +₹551,506 | +₹317,511 / +₹315,558 | +₹244,390 / +₹232,946 | +₹146,629 / +₹131,263 | -₹54,938 / -₹54,488 | -₹94,777 / -₹194,190 |
-| `H6b_OPT_SCALE_SPREAD` | +₹12,048 / +₹5,829 | +₹565,428 / +₹551,184 | +₹317,511 / +₹315,558 | +₹271,006 / +₹260,030 | +₹146,629 / +₹131,263 | -₹54,938 / -₹54,488 | +₹71,960 / -₹27,806 |
-| `M1_CORE_CLEAN` | -₹95,442 / -₹97,135 | +₹571,314 / +₹590,978 | +₹110,444 / +₹102,978 | +₹224,393 / +₹215,867 | +₹64,843 / +₹54,323 | -₹80,769 / -₹80,769 | -₹184,298 / -₹272,499 |
-| `M2_BALANCED` | -₹68,058 / -₹71,975 | +₹336,926 / +₹348,177 | +₹86,657 / +₹86,117 | +₹136,730 / +₹135,104 | -₹8,068 / -₹11,302 | -₹6,315 / -₹6,315 | +₹2,825 / -₹43,547 |
-| `M3_SMART_IMPULSE` | -₹65,507 / -₹69,454 | +₹401,618 / +₹419,821 | +₹143,314 / +₹139,800 | +₹83,394 / +₹81,798 | -₹24,281 / -₹26,467 | -₹6,315 / -₹6,315 | -₹202,505 / -₹225,899 |
-| `M4_BALANCED_SCALED` | -₹58,056 / -₹57,888 | +₹322,599 / +₹334,278 | +₹92,588 / +₹93,790 | +₹147,710 / +₹146,262 | -₹38,279 / -₹41,109 | -₹4,695 / -₹4,695 | -₹37,577 / -₹79,663 |
-| `M5_IMPULSE_SCALED` | -₹73,186 / -₹73,187 | +₹395,427 / +₹407,601 | +₹158,448 / +₹156,956 | +₹87,123 / +₹85,740 | -₹43,470 / -₹42,352 | -₹4,695 / -₹4,695 | -₹298,206 / -₹309,897 |
-| `M6_HIGH_CONVICTION` | -₹45,898 / -₹45,730 | +₹323,972 / +₹332,760 | +₹93,058 / +₹94,260 | +₹83,472 / +₹82,025 | -₹40,132 / -₹39,592 | -₹4,695 / -₹4,695 | -₹35,037 / -₹61,977 |
-| `M7_SPREAD_GATE_CORE` | -₹47,611 / -₹45,934 | +₹502,446 / +₹519,979 | +₹84,094 / +₹81,192 | +₹242,342 / +₹234,158 | +₹15,474 / +₹9,979 | -₹81,939 / -₹81,939 | -₹280,152 / -₹359,783 |
-| `M8_BODY025_SPREAD_SCALED` | -₹54,680 / -₹55,926 | +₹410,419 / +₹414,599 | +₹76,686 / +₹73,071 | +₹75,670 / +₹74,288 | -₹33,064 / -₹33,249 | -₹4,695 / -₹4,695 | -₹195,902 / -₹254,834 |
-| `M9_ALL_SIGNALS_SCALED` | -₹48,228 / -₹46,454 | +₹613,007 / +₹641,480 | +₹126,821 / +₹123,341 | +₹261,836 / +₹255,145 | +₹63,037 / +₹72,892 | -₹81,939 / -₹81,939 | -₹218,902 / -₹285,236 |
-| `W1_15S_OPT_SPREAD` | -₹13,845 / -₹18,558 | +₹631,957 / +₹626,436 | +₹344,497 / +₹338,487 | +₹266,571 / +₹253,475 | +₹218,481 / +₹202,276 | -₹67,771 / -₹67,771 | +₹103,974 / +₹42,622 |
-| `W2_15S_FLAG25_OPT_SPREAD` | -₹54,535 / -₹60,747 | +₹647,132 / +₹645,676 | +₹344,497 / +₹338,487 | +₹304,092 / +₹289,281 | +₹217,814 / +₹206,663 | -₹67,771 / -₹67,771 | +₹120,218 / +₹69,899 |
-| `W3_15S_FLAG25_3BAR045_OPT_SPREAD` | -₹52,123 / -₹57,033 | +₹584,959 / +₹576,139 | +₹409,178 / +₹404,064 | +₹158,829 / +₹144,735 | +₹175,156 / +₹174,686 | +₹18,424 / +₹18,424 | +₹28,429 / -₹7,220 |
-| `W4_3BAR045_OPT_SPREAD` | +₹8,675 / +₹3,537 | +₹506,878 / +₹483,200 | +₹371,150 / +₹368,087 | +₹120,787 / +₹106,343 | +₹100,710 / +₹94,760 | +₹31,256 / +₹31,706 | -₹37,962 / -₹98,915 |
-| `W5_15S_FLAG25_NOFLIP_OPT_SPREAD` | -₹118,544 / -₹124,438 | +₹509,176 / +₹514,430 | +₹344,624 / +₹345,972 | +₹277,117 / +₹267,581 | +₹175,197 / +₹160,853 | -₹67,400 / -₹67,400 | +₹141,705 / +₹96,514 |
-| `W6_BODY025_ATR025_OPT_SPREAD` | -₹21,500 / -₹23,553 | +₹376,158 / +₹368,633 | +₹282,560 / +₹280,142 | +₹126,704 / +₹115,464 | +₹24,847 / +₹8,224 | +₹19,196 / +₹19,646 | +₹47,869 / -₹7,067 |
+---
+
+## 11. Quantitative & Structural Insights (Tick-by-Tick Audit Takeaways)
+
+1. **Why True Tick-by-Tick Simulation Changed Track Attribution (`0.5s` vs Tick-by-Tick):** Under `0.5s` sampling, `structural_convexity_ATM` missed fast underlying flag invalidations and rapid option spikes (`0/30` positive previously). Under genuine event-driven tick replay (paired with live `underlying_ltp` routing), it cleared a positive expectancy in **`45/45` runs (`Avg +₹56,559`, best single day `+₹73,480`)**, proving the strategy edge is real once data latency is eliminated. Conversely, `delta_scalp_ITM2` bleeds under noisy entries unless protected by high-conviction impulse filters (`W3`/`E10`) + option convexity scaling, while `gamma_runner_OTM2` remained `0/45` positive (`Avg -₹79,678`).
+2. **Why `fixed_target_ATM`, `trend_pullback_ATM`, and `composite_shared_ATM` Anchor Live Deployment:** Across 45 widely varying parameter regimes (`360` simulated sessions each), these three `ATM` `v1` tracks delivered **`86.9%`–`91.7%` profitable days**, tiny drawdowns (`₹2,855`–`₹3,924` avg DD), and **`+₹22.1k–+₹30.7k` minimum 8d profitability even in broken freeze configs**. `volatility_expansion_ATM` contributes the highest trend leverage (`+₹198,840` 8d peak, `Avg +₹107,827`), so pairing a core ATM allocation (`fixed_target_ATM` + `trend_pullback_ATM` + `composite_shared_ATM`) with satellite momentum allocators (`volatility_expansion_ATM` + `adaptive_regime_ATM`) captures both smooth equity growth and trend spikes.
+3. **Expiry & Chop Regime Proof (`Nov 23 + Nov 26` Combined):** `H0_BASELINE` netted **`-₹368,707`** across the two expiry sessions (`Nov 23`: `-₹56,271`, `Nov 26`: `-₹312,436`). Adding `15s Elapsed + Flag25 + ATR/Spread Gate` (`W2`) lifted combined expiry P&L to **`+₹53,704`** (`+₹422,411` swing), and `E10_W3_CAP3` (`3Bar >= 0.45% + Cap <= 3`) hit **`+₹398,480`** while keeping **`8/8` days green (`₹0` Paper DD)**!
+4. **Gate vs Target Scaling Synergy (`E1` → `E14` → `W2`):** Isolating `E14` proves `₹695,785` of gain comes simply from refusing wide-spread low-ATR contracts pre-entry (`+₹1,046,055 → +₹1,741,840`), while Dynamic Target/SL Scaling adds another `₹229,133` Paper / `₹219,618` Delayed by adapting rigid fixed targets to high-DTE option leverage (`Nov 25`, `Nov 26`).
