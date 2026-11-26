@@ -315,6 +315,33 @@ class TestAudit20Fixes(unittest.TestCase):
             cm.stop()
             unlink_shm(shm_name)
 
+    def test_quotes_broker_heartbeat_single_thread_two_frames(self):
+        import threading
+        broker = QuotesBroker(
+            feed_ipc="inproc://audit_hb_feed",
+            router_ipc="inproc://audit_hb_router",
+            stream_ipc="inproc://audit_hb_stream",
+            heartbeat_ipc="inproc://audit_hb_pub",
+            ctx=self.ctx,
+        )
+        hb_sub = self.ctx.socket(zmq.SUB)
+        hb_sub.setsockopt(zmq.LINGER, 0)
+        hb_sub.setsockopt(zmq.RCVTIMEO, 2000)
+        hb_sub.setsockopt(zmq.SUBSCRIBE, b"HEARTBEAT")
+        hb_sub.connect("inproc://audit_hb_stream")
+        t = threading.Thread(target=broker.start, daemon=True)
+        try:
+            t.start()
+            time.sleep(0.05)
+            broker._emit_heartbeat(time.time())
+            frames = hb_sub.recv_multipart()
+            self.assertEqual(len(frames), 2)
+            self.assertEqual(frames[0], b"HEARTBEAT")
+        finally:
+            hb_sub.close(linger=0)
+            broker.stop()
+            t.join(timeout=1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

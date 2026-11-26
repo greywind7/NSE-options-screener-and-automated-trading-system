@@ -92,6 +92,13 @@ class QuotesBroker:
         else:
             self.hb_pub = self.stream_pub
 
+    def _publish_stream(self, topic: bytes, payload: bytes) -> None:
+        """Publish a 2-frame message on stream_pub without allowing HWM backpressure to kill the loop."""
+        try:
+            self.stream_pub.send_multipart([topic, payload], flags=zmq.NOBLOCK)
+        except zmq.Again:
+            pass
+
     def on_tick(self, tick: Dict[str, Any]) -> None:
         """Update LVC with latest quote and forward to stream_pub if contract is subscribed."""
         token = normalize_instrument_token(tick.get("token", ""))
@@ -131,14 +138,14 @@ class QuotesBroker:
         if token in self.subscribed_tokens:
             payload = pack_message(quote_data)
             topic = f"QUOTE.{token}".encode("utf-8")
-            self.stream_pub.send_multipart([topic, payload], flags=zmq.NOBLOCK)
+            self._publish_stream(topic, payload)
 
         if sym:
             norm_sym = normalize_instrument_token(sym)
             if norm_sym != token and norm_sym in self.subscribed_tokens:
                 payload = pack_message(quote_data)
                 topic = f"QUOTE.{norm_sym}".encode("utf-8")
-                self.stream_pub.send_multipart([topic, payload], flags=zmq.NOBLOCK)
+                self._publish_stream(topic, payload)
 
     def _format_quote(self, q: Dict[str, Any], best_depth: bool) -> Dict[str, Any]:
         if best_depth:
@@ -192,7 +199,7 @@ class QuotesBroker:
                             quotes_snap[norm] = q_formatted
                             # Also publish snapshot immediately to stream so subscriber has prevailing depth
                             topic = f"QUOTE.{norm}".encode("utf-8")
-                            self.stream_pub.send_multipart([topic, pack_message(self._lvc[norm])], flags=zmq.NOBLOCK)
+                            self._publish_stream(topic, pack_message(self._lvc[norm]))
 
                 ref_counts = {t: len(self.subscribers_by_token[t]) for t in self.subscribed_tokens}
                 reply_payload = pack_message({
@@ -237,26 +244,21 @@ class QuotesBroker:
         except Exception as e:
             print(f"[QUOTES_BROKER] Request error: {e}", file=sys.stderr)
 
-    def _heartbeat_loop(self) -> None:
-        """Periodic 1-second heartbeat broadcaster on stream and heartbeat sockets."""
-        while self.running:
+    def _emit_heartbeat(self, now: Optional[float] = None) -> None:
+        """Emit a single 1-second heartbeat from the owning event-loop thread."""
+        ts = now if now is not None else time.time()
+        hb_data = {
+            "type": "HEARTBEAT",
+            "timestamp": ts,
+            "active_quotes_count": len(self._lvc),
+            "subscribed_count": len(self.subscribed_tokens),
+        }
+        payload = pack_message(hb_data)
+        self._publish_stream(b"HEARTBEAT", payload)
+        if self._distinct_hb:
             try:
-                time.sleep(1.0)
-                if not self.running:
-                    break
-                now = time.time()
-                hb_data = {
-                    "type": "HEARTBEAT",
-                    "timestamp": now,
-                    "active_quotes_count": len(self._lvc),
-                    "subscribed_count": len(self.subscribed_tokens),
-                }
-                payload = pack_message(hb_data)
-                # Broadcast on stream PUB socket
-                self.stream_pub.send_multipart([b"HEARTBEAT", payload], flags=zmq.NOBLOCK)
-                if self._distinct_hb:
-                    self.hb_pub.send_multipart([b"HEARTBEAT", payload], flags=zmq.NOBLOCK)
-            except Exception:
+                self.hb_pub.send_multipart([b"HEARTBEAT", payload], flags=zmq.NOBLOCK)
+            except zmq.Again:
                 pass
 
     def get_ref_count(self, token: str) -> int:
@@ -265,35 +267,39 @@ class QuotesBroker:
         return len(self.subscribers_by_token.get(norm, set()))
 
     def start(self) -> None:
-        """Run the QuotesBroker polling event loop."""
+        """Run the QuotesBroker single-threaded ZMQ event loop (keeps all sockets single-owner)."""
         self.running = True
         print(
             f"[QUOTES_BROKER] Active | Feed SUB: {self.feed_ipc} | ROUTER: {self.router_ipc} "
-            f"| STREAM PUB: {self.stream_ipc} | Heartbeat: {self.heartbeat_ipc}"
+            f"| STREAM PUB: {self.stream_ipc} | Heartbeat: {self.heartbeat_ipc}",
+            flush=True,
         )
-
-        # Start heartbeat thread
-        hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
-        hb_thread.start()
 
         poller = zmq.Poller()
         poller.register(self.sub, zmq.POLLIN)
         poller.register(self.router, zmq.POLLIN)
+        last_hb_ts = time.time()
 
         while self.running:
             try:
                 events = dict(poller.poll(timeout=10))
                 if self.sub in events:
-                    topic, payload = self.sub.recv_multipart()
-                    tick = unpack_message(payload)
-                    self.on_tick(tick)
+                    frames = self.sub.recv_multipart()
+                    if len(frames) >= 2:
+                        tick = unpack_message(frames[-1])
+                        self.on_tick(tick)
 
                 if self.router in events:
                     self._handle_request()
+
+                now = time.time()
+                if now - last_hb_ts >= 1.0:
+                    self._emit_heartbeat(now)
+                    last_hb_ts = now
             except zmq.ZMQError:
                 break
             except Exception as e:
-                print(f"[QUOTES_BROKER] Loop error: {e}", file=sys.stderr)
+                print(f"[QUOTES_BROKER] Loop error: {e}", file=sys.stderr, flush=True)
 
     def stop(self) -> None:
         self.running = False

@@ -493,14 +493,18 @@ class BaseSuperstructure(ExecutionContext, ABC):
                 events = dict(poller.poll(timeout=10))
                 # 1. Opportunities from RMS
                 if self.rms_sub in events:
-                    _, payload = self.rms_sub.recv_multipart()
-                    opp_dict = unpack_message(payload)
-                    opp = ActionableOpportunity(**opp_dict)
-                    self.on_opportunity(opp)
+                    rms_frames = self.rms_sub.recv_multipart()
+                    if len(rms_frames) >= 2:
+                        opp_dict = unpack_message(rms_frames[-1])
+                        opp = ActionableOpportunity(**opp_dict)
+                        self.on_opportunity(opp)
 
                 # 2. Quotes & Heartbeats from QuotesBroker stream
                 if self.quotes_sub in events:
-                    topic, payload = self.quotes_sub.recv_multipart()
+                    q_frames = self.quotes_sub.recv_multipart()
+                    if len(q_frames) < 2:
+                        continue
+                    topic, payload = q_frames[0], q_frames[-1]
                     data = unpack_message(payload)
                     if topic.startswith(b"QUOTE"):
                         topic_token = ""
