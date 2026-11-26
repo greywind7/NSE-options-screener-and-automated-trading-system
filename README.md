@@ -24,7 +24,7 @@ The platform separates noisy options market data from lightweight equity candle 
 
 ```mermaid
 flowchart TD
-    subgraph Market Ingestion Tier ["1. Market Ingestion Tier (Upstox API)"]
+    subgraph MarketIngestion ["1. Market Ingestion Tier (Upstox API)"]
         FeedWS1["Upstox WebSocket #1"] --> FeedHandler["FeedHandler Process"]
         FeedWS2["Upstox WebSocket #2"] --> FeedHandler
         FeedHandler -->|"PUB: feed_equity.ipc"| ZMQ_EQ[("ZeroMQ Equity Stream")]
@@ -34,7 +34,7 @@ flowchart TD
         Recorder --> RecStore[("Parquet Recordings: equity_ticks & option_depth")]
     end
 
-    subgraph State & Quote Cache Tier ["2. State & Ticker Plant Tier"]
+    subgraph StateQuoteCache ["2. State & Ticker Plant Tier"]
         ZMQ_EQ --> CandleMgr["CandleManager Process"]
         CandleMgr -->|"Atomic Seqlock Writes"| SHM[("Shared Memory: shm_ohlc_221 (777 KB)")]
 
@@ -43,7 +43,7 @@ flowchart TD
         QuotesBroker <-->|"ROUTER/REQ: quotes_router.ipc"| QuotesSnap[("On-Demand Quote Snapshots")]
     end
 
-    subgraph Signal & Risk Tier ["3. Signal & Strike Resolution Tier"]
+    subgraph SignalRisk ["3. Signal & Strike Resolution Tier"]
         SHM -->|"Lock-Free Seqlock Read"| ScoringEng["Scoring Engine 3.0 Process"]
         ScoringEng -->|"PUB: scoring_alerts_pub.ipc"| ZMQ_ALERTS[("ZeroMQ Setup Alerts")]
 
@@ -52,7 +52,7 @@ flowchart TD
         RMS -->|"PUB: rms_strike_pub.ipc"| ZMQ_RMS[("ZeroMQ Actionable Opportunities")]
     end
 
-    subgraph Execution Tier ["4. Concurrent Execution Tier (Process per Mode × Track)"]
+    subgraph ExecutionTier ["4. Concurrent Execution Tier (Process per Mode × Track)"]
         ZMQ_RMS --> SuperPaper["Paper Superstructure"]
         ZMQ_RMS --> SuperDelayed["Delayed Superstructure"]
         ZMQ_RMS --> SuperLive["Live Superstructure"]
@@ -62,7 +62,7 @@ flowchart TD
         SuperPaper & SuperDelayed & SuperLive --> Journals[("recordings/YYYY-MM-DD/journal_<mode>_<track>.jsonl")]
     end
 
-    subgraph Monitoring & Research Tier ["5. Web UI & Offline Simulation"]
+    subgraph MonitoringResearch ["5. Web UI & Offline Simulation"]
         ZMQ_RMS --> WebServer["Analytics Web Server (web/server.py)"]
         ZMQ_QUOTES --> WebServer
         Journals -.->|"Live MTM & Historical Replay"| WebServer
@@ -192,11 +192,11 @@ python3 runner.py post-market --date 20261125
 ### Live Operations, Tasks & Research (`docs/live/`)
 | Document | Scope |
 |---|---|
-| [`docs/live/TASK_E10_W3_CAP3_ROLLOUT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/TASK_E10_W3_CAP3_ROLLOUT.md) | `E10_W3_CAP3` rollout checklist, saved snapshots & 8-day OOS validation procedure |
+| [`docs/live/TASKS_DONE.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/TASKS_DONE.md) | Dated chronological log of all completed engineering tasks, fixes, and feature rollouts |
+| [`docs/live/IMPROVEMENTS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/IMPROVEMENTS.md) | Pruned active enhancements roadmap, live Groww hardening plan & audit carryover queue |
+| [`docs/live/EXPERIMENT_E10_W3_CAP3_OOS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/EXPERIMENT_E10_W3_CAP3_OOS.md) | Saved `Nov 16–26` benchmark snapshot & `+8`-day out-of-sample re-run procedure |
 | [`docs/live/SIMULATION_HYPOTHESIS_REPORT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SIMULATION_HYPOTHESIS_REPORT.md) | 45-experiment × 8-session (`Nov 16–26`) tick-by-tick study & track consistency matrices |
 | [`docs/live/SCORING_FALSE_POSITIVE_ANALYSIS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SCORING_FALSE_POSITIVE_ANALYSIS.md) | Empirical alert accuracy & option-depth friction study across `33.78M` equity ticks |
-| [`docs/live/SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SYSTEM_AUDIT_2_0.md) | Codebase audit findings & remaining remediation queue |
-| [`docs/live/IMPROVEMENTS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/IMPROVEMENTS.md) | Active enhancements roadmap, batch analytics criteria & live Groww hardening plan |
 
 ### Historical Reference (`docs/archive/`)
-Legacy 1.0 specs, architecture/scoring evolution logs, brainstorms, and completed audits live in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive).
+Legacy 1.0 specs, architecture/scoring evolution logs, brainstorms, and dated audits (`YYYY-MM-DD_*.md`) live in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive).

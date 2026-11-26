@@ -2,7 +2,7 @@
 
 This document serves as the authoritative architectural specification and operational guide for all **Execution Tracks** in the Antigravity Trading Engine.
 
-> **Active Production Update (`2026-11-26`)**: Per [`SIMULATION_HYPOTHESIS_REPORT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SIMULATION_HYPOTHESIS_REPORT.md) and [`TASK_E10_W3_CAP3_ROLLOUT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/TASK_E10_W3_CAP3_ROLLOUT.md), **`gamma_runner_OTM2` is RETIRED** from `default.json` and `v2.json` (`19` active default tracks: `12 v1` + `7 v2`), and **`option_convexity_scaling` (`OptScale`)** is enabled globally via [`config/strategies.json`](file:///Users/yorha/Documents/Trading%20Stuff/config/strategies.json) + [`BaseTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py).
+> **Active Production Update (`2026-11-26`)**: Per [`SIMULATION_HYPOTHESIS_REPORT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SIMULATION_HYPOTHESIS_REPORT.md) and [`TASKS_DONE.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/TASKS_DONE.md), **`gamma_runner_OTM2` is RETIRED** from `default.json` and `v2.json` (`19` active default tracks: `12 v1` + `7 v2`), and **`option_convexity_scaling` (`OptScale`)** is enabled globally via [`config/strategies.json`](file:///Users/yorha/Documents/Trading%20Stuff/config/strategies.json) + [`BaseTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py) (OOS verification tracked in [`EXPERIMENT_E10_W3_CAP3_OOS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/EXPERIMENT_E10_W3_CAP3_OOS.md)).
 
 ---
 
@@ -246,11 +246,9 @@ Profile configuration: [`config/tracks/v2.json`](file:///Users/yorha/Documents/T
   Intraday equity option behavior is non-stationary and changes predictably according to the clock. Rather than applying a single static parameter set throughout the day, the Adaptive Regime Track dynamically switches rules across three distinct operational regimes:
 
 ```mermaid
-timeline
-    title Adaptive Regime Intraday Execution Schedule
-    09:15 - 11:00 : Morning Thrust Regime : ATM Options : Target +18% : SL -7% : High Delta Runner
-    11:00 - 13:30 : Midday Lull Regime : ITM1 Options : Target +8% : SL -5% : Strict 10m Stagnation Exit
-    13:30 - 15:30 : Power-Hour Regime : ATM Options : Target +25% : SL -7% : 50% Profit Trail
+flowchart LR
+    Morning["Morning Thrust (09:15 - 11:00 IST)\nATM Options | Target +18% | SL -7%\nHigh-Delta Runner"] --> Midday["Midday Lull (11:00 - 13:30 IST)\nITM1 Options | Target +8% | SL -5%\nStrict 10m Stagnation Exit"]
+    Midday --> PowerHour["Power-Hour (13:30 - 15:30 IST)\nATM Options | Target +25% | SL -7%\n50% Profit Trail"]
 ```
 
 1. **Morning Thrust Regime (09:15 – 11:00 IST)**:

@@ -2,8 +2,8 @@
 
 > **Document Type**: Comprehensive Architectural Blueprint & Specification  
 > **Version**: 2.0 (Distributed Multi-Process, ZeroMQ IPC, Shared Memory, Quotes Broker)  
-> **Status**: Finalized Design Specification  
-> **Historical Reference**: Previous brainstorming and legacy audit documents are archived in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive). Active code audit is in [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SYSTEM_AUDIT_2_0.md).
+> **Last Updated**: 2026-11-26 | **Status**: Active Source-of-Truth Specification  
+> **Historical Reference**: Previous brainstorming, specs, and archived audits (e.g., [`2026-11-25_SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive/2026-11-25_SYSTEM_AUDIT_2_0.md)) live in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive); active enhancements live in [`IMPROVEMENTS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/IMPROVEMENTS.md).
 
 ---
 
@@ -18,54 +18,54 @@ flowchart TD
     subgraph Ingestion ["Market Ingestion Tier (Upstox API v3 Dual WebSocket)"]
         FeedWS_1["Upstox WS Conn 0 (Shard 0: ~107 Underlyings)"] --> FeedHandler["FeedHandler Process (Dual-Connection)"]
         FeedWS_2["Upstox WS Conn 1 (Shard 1: ~108 Underlyings)"] --> FeedHandler
-        FeedHandler -->|ZMQ PUB: Equity Ticks| SocketEq["ipc:///tmp/feed_equity.ipc"]
-        FeedHandler -->|ZMQ PUB: Option Ticks| SocketOpt["ipc:///tmp/feed_options.ipc"]
-        
+        FeedHandler -->|"ZMQ PUB: Equity Ticks"| SocketEq["ipc:///tmp/feed_equity.ipc"]
+        FeedHandler -->|"ZMQ PUB: Option Ticks"| SocketOpt["ipc:///tmp/feed_options.ipc"]
+
         SocketEq & SocketOpt --> Recorder["Market Recorder Process"]
-        Recorder --> RecStore[("Lossless Parquet Recordings:<br/>recordings/YYYYMMDD/")]
+        Recorder --> RecStore[("Lossless Parquet Recordings\nrecordings/YYYYMMDD/")]
     end
 
     subgraph StateInfra ["State & Data Infrastructure"]
         SocketEq --> CandleMgr["Candle / OHLC Manager Process"]
         SocketOpt --> QuotesBroker["Quotes Broker Ticker Plant Process"]
-        
-        CandleMgr -->|Single Writer: 777 KB| ShmCandles[("Shared Memory: 5m Candles for 221 F&O Stocks")]
-        QuotesBroker -->|Last Value Cache: 200 KB| LVC[("In-Memory Latest Depth Table")]
-        QuotesBroker -->|ZMQ XPUB: Subscribed Ticks + Heartbeat| SocketStream["ipc:///tmp/quotes_stream.ipc"]
+
+        CandleMgr -->|"Single Writer: 777 KB"| ShmCandles[("Shared Memory: 5m Candles for 221 F&O Stocks")]
+        QuotesBroker -->|"Last Value Cache: 200 KB"| LVC[("In-Memory Latest Depth Table")]
+        QuotesBroker -->|"ZMQ XPUB: Subscribed Ticks + Heartbeat"| SocketStream["ipc:///tmp/quotes_stream.ipc"]
     end
 
     subgraph AlphaPipe ["Alpha & Gatekeeping Pipeline"]
         ShmCandles -.->|"Lock-Free Busy-Spin Loop: < 2 us"| Scoring["Scoring Engine 3.0 Process"]
-        
-        Scoring -->|ZMQ PUB: Setup Alerts (pole/flag/clv)| SocketAlerts["ipc:///tmp/scoring_alerts_pub.ipc"]
+
+        Scoring -->|"ZMQ PUB: Setup Alerts (pole / flag / clv)"| SocketAlerts["ipc:///tmp/scoring_alerts_pub.ipc"]
         SocketAlerts --> RMS["RMS & Option Resolver Process"]
-        
-        RMS <-->|ZMQ REQ/REP: Snapshot Spread| QuotesBroker
-        RMS -->|ZMQ PUB: Actionable Opportunities| SocketTrades["ipc:///tmp/rms_strike_pub.ipc"]
+
+        RMS <-->|"ZMQ REQ/REP: Snapshot Spread"| QuotesBroker
+        RMS -->|"ZMQ PUB: Actionable Opportunities"| SocketTrades["ipc:///tmp/rms_strike_pub.ipc"]
     end
 
     subgraph ExecSuper ["Execution Superstructures (Concurrent Independent OS Processes)"]
         SocketTrades --> SuperLive["Live Superstructure Process (Groww SDK)"]
         SocketTrades --> SuperPaper["Paper Superstructure Process (Virtual Fills)"]
         SocketTrades --> SuperDelayed["Paper Delayed Superstructure Process (Cached Fills)"]
-        
-        SocketStream -->|Heartbeat & Active Ticks| SuperDelayed
-        SocketStream -->|Active Position Ticks| SuperLive
+
+        SocketStream -->|"Heartbeat & Active Ticks"| SuperDelayed
+        SocketStream -->|"Active Position Ticks"| SuperLive
         SuperLive --> GrowwAPI["Groww Live Broker SDK (growwapi)"]
         SuperDelayed --> DelayedLedger["Delayed Trade Journal (JSONL)"]
         SuperPaper --> PaperLedger["Paper Trade Journal (JSONL)"]
         SuperLive --> LiveLedger["Live Trade Journal (JSONL)"]
-        
-        SuperLive -.->|Imports| CommonTracks["Execution Tracks: v1 Baseline & v2 Multi-Regime"]
-        SuperPaper -.->|Imports| CommonTracks
-        SuperDelayed -.->|Imports| CommonTracks
+
+        SuperLive -.->|"Imports"| CommonTracks["Execution Tracks: v1 Baseline & v2 Multi-Regime"]
+        SuperPaper -.->|"Imports"| CommonTracks
+        SuperDelayed -.->|"Imports"| CommonTracks
     end
 
     subgraph Observability ["Universal Monitoring & Web Tier"]
         SocketTrades --> WebServer["Analytics Web Server (web/server.py:8080)"]
-        DelayedLedger & PaperLedger & LiveLedger -.->|Real-time Journals & MTM| WebServer
-        WebServer -->|WebSocket: /api/live/ws| WebUI["Analytics & Simulation Web UI (Browser)"]
-        WebServer -->|REST: /api/*| WebUI
+        DelayedLedger & PaperLedger & LiveLedger -.->|"Real-time Journals & MTM"| WebServer
+        WebServer -->|"WebSocket: /api/live/ws"| WebUI["Analytics & Simulation Web UI (Browser)"]
+        WebServer -->|"REST: /api/*"| WebUI
     end
 ```
 
@@ -321,7 +321,7 @@ classDiagram
 ### 3.8 Analytics & Simulation Web Server (`web/server.py`)
 - Modern browser-based command center succeeding the terminal dashboard:
   - **Live Service (`web/live_service.py`)**: Subscribes to ZeroMQ option depth streams, maintains Latest Value Cache (LVC), computes live MTM across open positions, and streams updates over WebSockets (`/api/live/ws`).
-  - **Simulation Service (`web/simulation_service.py`)**: Spawns isolated worker processes (`multiprocessing.Process`) to bypass Python's GIL; caches parsed Parquet DataFrames (`cached_equity_df`, `cached_options_df`) for sub-second re-runs; manages single and batch simulation queues with persistent history.
+  - **Simulation Service (`web/simulation_service.py`)**: Spawns isolated worker processes (`multiprocessing.Process`) to bypass Python's GIL; caches parsed Parquet DataFrames (`cached_equity_df`, `cached_options_df`) for sub-second re-runs; manages single and batch simulation queues with persistent history, plus cross-session batch analytics (`web/batch_analytics.py`) and F&O synthetic basket market regime tagging (`web/regime_classifier.py`).
   - **Candle & Alert Services (`web/candle_service.py`, `web/alert_service.py`)**: Attaches directly to POSIX Shared Memory (`shm_ohlc_221`) in $< 2\ \mu\text{s}$ to render 5-minute candlestick charts with exact breakout trigger markers.
   - **Historical Service (`web/historical_service.py`)**: Discovers and indexes past trading sessions from `recordings/` and `logs/`, parsing closed trade journals for drill-down performance analytics.
 - Full details documented in [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/WEB_VIEW_FLOW.md).

@@ -33,13 +33,13 @@ flowchart TD
     
     subgraph SubEarlyGates ["O(1) Early-Exit Filters (< 50ns per stock)"]
         SymbolLoop --> F1{"Candle ts == Cached ts?"}
-        F1 -->|Yes: No new data| SkipStock["Skip to Next Stock"]
-        F1 -->|No| F2{"Status active on current ts?"}
-        F2 -->|Yes: Already evaluated| SkipStock
-        F2 -->|No| F3{"rVOL >= 2.0x?"}
-        F3 -->|No: Low institutional volume| SkipStock
-        F3 -->|Yes| F4{"Bar elapsed >= 15s?"}
-        F4 -->|No: Early candle RoV jitter| SkipStock
+        F1 -->|"Yes: No new data"| SkipStock["Skip to Next Stock"]
+        F1 -->|"No"| F2{"Status active on current ts?"}
+        F2 -->|"Yes: Already evaluated"| SkipStock
+        F2 -->|"No"| F3{"rVOL >= 2.0x?"}
+        F3 -->|"No: Low institutional volume"| SkipStock
+        F3 -->|"Yes"| F4{"Bar elapsed >= 15s?"}
+        F4 -->|"No: Early candle RoV jitter"| SkipStock
     end
     
     subgraph SubArchetypes ["Archetype Evaluation (< 2 us)"]

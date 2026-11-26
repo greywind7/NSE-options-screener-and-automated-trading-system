@@ -556,8 +556,11 @@
           <div class="form-card" style="margin-top:2px;">
             <div class="panel-title" style="display:flex; justify-content:space-between; align-items:center;">
               <span>📋 Simulation Runs</span>
-              <div style="display:flex; align-items:center; gap:8px;">
+              <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
                 <span id="sim-runs-count" class="badge">0 Runs</span>
+                <button type="button" id="sim-open-batch-report-btn" class="btn btn-primary btn-xs"
+                  style="padding:2px 8px; font-size:10px; cursor:pointer;"
+                  title="Generate Cross-Session Batch Report across runs">📊 Batch Report</button>
                 <button type="button" id="sim-clear-runs-btn" class="btn btn-secondary btn-xs"
                   style="padding:2px 8px; font-size:10px; cursor:pointer;"
                   title="Clear simulation runs and temporary files">Clear Queue</button>
@@ -592,6 +595,20 @@
          TAB 4: DEDICATED SIMULATION RESULTS VIEW (CLEAN FULL-PAGE TAB)
          ======================================================================= -->
     <section id="view-sim-results" class="tab-view">
+      <!-- Sub-View Switcher: Single Run vs Batch Analytics -->
+      <div class="sr-subview-bar">
+        <div class="pill-group">
+          <button type="button" id="sr-subview-single-btn" class="pill-btn active">Single Run Report</button>
+          <button type="button" id="sr-subview-batch-btn" class="pill-btn">📈 Batch Analytics & Multi-Day Report</button>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <button type="button" id="sr-back-to-sim-top-btn" class="btn btn-secondary btn-sm">
+            <span>⚡ Back to Simulation Lab</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="sr-single-view">
       <!-- Top Run Bar & Action Controls -->
       <div class="controls-bar" style="margin-bottom:14px; justify-content:space-between; flex-wrap:wrap; gap:10px;">
         <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
@@ -766,6 +783,253 @@
           </div>
         </div>
       </div>
+      </div> <!-- end sr-single-view -->
+
+      <!-- ===================================================================
+           BATCH SIMULATION REPORT VIEW (CROSS-SESSION METRICS & REGIME)
+           =================================================================== -->
+      <div id="sr-batch-view" style="display:none;">
+        <!-- Batch Top Controls -->
+        <div class="controls-bar" style="margin-bottom:14px; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <div class="filter-group">
+              <span class="filter-label">Batch:</span>
+              <select id="br-batch-select" class="custom-select" style="min-width:220px;">
+                <option value="__all__">All Completed Runs</option>
+              </select>
+            </div>
+            <div class="filter-group">
+              <span class="filter-label">Rank Objective:</span>
+              <select id="br-rank-select" class="custom-select">
+                <option value="net_pnl">Total Net P&amp;L</option>
+                <option value="consistency">Most Consistent (45° Slope)</option>
+                <option value="max_green_days">Max Green Days %</option>
+                <option value="calmar">Calmar (Ret / MaxDD)</option>
+                <option value="profit_factor">Profit Factor</option>
+                <option value="expectancy">Expectancy (₹/Trade)</option>
+                <option value="lowest_maxdd">Lowest Max DD %</option>
+                <option value="delayed_retention">Delayed Retention %</option>
+                <option value="sharpe">Daily Sharpe</option>
+              </select>
+            </div>
+            <div class="filter-group">
+              <span class="filter-label">Window:</span>
+              <select id="br-window-select" class="custom-select">
+                <option value="ALL">Full Session (09:15-15:20)</option>
+                <option value="OPENING">Opening (09:15-11:30)</option>
+                <option value="MIDDAY">Midday (11:30-13:30)</option>
+                <option value="CLOSING">Closing (13:30-15:20)</option>
+              </select>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <button type="button" id="br-create-batch-btn" class="btn btn-secondary btn-sm"
+              title="Snapshot currently completed runs into a saved named Batch for comparison">
+              <span>+ Snapshot Batch</span>
+            </button>
+            <button type="button" id="br-export-md-btn" class="btn btn-secondary btn-sm">
+              <span>⬇ Markdown</span>
+            </button>
+            <button type="button" id="br-export-csv-btn" class="btn btn-primary btn-sm">
+              <span>⬇ CSV</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Executive Batch Summary Strip -->
+        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); margin-bottom:14px;">
+          <div class="stat-card">
+            <div class="stat-label">Sessions Analyzed</div>
+            <div id="br-stat-sessions" class="stat-value">0 / 0</div>
+            <div id="br-stat-daterange" class="stat-subtext">-</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Portfolio Avg Net P&amp;L</div>
+            <div id="br-stat-net-pnl" class="stat-value">₹0.00</div>
+            <div id="br-stat-gross-pnl" class="stat-subtext">Gross: ₹0.00</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Portfolio Max DD</div>
+            <div id="br-stat-max-dd" class="stat-value">0.00%</div>
+            <div id="br-stat-max-dd-inr" class="stat-subtext">₹0.00</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Portfolio Daily Win %</div>
+            <div id="br-stat-daily-wr" class="stat-value">0.0%</div>
+            <div id="br-stat-green-days" class="stat-subtext">0 / 0 Green Days</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Tracks Evaluated</div>
+            <div id="br-stat-tracks" class="stat-value">0</div>
+            <div id="br-stat-modes" class="stat-subtext">-</div>
+          </div>
+        </div>
+
+        <!-- Multi-Batch Comparison Panel (Auto-shown when >= 2 batches registered) -->
+        <div id="br-comparison-panel" class="table-panel" style="display:none; margin-bottom:14px;">
+          <div class="panel-header">
+            <div class="panel-title"><span>⚖️ Multi-Batch Strategy &amp; Parameter Comparison</span></div>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Batch</th>
+                  <th>Date Range</th>
+                  <th class="text-center">Sessions</th>
+                  <th class="text-right">Portfolio Avg Net</th>
+                  <th class="text-right">Max DD %</th>
+                  <th class="text-right">Daily Win %</th>
+                  <th>Top Net Track</th>
+                  <th class="text-right">Top Track Net</th>
+                  <th>Best Calmar Track</th>
+                </tr>
+              </thead>
+              <tbody id="br-comparison-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Spotlight Winner Cards -->
+        <div id="br-spotlights-grid" class="br-spotlights-grid"></div>
+
+        <!-- Market Regime Filter Pills & Regime Performance Breakdown -->
+        <div class="controls-bar" style="margin-bottom:10px; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+          <div class="filter-group" style="flex-wrap:wrap;">
+            <span class="filter-label">Market Regime Filter:</span>
+            <div id="br-regime-pills" class="pill-group" style="flex-wrap:wrap;">
+              <button type="button" class="pill-btn br-regime-pill active" data-regime="ALL">All Regimes</button>
+              <button type="button" class="pill-btn br-regime-pill" data-regime="TREND_UP">Trend Up</button>
+              <button type="button" class="pill-btn br-regime-pill" data-regime="TREND_DOWN">Trend Down</button>
+              <button type="button" class="pill-btn br-regime-pill" data-regime="CHOPPY_RANGE">Choppy/Range</button>
+              <button type="button" class="pill-btn br-regime-pill" data-regime="V_REVERSAL">V-Reversal</button>
+              <button type="button" class="pill-btn br-regime-pill" data-regime="HIGH_VOL_EXPIRY">High-Vol/Expiry</button>
+            </div>
+          </div>
+          <span class="chart-subtext">Multi-winner curves alternate metric colors</span>
+        </div>
+
+        <div id="br-regime-breakdown" class="br-regime-strip"></div>
+
+        <!-- Dual 1:1 Square Multi-Day Charts: Spotlight Winners vs Dynamic Track/Portfolio -->
+        <div class="br-charts-grid">
+          <div class="chart-box br-chart-card">
+            <div class="chart-header" style="flex-wrap:wrap; gap:8px;">
+              <div>
+                <span class="chart-title">🏅 Spotlight Winners Comparison</span>
+                <span id="br-winners-subtitle" class="chart-subtext" style="margin-left:6px;">Deduplicated Top Performers</span>
+              </div>
+              <div id="br-winners-legend" class="br-winners-legend"></div>
+            </div>
+            <div class="chart-square-wrapper">
+              <canvas id="br-winners-canvas" class="chart-canvas chart-square"></canvas>
+            </div>
+          </div>
+
+          <div class="chart-box br-chart-card">
+            <div class="chart-header" style="flex-wrap:wrap; gap:8px;">
+              <div>
+                <span class="chart-title">📈 Track / Portfolio Equity &amp; Drawdown</span>
+                <span id="br-chart-subtitle" class="chart-subtext" style="margin-left:6px;">Equal-Weighted Portfolio</span>
+              </div>
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <select id="br-chart-track-select" class="custom-select" style="min-width:190px;">
+                  <option value="__portfolio__">Equal-Weighted Portfolio Avg</option>
+                </select>
+                <label class="chart-checkbox-label">
+                  <input type="checkbox" id="br-compare-delayed-toggle" checked />
+                  <span>Overlay Delayed</span>
+                </label>
+              </div>
+            </div>
+            <div class="chart-square-wrapper">
+              <canvas id="br-equity-canvas" class="chart-canvas chart-square"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cross-Session Track Ranking Leaderboard (Unified Rankings + Mode Filter) -->
+        <div class="table-panel">
+          <div class="panel-header" style="flex-direction:column; align-items:stretch; gap:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+              <div class="panel-title"><span>🏆 Track Rankings &amp; Performance Leaderboard</span></div>
+              <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                <div class="pill-group">
+                  <button type="button" class="pill-btn br-mode-pill active" data-mode="all">All Modes</button>
+                  <button type="button" class="pill-btn br-mode-pill" data-mode="paper">Paper</button>
+                  <button type="button" class="pill-btn br-mode-pill" data-mode="paper_delayed">Paper Delayed</button>
+                </div>
+                <span class="chart-subtext">Click row to plot in Dynamic Chart</span>
+              </div>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+              <span class="filter-label" style="font-size:11px;">Rank By:</span>
+              <div id="br-rankings-metric-pills" class="pill-group" style="flex-wrap:wrap;">
+                <button type="button" class="pill-btn br-rank-pill active" data-metric="net_pnl">Net P&amp;L</button>
+                <button type="button" class="pill-btn br-rank-pill" data-metric="consistency">45° Slope</button>
+                <button type="button" class="pill-btn br-rank-pill" data-metric="max_green_days">Max Green %</button>
+                <button type="button" class="pill-btn br-rank-pill" data-metric="calmar">Calmar</button>
+                <button type="button" class="pill-btn br-rank-pill" data-metric="profit_factor">Profit Factor</button>
+                <button type="button" class="pill-btn br-rank-pill" data-metric="lowest_maxdd">Lowest MaxDD</button>
+                <button type="button" class="pill-btn br-rank-pill" data-metric="expectancy">Exp / Trade</button>
+                <button type="button" class="pill-btn br-rank-pill" data-metric="delayed_retention">Delayed Ret %</button>
+                <button type="button" class="pill-btn br-rank-pill" data-metric="sharpe">Sharpe</button>
+              </div>
+            </div>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th class="text-center">#</th>
+                  <th>Mode</th>
+                  <th>Track</th>
+                  <th class="text-center">Sess</th>
+                  <th class="text-center sortable-th" data-rank="max_green_days">Green %</th>
+                  <th class="text-center">Trades</th>
+                  <th class="text-center">Win %</th>
+                  <th class="text-right sortable-th" data-rank="net_pnl">Net P&amp;L</th>
+                  <th class="text-right">Ret %</th>
+                  <th class="text-right">Brok % GP</th>
+                  <th class="text-right sortable-th" data-rank="consistency">Slope</th>
+                  <th class="text-right sortable-th" data-rank="expectancy">Exp / Tr</th>
+                  <th class="text-right sortable-th" data-rank="profit_factor">PF</th>
+                  <th class="text-right sortable-th" data-rank="lowest_maxdd">Max DD %</th>
+                  <th class="text-right sortable-th" data-rank="calmar">Calmar</th>
+                  <th class="text-right sortable-th" data-rank="delayed_retention">Delayed Ret %</th>
+                </tr>
+              </thead>
+              <tbody id="br-leaderboard-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Session-by-Session P&L Attribution & Intraday Entry Window Breakdown -->
+        <div class="table-panel" style="margin-top:14px;">
+          <div class="panel-header" style="justify-content:space-between; flex-wrap:wrap; gap:8px;">
+            <div class="panel-title"><span>📅 Session-by-Session P&amp;L Attribution &amp; Top Track</span></div>
+            <span class="chart-subtext">Entry-window attribution (Click a window chip to filter; click a date row to inspect Single Run)</span>
+          </div>
+          <div id="br-intraday-windows-bar" style="padding:10px 14px; display:flex; gap:8px; flex-wrap:wrap; border-bottom:1px solid var(--border-subtle);"></div>
+          <div class="table-wrapper" style="max-height:320px; overflow-y:auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Regime</th>
+                  <th class="text-right">F&amp;O Basket %</th>
+                  <th class="text-center">Trades</th>
+                  <th class="text-center">Win %</th>
+                  <th class="text-right">Avg Paper Net</th>
+                  <th class="text-right">Avg Delayed Net</th>
+                  <th>Best Track of Day</th>
+                </tr>
+              </thead>
+              <tbody id="br-sessions-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div> <!-- end sr-batch-view -->
 
     </section>
 

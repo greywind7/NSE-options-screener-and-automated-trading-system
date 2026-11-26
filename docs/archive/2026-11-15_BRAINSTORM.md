@@ -19,25 +19,25 @@ To address these challenges, we have brainstormed solutions across **three disti
 
 ```mermaid
 flowchart TD
-    subgraph Track A: In-Place Evolution
-        A1[Retain Monolithic Python App]
-        A2[Lock-Free Monotonic Priority Heap]
-        A3[Categorical Gate Matrix in Scoring]
-        A4[Fast Two-Line Sim Tick Sync]
+    subgraph TrackA ["Track A: In-Place Evolution"]
+        A1["Retain Monolithic Python App"]
+        A2["Lock-Free Monotonic Priority Heap"]
+        A3["Categorical Gate Matrix in Scoring"]
+        A4["Fast Two-Line Sim Tick Sync"]
     end
 
-    subgraph Track B: Clean-Slate Event-Sourced Microkernel
-        B1[Hexagonal Ports & Adapters]
-        B2[Virtualized Clock Abstraction]
-        B3[Pre-Allocated NumPy Ring Buffers]
-        B4[Finite State Machine Alpha Engine]
+    subgraph TrackB ["Track B: Clean-Slate Event-Sourced Microkernel"]
+        B1["Hexagonal Ports & Adapters"]
+        B2["Virtualized Clock Abstraction"]
+        B3["Pre-Allocated NumPy Ring Buffers"]
+        B4["Finite State Machine Alpha Engine"]
     end
 
-    subgraph Track C: Distributed Multi-Process Redesign
-        C1[ZeroMQ IPC Messaging Bus]
-        C2[Dedicated Quotes & Candle Managers]
-        C3[Lock-Free POSIX Shared Memory]
-        C4[Lookahead Cache & Polars Columnar Sim]
+    subgraph TrackC ["Track C: Distributed Multi-Process Redesign"]
+        C1["ZeroMQ IPC Messaging Bus"]
+        C2["Dedicated Quotes & Candle Managers"]
+        C3["Lock-Free POSIX Shared Memory"]
+        C4["Lookahead Cache & Polars Columnar Sim"]
     end
 ```
 
@@ -88,26 +88,26 @@ All three tracks independently converge on an essential principle: **Continuous 
 
 ```mermaid
 flowchart LR
-    Phase1[Phase 1: In-Place Stabilization] --> Phase2[Phase 2: Hybrid Acceleration]
-    Phase2 --> Phase3[Phase 3: Full Distributed Decoupling]
+    Phase1["Phase 1: In-Place Stabilization"] --> Phase2["Phase 2: Hybrid Acceleration"]
+    Phase2 --> Phase3["Phase 3: Full Distributed Decoupling"]
     
-    subgraph Phase 1: Track A
-        P1A[Heap-based Delayed Engine]
-        P1B[Categorical Setup Matrix]
-        P1C[Sim Key Registration Fix]
-        P1D[Fix Audit Bugs: CRIT-001, CRIT-005]
+    subgraph P1Sub ["Phase 1: Track A"]
+        P1A["Heap-based Delayed Engine"]
+        P1B["Categorical Setup Matrix"]
+        P1C["Sim Key Registration Fix"]
+        P1D["Fix Audit Bugs: CRIT-001, CRIT-005"]
     end
     
-    subgraph Phase 2: Bridge
-        P2A[Pre-extract Option Depth to Parquet]
-        P2B[Fast ASOF Sim Engine]
-        P2C[NumPy Pre-Allocated Ring Buffers]
+    subgraph P2Sub ["Phase 2: Bridge"]
+        P2A["Pre-extract Option Depth to Parquet"]
+        P2B["Fast ASOF Sim Engine"]
+        P2C["NumPy Pre-Allocated Ring Buffers"]
     end
     
-    subgraph Phase 3: Track C
-        P3A[ZeroMQ IPC Process Split]
-        P3B[POSIX Shared Memory Quotes/OHLC]
-        P3C[Independent Live Broker Worker]
+    subgraph P3Sub ["Phase 3: Track C"]
+        P3A["ZeroMQ IPC Process Split"]
+        P3B["POSIX Shared Memory Quotes/OHLC"]
+        P3C["Independent Live Broker Worker"]
     end
     
     Phase1 --- P1A & P1B & P1C & P1D

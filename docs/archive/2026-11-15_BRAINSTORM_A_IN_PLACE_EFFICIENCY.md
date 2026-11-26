@@ -13,18 +13,18 @@ Track A addresses the critical architectural defects discovered during the audit
 
 ```mermaid
 flowchart TD
-    subgraph Current Bottlenecks
-        A1[Single Thread Event Loop] -->|threading.Timer + self._lock| B1[Lock Contention & 750ms Sleep]
-        A2[Scoring Engine] -->|Continuous 0-100 Score| B2[Artificial Boosts & Counter-Trend Veto]
-        A3[Simulation Engine] -->|Coarse Tick Lumping| B3[Delayed Portfolio Butterfly Effect]
-        A4[Actionable Pool] -->|Head-of-Line Blocking| B4[Valid Setups Starved for 20s]
+    subgraph Bottlenecks ["Current Bottlenecks"]
+        A1["Single Thread Event Loop"] -->|"threading.Timer + self._lock"| B1["Lock Contention & 750ms Sleep"]
+        A2["Scoring Engine"] -->|"Continuous 0-100 Score"| B2["Artificial Boosts & Counter-Trend Veto"]
+        A3["Simulation Engine"] -->|"Coarse Tick Lumping"| B3["Delayed Portfolio Butterfly Effect"]
+        A4["Actionable Pool"] -->|"Head-of-Line Blocking"| B4["Valid Setups Starved for 20s"]
     end
 
-    subgraph Track A In-Place Remedies
-        B1 --> C1[Single-Threaded Monotonic Event Wheel]
-        B2 --> C2[Discrete Qualitative Matrix & Anchor Pricing]
-        B3 --> C3[Option Instrument Registration on Order Submit]
-        B4 --> C4[Non-Blocking Pool Iteration with Backoff]
+    subgraph Remedies ["Track A In-Place Remedies"]
+        B1 --> C1["Single-Threaded Monotonic Event Wheel"]
+        B2 --> C2["Discrete Qualitative Matrix & Anchor Pricing"]
+        B3 --> C3["Option Instrument Registration on Order Submit"]
+        B4 --> C4["Non-Blocking Pool Iteration with Backoff"]
     end
 ```
 
@@ -99,15 +99,15 @@ Retain the existing `CandidateScore` dataclass, but replace linear weight summat
 
 ```mermaid
 flowchart TD
-    Setup[Incoming Breakout Setup] --> RegimeCheck{Market Regime State}
+    Setup["Incoming Breakout Setup"] --> RegimeCheck{"Market Regime State"}
     
-    RegimeCheck -->|Trending Aligned| GateA[Fast Track: Volume > 1.8x, Retest Valid]
-    RegimeCheck -->|Neutral / Mixed| GateB[Standard Track: Volume > 2.5x, Tight Consolidation]
-    RegimeCheck -->|Counter-Trend| GateC[Strict Gate: Volume > 3.5x, VWAP Reversal]
+    RegimeCheck -->|"Trending Aligned"| GateA["Fast Track: Volume > 1.8x, Retest Valid"]
+    RegimeCheck -->|"Neutral / Mixed"| GateB["Standard Track: Volume > 2.5x, Tight Consolidation"]
+    RegimeCheck -->|"Counter-Trend"| GateC["Strict Gate: Volume > 3.5x, VWAP Reversal"]
     
-    GateA --> ExecutionTier[Tier 1: Full Position 1.0x]
-    GateB --> ExecutionTier2[Tier 2: Standard Position 0.7x]
-    GateC --> ExecutionTier3[Tier 3: Half Position 0.5x]
+    GateA --> ExecutionTier["Tier 1: Full Position 1.0x"]
+    GateB --> ExecutionTier2["Tier 2: Standard Position 0.7x"]
+    GateC --> ExecutionTier3["Tier 3: Half Position 0.5x"]
 ```
 
 ### 3.3 Rule Specifications

@@ -5,7 +5,7 @@
 > **Status**: Ready for Implementation Planning  
 > **Master Architecture**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/ARCHITECTURE_SPEC_2_0.md)  
 > **Signal & Strategy Spec**: [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/SCORING_ENGINE_3_0.md)  
-> **Active System Audit**: [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SYSTEM_AUDIT_2_0.md)  
+> **Last Updated**: 2026-11-26 | **Archived Audit**: [`2026-11-25_SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive/2026-11-25_SYSTEM_AUDIT_2_0.md)  
 
 ---
 
@@ -15,39 +15,39 @@ The system transitions from a single-threaded synchronous monolith into a distri
 
 ```mermaid
 flowchart TD
-    subgraph Market Ingestion Tier ["Market Ingestion Tier (Upstox API v3 Dual WebSocket)"]
+    subgraph MarketIngestion ["Market Ingestion Tier (Upstox API v3 Dual WebSocket)"]
         FeedWS_1["Upstox WS Conn 0 (Shard 0: ~107 Underlyings)"] --> FeedHandler["FeedHandler Process (Dual-Connection)"]
         FeedWS_2["Upstox WS Conn 1 (Shard 1: ~108 Underlyings)"] --> FeedHandler
-        FeedHandler -->|PUB: feed_equity.ipc| ZMQ_EQ[("ZeroMQ Equity Stream")]
-        FeedHandler -->|PUB: feed_options.ipc| ZMQ_OPT[("ZeroMQ Options Stream")]
-        
+        FeedHandler -->|"PUB: feed_equity.ipc"| ZMQ_EQ[("ZeroMQ Equity Stream")]
+        FeedHandler -->|"PUB: feed_options.ipc"| ZMQ_OPT[("ZeroMQ Options Stream")]
+
         ZMQ_EQ & ZMQ_OPT --> Recorder["Market Recorder Process"]
         Recorder --> RecStore[("Lossless Parquet Recordings")]
     end
 
-    subgraph State & In-Memory Store Tier
+    subgraph StateStore ["State & In-Memory Store Tier"]
         ZMQ_EQ --> CandleMgr["CandleManager Process"]
         CandleMgr -->|"Atomic In-Place Write (Zero Locks)"| SHM[("POSIX Shared Memory: shm_ohlc_221 (777 KB - L2 Cache)")]
-        
+
         ZMQ_OPT --> QuotesBroker["QuotesBroker / Ticker Plant Process"]
-        QuotesBroker -->|XPUB: quotes_stream.ipc| ZMQ_QUOTES[("ZeroMQ Option Quotes Stream")]
-        QuotesBroker <-->|REP: quotes_snapshot.ipc| QuotesSnap[("ZeroMQ REQ/REP Quotes")]
+        QuotesBroker -->|"XPUB: quotes_stream.ipc"| ZMQ_QUOTES[("ZeroMQ Option Quotes Stream")]
+        QuotesBroker <-->|"REP: quotes_snapshot.ipc"| QuotesSnap[("ZeroMQ REQ/REP Quotes")]
     end
 
-    subgraph Signal & Risk Tier
+    subgraph SignalRisk ["Signal & Risk Tier"]
         SHM -->|"Microsecond Spin-Loop (< 2 us)"| ScoringEng["Scoring Engine 3.0 Process"]
-        ScoringEng -->|PUSH: alerts_breakout.ipc| ZMQ_ALERTS[("ZeroMQ Alerts Queue")]
-        
+        ScoringEng -->|"PUSH: alerts_breakout.ipc"| ZMQ_ALERTS[("ZeroMQ Alerts Queue")]
+
         ZMQ_ALERTS --> RMS["RMS & Option Resolver Process"]
-        QuotesSnap <-->|Snapshot Check| RMS
-        RMS -->|PUB: rms_strike_pub.ipc| ZMQ_RMS[("ZeroMQ Candidate Strikes")]
+        QuotesSnap <-->|"Snapshot Check"| RMS
+        RMS -->|"PUB: rms_strike_pub.ipc"| ZMQ_RMS[("ZeroMQ Candidate Strikes")]
     end
 
-    subgraph Execution & Tracking Tier ["Execution Tier (Concurrent Multi-Mode Superstructures)"]
+    subgraph ExecTier ["Execution Tier (Concurrent Multi-Mode Superstructures)"]
         ZMQ_RMS --> SuperLive["Live Superstructure (Groww SDK)"]
         ZMQ_RMS --> SuperPaper["Paper Superstructure (Virtual Fills)"]
         ZMQ_RMS --> SuperDelayed["Delayed Superstructure (Cached Fills)"]
-        
+
         ZMQ_QUOTES --> SuperLive & SuperPaper & SuperDelayed
         SuperLive --> GrowwSDK["Groww Live Broker SDK (growwapi)"]
         SuperDelayed --> DelayedLog["Delayed Trade Journal (JSONL)"]
@@ -55,11 +55,11 @@ flowchart TD
         SuperLive --> LiveLog["Live Trade Journal (JSONL)"]
     end
 
-    subgraph Universal Monitoring Tier ["Universal Monitoring & Web Tier"]
+    subgraph MonitoringTier ["Universal Monitoring & Web Tier"]
         ZMQ_RMS --> WebServer["Analytics Web Server (web/server.py:8080)"]
-        DelayedLog & PaperLog & LiveLog -.->|Real-time MTM & Journals| WebServer
-        WebServer -->|WebSocket: /api/live/ws| WebUI["Analytics & Simulation Web UI (Browser)"]
-        WebServer -->|REST: /api/*| WebUI
+        DelayedLog & PaperLog & LiveLog -.->|"Real-time MTM & Journals"| WebServer
+        WebServer -->|"WebSocket: /api/live/ws"| WebUI["Analytics & Simulation Web UI (Browser)"]
+        WebServer -->|"REST: /api/*"| WebUI
     end
 ```
 
@@ -119,6 +119,8 @@ Trading Stuff/
 │   ├── server.py                      # AnalyticsWebServer (aiohttp, REST, WebSockets, teardown)
 │   ├── live_service.py                # LiveService (ZeroMQ LVC, real-time MTM, active cash)
 │   ├── simulation_service.py          # SimulationService (isolated worker process, batch queue, Parquet cache)
+│   ├── batch_analytics.py             # Cross-session batch leaderboard, DD/Calmar/retention metrics & exporters
+│   ├── regime_classifier.py           # F&O synthetic basket + 5m breadth market regime classifier & cache
 │   ├── candle_service.py              # CandleService (OHLCV scanning & aggregation)
 │   ├── alert_service.py               # AlertService (direct POSIX SHM read & trigger overlays)
 │   ├── historical_service.py          # HistoricalService (multi-session discovery & journal parsing)
@@ -550,19 +552,19 @@ flowchart TD
 
     subgraph SubFlagBreakout ["Archetype 1: Flag Breakout (< 2us)"]
         G4 -->|Yes| FlagCheck{"Check 7-bar history: 1-3 bar pole, 2-4 bar contraction"}
-        FlagCheck -->|Match| RetraceCheck{"Contraction Low holds 50% Pole Height? (Evaluated First!)"}
-        RetraceCheck -->|Yes: Retracement <= 50%| FitReg["Fit OLS Regression on Contraction Highs"]
-        RetraceCheck -->|No: Reversal| PureCheck
-        FitReg --> FlagTrig{"Close >= Reg Line Target AND RoV >= 2x Contraction RoV AND CLV >= 0.75?"}
-        FlagTrig -->|Trigger| AppendAction["Append to Actionable List"]
+        FlagCheck -->|"Match"| RetraceCheck{"Contraction Low holds 50% Pole Height?"}
+        RetraceCheck -->|"Yes: Retracement <= 50%"| FitReg["Fit OLS Regression on Contraction Highs"]
+        RetraceCheck -->|"No: Reversal"| PureCheck
+        FitReg --> FlagTrig{"Close >= Reg Line AND RoV >= 2x AND CLV >= 0.75?"}
+        FlagTrig -->|"Trigger"| AppendAction["Append to Actionable List"]
     end
 
     subgraph SubPureImpulse ["Archetype 2: Pure 3-Candle Impulse (< 1us)"]
-        FlagCheck -->|No Flag| PureCheck{"Breakout in last 3 bars?"}
-        PureCheck -->|Yes: Cooldown active| Skip
-        PureCheck -->|No| ImpulseCheck{"Thrust >= 2x Baseline Thrust AND Price > 3-Bar Combined High AND RoV >= 2x 3-Bar Avg RoV AND CLV >= 0.75?"}
-        ImpulseCheck -->|Trigger| AppendAction
-        ImpulseCheck -->|No| Skip
+        FlagCheck -->|"No Flag"| PureCheck{"Breakout in last 3 bars?"}
+        PureCheck -->|"Yes: Cooldown active"| Skip
+        PureCheck -->|"No"| ImpulseCheck{"Thrust >= 2x AND Close > 3-Bar High AND RoV >= 2x AND CLV >= 0.75?"}
+        ImpulseCheck -->|"Trigger"| AppendAction
+        ImpulseCheck -->|"No"| Skip
     end
 
     AppendAction --> NextSym["Next Symbol"]
@@ -684,29 +686,29 @@ To support multiple independent strategies and pluggable execution tracks withou
 
 ```mermaid
 flowchart TD
-    subgraph Strategy Config ["Strategy YAML Configuration (config/strategies/*.yaml)"]
-        Config["momentum_3_0.yaml<br/>• Scoring Engine: MomentumScoringEngine3<br/>• Core Tracks: [FastMomentum, TrendPullback]<br/>• Composite Tracks: [DynamicTrio (Capital Sharing: True)]"]
+    subgraph StrategyConfig ["Strategy Configuration (config/strategies.json & config/tracks/)"]
+        Config["strategies.json + tracks/default.json\n• Scoring Engine: MomentumScoringEngine3\n• Core Tracks: FastMomentum, TrendPullback, FixedTarget\n• Composite Tracks: SharedPool Composites"]
     end
 
     subgraph Factory ["Track Factory & Registry (common/tracks/factory.py)"]
         Config --> FactoryBuild["build_track_portfolio(config, execution_context)"]
-        Registry[("TRACK_REGISTRY<br/>• fast_momentum: FastMomentumTrack<br/>• trend_pullback: TrendPullbackTrack<br/>• composite: CompositeTrack")] -.-> FactoryBuild
+        Registry[("TRACK_REGISTRY\n• fast_momentum: FastMomentumTrack\n• trend_pullback: TrendPullbackTrack\n• composite: CompositeTrack")] -.-> FactoryBuild
     end
 
-    subgraph Track Hierarchy ["Pluggable Track Instances (common/tracks/)"]
+    subgraph TrackHierarchy ["Pluggable Track Instances (common/tracks/)"]
         FactoryBuild --> TrackA["Core Track 1: FastMomentumTrack"]
         FactoryBuild --> TrackB["Core Track 2: TrendPullbackTrack"]
-        FactoryBuild --> CompTrack["CompositeTrack: DynamicTrio"]
-        CompTrack --> SubTrack1["Sub-Track: ATMTrack (50% Capital)"]
-        CompTrack --> SubTrack2["Sub-Track: ITMTrack (50% Capital)"]
+        FactoryBuild --> CompTrack["CompositeTrack: Shared Capital Pool"]
+        CompTrack --> SubTrack1["Sub-Track: ATMTrack"]
+        CompTrack --> SubTrack2["Sub-Track: ITMTrack"]
     end
 
-    subgraph Mode Superstructure ["Mode Superstructure (Live / Paper / Delayed)"]
-        Context["ExecutionContext / ExecutionInterface<br/>• place_order()<br/>• modify_order()<br/>• cancel_order()"]
+    subgraph ModeSuperstructure ["Mode Superstructure (Live / Paper / Delayed)"]
+        Context["ExecutionContext / ExecutionInterface\n• place_order()\n• modify_order()\n• cancel_order()"]
         Quotes["Latest Quotes Cache + Stream Listener"]
-        
-        Quotes -->|on_tick| TrackA & TrackB & CompTrack
-        TrackA & TrackB & SubTrack1 & SubTrack2 -->|Order Signals via Parent Interface| Context
+
+        Quotes -->|"on_tick"| TrackA & TrackB & CompTrack
+        TrackA & TrackB & SubTrack1 & SubTrack2 -->|"Order Signals via Parent Interface"| Context
     end
 ```
 
@@ -931,7 +933,7 @@ class MarketRecorder:
 - **Core Architecture**:
   - `AnalyticsWebServer`: `aiohttp` web server hosting static assets, REST APIs, and WebSockets.
   - `LiveService`: Subscribes to `feed_options.ipc` and `quotes_stream.ipc`, updates Latest Value Cache (LVC), computes dynamic MTM, and streams updates every 1.0s over `/api/live/ws`.
-  - `SimulationService`: Spawns independent OS process (`multiprocessing.Process` executing `_simulation_worker_process`), completely bypassing the Python GIL to prevent UI freezing. Implements columnar DataFrame caching (`cached_equity_df`, `cached_options_df`) for sub-second re-runs, and manages batch simulation queues.
+  - `SimulationService`: Spawns independent OS process (`multiprocessing.Process` executing `_simulation_worker_process`), completely bypassing the Python GIL to prevent UI freezing. Implements columnar DataFrame caching (`cached_equity_df`, `cached_options_df`) for sub-second re-runs, and manages batch simulation queues, cross-session [`batch_analytics.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/batch_analytics.py) reports, and [`regime_classifier.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/regime_classifier.py) daily/window regime tagging.
   - `AlertService` & `CandleService`: Directly accesses `shm_ohlc_221` (POSIX Shared Memory) in $< 2\ \mu\text{s}$ to render live candlestick charts with alert breakout trigger overlays.
   - `HistoricalService`: Scans historical directories, parses trade journals, and delivers closed-trade analytics.
 
@@ -1021,12 +1023,12 @@ The system is operated via a unified CLI entry point (`runner.py`) orchestrating
 
 ```mermaid
 flowchart TD
-    CLI["runner.py CLI"] --> CMD_PREP["prepare<br/>• Fetch Master & Filter Universe<br/>• Build 1m Volume Profile<br/>(Stateless: Exits Cleanly)"]
-    CLI --> CMD_CORE["core --feed <ws|mock> --candlemanager --quotesbroker [--record]<br/>• Enforces Full Core Data Ingestion Tier<br/>• Can also start each independently (feed, candlemanager, quotesbroker, record)"]
-    CLI --> CMD_START["start --strategy <name> --mode <paper,delayed,live><br/>• Starts ScoringEngine3 & RMSResolver<br/>• Starts Specified Tracks per Mode<br/>• Implicitly Launches Dashboard UI"]
-    CLI --> CMD_DASH["dashboard<br/>• Standalone Detached Telemetry & Matrix"]
-    CLI --> CMD_SIM["sim --date <YYYYMMDD> --strategy <name><br/>• Monolithic In-Process Columnar Sim (3-5s)"]
-    CLI --> CMD_STOP["stop [--strategy | --core | --all]<br/>• --strategy: Strategy reload without dropping ticks<br/>• --all: Full EOD teardown + SHM Unlink"]
+    CLI["runner.py CLI"] --> CMD_PREP["prepare\n• Fetch Master & Filter Universe\n• Build 1m Volume Profile\n• Stateless: Exits Cleanly"]
+    CLI --> CMD_CORE["core --feed ws|mock --candlemanager --quotesbroker --record\n• Starts Full Core Data Ingestion Tier\n• Supports starting services independently"]
+    CLI --> CMD_START["start --strategy NAME --mode paper,delayed,live\n• Starts ScoringEngine3 & RMSResolver\n• Starts Specified Tracks per Mode"]
+    CLI --> CMD_WEB["web --host 0.0.0.0 --port 8080\n• Analytics & Simulation Web UI\n• Live WS, Batch Reports & Regime Tagging"]
+    CLI --> CMD_SIM["sim --date YYYYMMDD --strategy NAME\n• Monolithic Columnar Tick Replay"]
+    CLI --> CMD_STOP["stop --strategy | --core | --all\n• Graceful Process Teardown & SHM Unlink"]
 ```
 
 #### Detailed CLI Subcommands:
@@ -1249,7 +1251,7 @@ if __name__ == "__main__":
 
 ## 6. Self-Audit Bug Reconciliation Matrix
 
-This Low-Level Design natively eradicates the architectural vulnerabilities identified in [`SELF_AUDIT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive/SELF_AUDIT.md):
+This Low-Level Design natively eradicates the architectural vulnerabilities identified in [`2026-11-15_SELF_AUDIT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive/2026-11-15_SELF_AUDIT.md):
 
 | Bug ID | Severity | Root Cause in Legacy Code | Architectural Resolution in LLD 2.0 |
 | :--- | :--- | :--- | :--- |

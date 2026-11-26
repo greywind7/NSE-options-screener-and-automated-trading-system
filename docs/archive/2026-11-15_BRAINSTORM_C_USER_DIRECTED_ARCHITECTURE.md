@@ -12,40 +12,40 @@ Instead of a monolithic Python process burdened by the Global Interpreter Lock (
 
 ```mermaid
 flowchart TD
-    subgraph Market Ingestion
-        WS[Broker WebSocket / Replay Feed] --> FeedHandler[Feed Listener Process]
-        FeedHandler -->|ZMQ PUB: Equity Ticks| SocketEq[ipc:///tmp/feed_equity.ipc]
-        FeedHandler -->|ZMQ PUB: Option Ticks| SocketOpt[ipc:///tmp/feed_options.ipc]
+    subgraph MarketIngestion ["Market Ingestion"]
+        WS["Broker WebSocket / Replay Feed"] --> FeedHandler["Feed Listener Process"]
+        FeedHandler -->|"ZMQ PUB: Equity Ticks"| SocketEq["ipc:///tmp/feed_equity.ipc"]
+        FeedHandler -->|"ZMQ PUB: Option Ticks"| SocketOpt["ipc:///tmp/feed_options.ipc"]
     end
 
-    subgraph Data & State Managers
-        SocketEq --> CandleMgr[Candle / OHLC Manager Process]
-        SocketOpt --> QuotesMgr[Quotes & Depth Manager Process]
+    subgraph DataManagers ["Data & State Managers"]
+        SocketEq --> CandleMgr["Candle / OHLC Manager Process"]
+        SocketOpt --> QuotesMgr["Quotes & Depth Manager Process"]
         
-        CandleMgr -->|Single Writer| ShmCandles[(Shared Memory: OHLCV & Indicators)]
-        QuotesMgr -->|Single Writer| ShmQuotes[(Shared Memory: Option Depth & Greeks)]
-        QuotesMgr -->|Circular Buffer| RingBuffer[(10-Min Historical Depth Cache)]
+        CandleMgr -->|"Single Writer"| ShmCandles[("Shared Memory: OHLCV & Indicators")]
+        QuotesMgr -->|"Single Writer"| ShmQuotes[("Shared Memory: Option Depth & Greeks")]
+        QuotesMgr -->|"Circular Buffer"| RingBuffer[("10-Min Historical Depth Cache")]
         
-        CandleMgr -->|ZMQ PUB: Bar Closed Events| SocketEvents[ipc:///tmp/market_events.ipc]
+        CandleMgr -->|"ZMQ PUB: Bar Closed Events"| SocketEvents["ipc:///tmp/market_events.ipc"]
     end
 
-    subgraph Strategy & Alpha
-        ShmCandles -.->|Lock-Free Reader| Strat1[Momentum Strategy Engine]
-        ShmCandles -.->|Lock-Free Reader| Strat2[Future Strategies...]
-        ShmQuotes -.->|Lock-Free Reader| Strat1
+    subgraph StrategyAlpha ["Strategy & Alpha"]
+        ShmCandles -.->|"Lock-Free Reader"| Strat1["Momentum Strategy Engine"]
+        ShmCandles -.->|"Lock-Free Reader"| Strat2["Future Strategies"]
+        ShmQuotes -.->|"Lock-Free Reader"| Strat1
         SocketEvents --> Strat1
         
-        Strat1 -->|ZMQ PUSH: Order Intents| SocketOrders[ipc:///tmp/order_router.ipc]
+        Strat1 -->|"ZMQ PUSH: Order Intents"| SocketOrders["ipc:///tmp/order_router.ipc"]
     end
 
-    subgraph Execution & Routing
-        SocketOrders --> Router[Order Execution Router]
-        Router -->|Live Intents| LiveExec[Live Broker Process]
-        Router -->|Paper Intents| PaperExec[Paper Execution Engine]
-        Router -->|Delayed Intents| DelayedExec[Look-Ahead Delayed Engine]
+    subgraph ExecutionRouting ["Execution & Routing"]
+        SocketOrders --> Router["Order Execution Router"]
+        Router -->|"Live Intents"| LiveExec["Live Broker Process"]
+        Router -->|"Paper Intents"| PaperExec["Paper Execution Engine"]
+        Router -->|"Delayed Intents"| DelayedExec["Look-Ahead Delayed Engine"]
         
-        RingBuffer -.->|Instant Lookahead Lookup| DelayedExec
-        ShmQuotes -.->|Instant Depth Lookup| PaperExec
+        RingBuffer -.->|"Instant Lookahead Lookup"| DelayedExec
+        ShmQuotes -.->|"Instant Depth Lookup"| PaperExec
     end
 ```
 
@@ -103,22 +103,22 @@ The Strategy Engine evaluates setups against a deterministic **Feature Matrix**:
 
 ```mermaid
 flowchart LR
-    subgraph Market Regime Filter
-        R1[Regime: STRONG_TREND] --> M1[Allow All Quality Tiers]
-        R2[Regime: NEUTRAL_RANGE] --> M2[Allow Tier 1 Only]
-        R3[Regime: CHOPPY / CONTRACTION] --> M3[Trading HALTED]
+    subgraph RegimeFilter ["Market Regime Filter"]
+        R1["Regime: STRONG_TREND"] --> M1["Allow All Quality Tiers"]
+        R2["Regime: NEUTRAL_RANGE"] --> M2["Allow Tier 1 Only"]
+        R3["Regime: CHOPPY / CONTRACTION"] --> M3["Trading HALTED"]
     end
 
-    subgraph Structural Pattern Predicates
-        P1[Range Compression >= 4 Bars]
-        P2[Volume Surge >= 2.5x Median]
-        P3[Close in Top 15% of Candle]
-        P4[Spread <= 2.0%]
+    subgraph StructuralPredicates ["Structural Pattern Predicates"]
+        P1["Range Compression >= 4 Bars"]
+        P2["Volume Surge >= 2.5x Median"]
+        P3["Close in Top 15% of Candle"]
+        P4["Spread <= 2.0%"]
     end
 
-    P1 & P2 & P3 & P4 --> Qualify{Meets All Invariants?}
-    Qualify -->|Yes| Order[Emit OrderIntent: Tier 1]
-    Qualify -->|No| Discard[Discard Setup]
+    P1 & P2 & P3 & P4 --> Qualify{"Meets All Invariants?"}
+    Qualify -->|"Yes"| Order["Emit OrderIntent: Tier 1"]
+    Qualify -->|"No"| Discard["Discard Setup"]
 ```
 
 ### 3.3 Qualitative Setup Matrix Specification
@@ -176,17 +176,17 @@ Separate the simulation data into two distinct structures:
 
 ```mermaid
 flowchart TD
-    RawCSV[4.4GB Daily Tick Recording] --> ETL[One-Time Fast ETL / Polars Ingestion]
+    RawCSV["4.4GB Daily Tick Recording"] --> ETL["One-Time Fast ETL / Polars Ingestion"]
     
-    ETL --> EqStream[Clean Equity Ticks / 1s Bars ~50MB]
-    ETL --> OptParquet[Sorted Columnar Option Depth Table ~400MB]
+    ETL --> EqStream["Clean Equity Ticks / 1s Bars (~50MB)"]
+    ETL --> OptParquet["Sorted Columnar Option Depth Table (~400MB)"]
     
-    subgraph Lightning Simulation Engine
-        EqStream -->|Stream at 200,000 ticks/sec| SimStrategy[Strategy Alpha & Pattern Detector]
-        SimStrategy -->|Breakout Signal at Ts = T| Trigger[Query Target Option Strike]
+    subgraph SimEngine ["Lightning Simulation Engine"]
+        EqStream -->|"Stream at 200,000 ticks/sec"| SimStrategy["Strategy Alpha & Pattern Detector"]
+        SimStrategy -->|"Breakout Signal at Ts = T"| Trigger["Query Target Option Strike"]
         
-        Trigger -->|O log N Binary ASOF Join| OptParquet
-        OptParquet -->|Instant Depth & Fill Price| Trigger
+        Trigger -->|"O(log N) Binary ASOF Join"| OptParquet
+        OptParquet -->|"Instant Depth & Fill Price"| Trigger
     end
 ```
 
@@ -213,15 +213,15 @@ The `OrderRouter` receives orders from strategies and fans them out to independe
 
 ```mermaid
 flowchart LR
-    Router[Order Router Process]
+    Router["Order Router Process"]
     
-    Router -->|ZMQ PULL/PUSH| LiveWorker[Live Broker Worker Process]
-    Router -->|ZMQ PULL/PUSH| PaperWorker[Instant Paper Worker Process]
-    Router -->|ZMQ PULL/PUSH| DelayedWorker[Look-Ahead Delayed Worker Process]
+    Router -->|"ZMQ PULL/PUSH"| LiveWorker["Live Broker Worker Process"]
+    Router -->|"ZMQ PULL/PUSH"| PaperWorker["Instant Paper Worker Process"]
+    Router -->|"ZMQ PULL/PUSH"| DelayedWorker["Look-Ahead Delayed Worker Process"]
     
-    LiveWorker --> BrokerAPI[Broker Gateway / Exchange]
-    PaperWorker --> PaperLedger[Paper Journal]
-    DelayedWorker --> DelayedLedger[Delayed Journal]
+    LiveWorker --> BrokerAPI["Broker Gateway / Exchange"]
+    PaperWorker --> PaperLedger["Paper Journal"]
+    DelayedWorker --> DelayedLedger["Delayed Journal"]
 ```
 
 ---

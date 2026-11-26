@@ -97,6 +97,11 @@ class AnalyticsWebServer:
         self.app.router.add_get("/api/sim/runs", self.handle_sim_runs_list)
         self.app.router.add_get("/api/sim/run/{run_id}", self.handle_sim_run_detail)
         self.app.router.add_post("/api/sim/clear", self.handle_sim_clear)
+        self.app.router.add_get("/api/sim/batches", self.handle_sim_batches_list)
+        self.app.router.add_post("/api/sim/batches", self.handle_sim_batches_create)
+        self.app.router.add_get("/api/sim/batch/{batch_id}", self.handle_sim_batch_detail)
+        self.app.router.add_get("/api/sim/batch/{batch_id}/export", self.handle_sim_batch_export)
+        self.app.router.add_get("/api/sim/regimes", self.handle_sim_regimes)
         self.app.router.add_get("/sim/results", self.handle_sim_results_page)
 
         # 4. Chart / Candle Aggregation Routes
@@ -328,6 +333,7 @@ class AnalyticsWebServer:
             {
                 "id": r["id"],
                 "date": r["date"],
+                "batch_id": r.get("batch_id"),
                 "runtime": r["runtime"],
                 "timestamp": r.get("timestamp", ""),
             }
@@ -354,6 +360,87 @@ class AnalyticsWebServer:
         if detail:
             return web.json_response({"status": "ok", "run": detail})
         return web.json_response({"error": f"Run '{run_id}' not found"}, status=404)
+
+    async def handle_sim_batches_list(self, request: web.Request) -> web.Response:
+        """Return registered batch summaries and multi-batch comparison table."""
+        payload = self.simulation_service.list_batches()
+        return web.json_response({
+            "status": "ok",
+            "server_boot_id": self.server_boot_id,
+            **payload,
+        })
+
+    async def handle_sim_batches_create(self, request: web.Request) -> web.Response:
+        """Register or update a batch grouping run IDs (defaults to all stored runs)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        batch_id = body.get("batch_id")
+        label = body.get("label")
+        run_ids = body.get("run_ids")
+        batch = self.simulation_service.create_or_update_batch(
+            batch_id=batch_id,
+            label=label,
+            run_ids=run_ids,
+        )
+        return web.json_response({
+            "status": "ok",
+            "batch": batch,
+        })
+
+    async def handle_sim_batch_detail(self, request: web.Request) -> web.Response:
+        """Return aggregated Batch Simulation Report (leaderboard, curves, and regime stats)."""
+        batch_id = request.match_info.get("batch_id", "")
+        regime_filter = request.query.get("regime")
+        intraday_window = request.query.get("window")
+        rank_by = request.query.get("rank_by", "net_pnl")
+
+        report = self.simulation_service.get_batch_report(
+            batch_id=batch_id,
+            regime_filter=regime_filter,
+            intraday_window=intraday_window,
+            rank_by=rank_by,
+        )
+        if report is None:
+            return web.json_response({"error": f"Batch '{batch_id}' not found"}, status=404)
+        return web.json_response({"status": "ok", "report": report})
+
+    async def handle_sim_batch_export(self, request: web.Request) -> web.Response:
+        """Export a Batch Simulation Report as Markdown or CSV download."""
+        batch_id = request.match_info.get("batch_id", "")
+        fmt = request.query.get("format", "md")
+        regime_filter = request.query.get("regime")
+        intraday_window = request.query.get("window")
+        rank_by = request.query.get("rank_by", "net_pnl")
+
+        exported = self.simulation_service.export_batch_report(
+            batch_id=batch_id,
+            fmt=fmt,
+            regime_filter=regime_filter,
+            intraday_window=intraday_window,
+            rank_by=rank_by,
+        )
+        if exported is None:
+            return web.json_response({"error": f"Batch '{batch_id}' not found"}, status=404)
+        content, content_type, filename = exported
+        return web.Response(
+            text=content,
+            content_type=content_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    async def handle_sim_regimes(self, request: web.Request) -> web.Response:
+        """Return cached/computed market regime diagnostics for requested dates or all recording dates."""
+        dates_raw = request.query.get("dates", "")
+        if dates_raw.strip():
+            dates = [d.strip() for d in dates_raw.split(",") if d.strip()]
+        else:
+            dates = [d["date"] for d in self.simulation_service.get_simulation_dates()]
+
+        regimes = [self.simulation_service.get_session_regime(d) for d in dates]
+        return web.json_response({"status": "ok", "regimes": regimes})
 
     # 4. Candle Aggregation Handler
     async def handle_chart_candles(self, request: web.Request) -> web.Response:

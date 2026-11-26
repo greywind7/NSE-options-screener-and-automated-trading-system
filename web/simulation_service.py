@@ -18,7 +18,14 @@ import polars as pl
 
 from core.common.time_utils import IST
 from simulation.columnar_sim_engine import ColumnarSimEngine
+from web.batch_analytics import (
+    build_batch_comparison_summary,
+    compute_batch_report,
+    export_batch_csv,
+    export_batch_markdown,
+)
 from web.candle_service import CandleService
+from web.regime_classifier import SessionRegimeClassifier
 
 
 def _safe_format_ts(ts: Optional[float]) -> str:
@@ -97,6 +104,8 @@ class SimulationService:
         self.latest_params: Optional[Dict[str, Any]] = None
         self.latest_error: Optional[str] = None
         self.runs_history: Dict[str, Dict[str, Any]] = {}
+        self.batches_history: Dict[str, Dict[str, Any]] = {}
+        self.regime_classifier = SessionRegimeClassifier(recordings_dir=recordings_dir)
         # Parameter hash deduplication cache: param_hash -> results dict
         self.cache_by_param_hash: Dict[str, Dict[str, Any]] = {}
 
@@ -144,7 +153,9 @@ class SimulationService:
 
         # Clear in-memory datasets and history
         self.runs_history.clear()
+        self.batches_history.clear()
         self.cache_by_param_hash.clear()
+        self.regime_classifier.clear_cache()
         self.cached_equity_df = None
         self.cached_options_df = None
         self.cached_date = None
@@ -448,6 +459,8 @@ class SimulationService:
             # Use passed run_id if available, else sequential RUN-N
             req_id = params.get("run_id")
             job_id = req_id if req_id else f"RUN-{len(self.runs_history) + 1}"
+            batch_id = params.get("batch_id")
+            batch_label = params.get("batch_label")
             self.current_job_id = job_id
             self.latest_results = None
             self.progress_status = "Initializing simulation..."
@@ -464,12 +477,19 @@ class SimulationService:
                 self.runs_history[job_id] = {
                     "id": job_id,
                     "date": target_date,
+                    "batch_id": batch_id,
                     "params": params,
                     "results": cached_res,
                     "runtime": 0.01,
                     "cached": True,
                     "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
                 }
+                if batch_id:
+                    self._register_run_in_batch(
+                        batch_id=str(batch_id),
+                        run_id=job_id,
+                        label=batch_label,
+                    )
                 return cached_res
 
             temp_fd, result_file = tempfile.mkstemp(prefix=f"sim_res_{job_id}_", suffix=".pkl")
@@ -543,11 +563,18 @@ class SimulationService:
             self.runs_history[job_id] = {
                 "id": job_id,
                 "date": target_date,
+                "batch_id": batch_id,
                 "params": params,
                 "results": results,
                 "runtime": round(self.last_run_time, 2),
                 "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
             }
+            if batch_id:
+                self._register_run_in_batch(
+                    batch_id=str(batch_id),
+                    run_id=job_id,
+                    label=batch_label,
+                )
             return results
 
         except Exception as e:
@@ -923,3 +950,179 @@ class SimulationService:
             })
 
         return curve
+
+    # ------------------------------------------------------------------
+    # Batch Simulation Reporting & Market Regime Analytics
+    # ------------------------------------------------------------------
+    def _register_run_in_batch(
+        self,
+        batch_id: str,
+        run_id: str,
+        label: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Register or append a completed simulation run ID under a logical batch."""
+        batch = self.batches_history.get(batch_id)
+        if batch is None:
+            batch = {
+                "batch_id": batch_id,
+                "label": label or batch_id,
+                "run_ids": [],
+                "created_at": datetime.now(IST).strftime("%H:%M:%S"),
+            }
+            self.batches_history[batch_id] = batch
+        elif label and batch.get("label") == batch_id:
+            batch["label"] = label
+
+        if run_id and run_id not in batch["run_ids"]:
+            batch["run_ids"].append(run_id)
+        return batch
+
+    def get_session_regime(self, target_date: str) -> Dict[str, Any]:
+        """Classify and cache market regime for a session date (in-memory DF or Parquet)."""
+        eq_df = self.cached_equity_df if self.cached_date == target_date else None
+        return self.regime_classifier.get_regime(target_date, equity_df=eq_df)
+
+    def create_or_update_batch(
+        self,
+        batch_id: Optional[str] = None,
+        label: Optional[str] = None,
+        run_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Create or update a batch record from explicit or currently stored completed runs."""
+        resolved_id = (batch_id or "").strip() or f"BATCH-{len(self.batches_history) + 1}"
+        if run_ids is None:
+            candidate_ids = list(self.runs_history.keys())
+        else:
+            candidate_ids = [rid for rid in run_ids if rid in self.runs_history]
+
+        batch = {
+            "batch_id": resolved_id,
+            "label": (label or "").strip() or resolved_id,
+            "run_ids": list(dict.fromkeys(candidate_ids)),
+            "created_at": (
+                self.batches_history[resolved_id].get("created_at")
+                if resolved_id in self.batches_history
+                else datetime.now(IST).strftime("%H:%M:%S")
+            ),
+        }
+        self.batches_history[resolved_id] = batch
+        for rid in batch["run_ids"]:
+            if rid in self.runs_history and not self.runs_history[rid].get("batch_id"):
+                self.runs_history[rid]["batch_id"] = resolved_id
+        return batch
+
+    def _resolve_batch_runs(self, batch_id: str) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Resolve runs list for an explicit batch_id or the virtual '__all__' aggregate batch."""
+        if batch_id in ("__all__", "all", "ALL"):
+            runs = [r for r in self.runs_history.values() if r.get("results")]
+            dates = sorted({str(r.get("date") or "") for r in runs if r.get("date")})
+            label = f"All Runs ({dates[0]} to {dates[-1]})" if len(dates) >= 2 else "All Completed Runs"
+            meta = {
+                "batch_id": "__all__",
+                "label": label,
+                "run_ids": [r["id"] for r in runs],
+                "created_at": "",
+            }
+            return meta, runs
+
+        meta = self.batches_history.get(batch_id)
+        if meta is None:
+            # Also match runs directly if stored runs carry batch_id without prior explicit registration
+            direct_runs = [
+                r for r in self.runs_history.values()
+                if r.get("batch_id") == batch_id and r.get("results")
+            ]
+            if not direct_runs:
+                return None, []
+            meta = self.create_or_update_batch(
+                batch_id=batch_id,
+                label=batch_id,
+                run_ids=[r["id"] for r in direct_runs],
+            )
+
+        runs = [
+            self.runs_history[rid]
+            for rid in meta.get("run_ids", [])
+            if rid in self.runs_history and self.runs_history[rid].get("results")
+        ]
+        return meta, runs
+
+    def get_batch_report(
+        self,
+        batch_id: str,
+        regime_filter: Optional[str] = None,
+        intraday_window: Optional[str] = None,
+        rank_by: str = "net_pnl",
+    ) -> Optional[Dict[str, Any]]:
+        """Build full aggregated Batch Simulation Report with cached market regimes."""
+        meta, runs = self._resolve_batch_runs(batch_id)
+        if meta is None:
+            return None
+
+        regimes_by_date: Dict[str, Dict[str, Any]] = {}
+        for r in runs:
+            d = str(r.get("date") or "")
+            if d and d not in regimes_by_date:
+                regimes_by_date[d] = self.get_session_regime(d)
+
+        return compute_batch_report(
+            runs=runs,
+            regimes_by_date=regimes_by_date,
+            batch_id=meta["batch_id"],
+            batch_label=meta.get("label") or meta["batch_id"],
+            regime_filter=regime_filter,
+            intraday_window=intraday_window,
+            rank_by=rank_by,
+        )
+
+    def list_batches(self) -> Dict[str, Any]:
+        """List registered batches plus multi-batch comparison metrics when multiple exist."""
+        reports: List[Dict[str, Any]] = []
+        items: List[Dict[str, Any]] = []
+
+        for bid in list(self.batches_history.keys()):
+            rep = self.get_batch_report(bid)
+            if not rep:
+                continue
+            reports.append(rep)
+            sm = rep["summary"]
+            items.append({
+                "batch_id": bid,
+                "label": rep["batch_label"],
+                "created_at": self.batches_history[bid].get("created_at", ""),
+                "sessions": sm["total_sessions"],
+                "date_start": sm["date_start"],
+                "date_end": sm["date_end"],
+                "portfolio_avg_net_pnl": sm["portfolio_avg_net_pnl"],
+                "portfolio_max_dd_pct": sm["portfolio_max_dd_pct"],
+                "portfolio_daily_win_rate_pct": sm["portfolio_daily_win_rate_pct"],
+                "track_count": sm["track_count"],
+            })
+
+        return {
+            "batches": items,
+            "comparison": build_batch_comparison_summary(reports) if len(reports) >= 2 else [],
+            "completed_runs_count": sum(1 for r in self.runs_history.values() if r.get("results")),
+        }
+
+    def export_batch_report(
+        self,
+        batch_id: str,
+        fmt: str = "md",
+        regime_filter: Optional[str] = None,
+        intraday_window: Optional[str] = None,
+        rank_by: str = "net_pnl",
+    ) -> Optional[Tuple[str, str, str]]:
+        """Export a batch report as (content, content_type, filename)."""
+        rep = self.get_batch_report(
+            batch_id,
+            regime_filter=regime_filter,
+            intraday_window=intraday_window,
+            rank_by=rank_by,
+        )
+        if rep is None:
+            return None
+        safe_id = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in batch_id)
+        if fmt.lower() == "csv":
+            return export_batch_csv(rep), "text/csv", f"batch_report_{safe_id}.csv"
+        return export_batch_markdown(rep), "text/markdown", f"batch_report_{safe_id}.md"

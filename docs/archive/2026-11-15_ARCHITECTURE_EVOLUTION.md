@@ -14,8 +14,8 @@ The trading engine has undergone two foundational architectural rewrites driven 
 
 ```mermaid
 flowchart LR
-    A["Version Alpha<br/>(Ad-hoc RVOL Scripts)"] -->|"Scalability & Latency Wall"| B["Architecture 1.0<br/>(Monolithic Event Loop & Local IPC)"]
-    B -->|"Option Deluge & Lock Contention"| C["Architecture 2.0<br/>(Modular Distributed Engine & POSIX SHM)"]
+    A["Version Alpha\n(Ad-hoc RVOL Scripts)"] -->|"Scalability & Latency Wall"| B["Architecture 1.0\n(Monolithic Event Loop & Local IPC)"]
+    B -->|"Option Deluge & Lock Contention"| C["Architecture 2.0\n(Modular Distributed Engine & POSIX SHM)"]
 ```
 
 | Dimension | Version Alpha | Architecture 1.0 | Architecture 2.0 (Current) |
@@ -93,31 +93,31 @@ Architecture 2.0 (the current production architecture) completely dismantles the
 
 ```mermaid
 flowchart TD
-    subgraph Market Ingestion Tier
+    subgraph MarketIngestion ["Market Ingestion Tier"]
         FeedHandler["FeedHandler Process"]
-        FeedHandler -->|feed_equity.ipc| ZMQ_EQ["ZeroMQ Equity Stream"]
-        FeedHandler -->|feed_options.ipc| ZMQ_OPT["ZeroMQ Options Stream"]
+        FeedHandler -->|"feed_equity.ipc"| ZMQ_EQ["ZeroMQ Equity Stream"]
+        FeedHandler -->|"feed_options.ipc"| ZMQ_OPT["ZeroMQ Options Stream"]
     end
 
-    subgraph State & In-Memory Store Tier
+    subgraph StateStore ["State & In-Memory Store Tier"]
         ZMQ_EQ --> CandleMgr["CandleManager Process"]
-        CandleMgr -->|Atomic Write| SHM[("POSIX Shared Memory: shm_ohlc_221 (777 KB in L2 Cache)")]
+        CandleMgr -->|"Atomic Write"| SHM[("POSIX Shared Memory: shm_ohlc_221 (777 KB in L2 Cache)")]
         
         ZMQ_OPT --> QuotesBroker["QuotesBroker (Ticker Plant & LVC)"]
-        QuotesBroker -->|quotes_stream.ipc| ZMQ_QUOTES["Quotes Stream + 1s Heartbeat"]
-        QuotesBroker <-->|quotes_snapshot.ipc| QuotesSnap["Snapshot REQ/REP"]
+        QuotesBroker -->|"quotes_stream.ipc"| ZMQ_QUOTES["Quotes Stream + 1s Heartbeat"]
+        QuotesBroker <-->|"quotes_snapshot.ipc"| QuotesSnap["Snapshot REQ/REP"]
     end
 
-    subgraph Signal & Risk Tier
-        SHM -->|Lock-Free Spin-Loop: < 2 us| ScoringEng["Scoring Engine 3.0 Process"]
-        ScoringEng -->|alerts_breakout.ipc| ZMQ_ALERTS["Breakout Alerts Queue"]
+    subgraph SignalRisk ["Signal & Risk Tier"]
+        SHM -->|"Lock-Free Spin-Loop: < 2 us"| ScoringEng["Scoring Engine 3.0 Process"]
+        ScoringEng -->|"alerts_breakout.ipc"| ZMQ_ALERTS["Breakout Alerts Queue"]
         
         ZMQ_ALERTS --> RMS["RMS & Option Resolver Process"]
-        QuotesSnap <-->|Snapshot Check| RMS
-        RMS -->|rms_strike_pub.ipc| ZMQ_RMS["Qualified Candidate Strikes"]
+        QuotesSnap <-->|"Snapshot Check"| RMS
+        RMS -->|"rms_strike_pub.ipc"| ZMQ_RMS["Qualified Candidate Strikes"]
     end
 
-    subgraph Execution Tier
+    subgraph ExecTier ["Execution Tier"]
         ZMQ_RMS --> Superstructure["Mode Superstructure (Live / Paper / Delayed)"]
         ZMQ_QUOTES --> Superstructure
         Superstructure --> CommonTracks["common/tracks/ (Core & Composite Tracks)"]

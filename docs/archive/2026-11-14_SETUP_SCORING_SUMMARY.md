@@ -15,11 +15,11 @@ Rather than relying on isolated indicators, the engine synthesizes four orthogon
 ## 1. 100-Point Pillar Architecture
 
 ```mermaid
-pie title 100-Point Setup Scoring Matrix (Strict 100 Cap)
-    "Volume & Variance (Z_vol)" : 25
-    "Position & Extreme Freshness" : 20
-    "Directional Momentum" : 30
-    "Day-Relative Micro-Tick Velocity" : 25
+xychart-beta
+    title "100-Point Setup Scoring Matrix (Strict 100 Cap)"
+    x-axis ["Volume & Variance", "Pos & Freshness", "Dir. Momentum", "Micro-Tick Vel."]
+    y-axis "Max Points" 0 --> 35
+    bar [25, 20, 30, 25]
 ```
 
 ```mermaid
@@ -307,10 +307,10 @@ flowchart TD
     B --> SL2["Up Stop Loss by 33%: R_stop 0.15 ➔ 0.1005 (Cut Downside Risk Early)"]
     
     Entry --> T35["Net Profit Crosses +3.5%"]
-    T35 --> Floor35["Lock Intermediate Trailing Floor at +2.5%<br/>Trails 1.0% behind peak profit"]
+    T35 --> Floor35["Lock Intermediate Trailing Floor at +2.5%\nTrails 1.0% behind peak profit"]
     
     Entry --> T50["Net Profit Hits Target (+5.0%)"]
-    T50 --> Runner["30-Second Target Runner Window Active<br/>Floor = max(Target, Peak - 1.0%)"]
+    T50 --> Runner["30-Second Target Runner Window Active\nFloor = max(Target, Peak - 1.0%)"]
     Runner --> RunnerExit["Exit on Floor Reversal or after 30s Window"]
 ```
 

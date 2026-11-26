@@ -13,28 +13,28 @@
 
 ```mermaid
 flowchart TD
-    RawTicks["Market Event Stream (Equities, Futures, Options)"] --> Stage1{"Stage 1: Binary Pattern Detection<br/>(Engine A: 7-Candle Flag | Engine B: Pure Impulse)"}
+    RawTicks["Market Event Stream (Equities, Futures, Options)"] --> Stage1{"Stage 1: Binary Pattern Detection\n(Engine A: 7-Candle Flag | Engine B: Pure Impulse)"}
     
     Stage1 -- "NO (Chop, Drift, Wide Retrace > 50%)" --> Discard["Discard / Idle"]
     Stage1 -- "YES (Valid Structure Verified)" --> DualCompute["Compute Dual Scores"]
     
-    subgraph DualScoringEngine["Dual-Number Scoring Engine"]
-        DualCompute --> S_rel["S_rel (0 - 100 Bounded)<br/>5-Pillar Relative Setup Quality"]
-        DualCompute --> S_abs["S_abs (Unbounded Kinetic Alpha)<br/>Zero-Clamp Institutional Force"]
+    subgraph DualScoringEngine ["Dual-Number Scoring Engine"]
+        DualCompute --> S_rel["S_rel (0 - 100 Bounded)\n5-Pillar Relative Setup Quality"]
+        DualCompute --> S_abs["S_abs (Unbounded Kinetic Alpha)\nZero-Clamp Institutional Force"]
     end
     
     S_rel --> ViewGate{"S_rel >= 67?"}
-    ViewGate -- YES --> Dashboard["Surface on Scanner Dashboard & Live Alerts"]
+    ViewGate -- "YES" --> Dashboard["Surface on Scanner Dashboard & Live Alerts"]
     
     S_rel --> ExecGate{"S_rel >= 70?"}
-    ExecGate -- NO --> Watchlist["Watchlist Only (Coiling / Incomplete)"]
-    ExecGate -- YES --> PoolEntry["Qualify for Execution Pool<br/>Inject at Timestamp T_0 with Initial S_abs"]
+    ExecGate -- "NO" --> Watchlist["Watchlist Only (Coiling / Incomplete)"]
+    ExecGate -- "YES" --> PoolEntry["Qualify for Execution Pool\nInject at Timestamp T_0 with Initial S_abs"]
     
-    subgraph ActionablePool["20-Second Actionable Pool & Auction"]
-        PoolEntry --> PowerDecay["Continuous Exponential Power Decay:<br/>S_decayed(t) = S_abs * (1 - (age / 20)^1.5)"]
+    subgraph ActionablePool ["20-Second Actionable Pool & Auction"]
+        PoolEntry --> PowerDecay["Continuous Exponential Power Decay:\nS_decayed(t) = S_abs * (1 - (age / 20)^1.5)"]
         PowerDecay --> StalenessCheck{"Age >= 20.0s?"}
-        StalenessCheck -- YES --> HardEviction["Hard Eviction (Purged Permanently)"]
-        StalenessCheck -- NO --> PreFillGuard{"Pre-Fill Invalidation Guard<br/>(Wicked down or reversed before fill?)"}
+        StalenessCheck -- "YES" --> HardEviction["Hard Eviction (Purged Permanently)"]
+        StalenessCheck -- "NO" --> PreFillGuard{"Pre-Fill Invalidation Guard\n(Wicked down or reversed before fill?)"}
         PreFillGuard -- "YES (Wicked Out)" --> CancelSetup["Abort Candidate (Disqualified)"]
         PreFillGuard -- "NO (Pristine)" --> AuctionSort["Sort Active Pool by S_decayed(t) Descending"]
     end
@@ -64,8 +64,8 @@ flowchart TD
     ConflatedScore --> Climax["ENTRY AT EXHAUSTION CLIMAX (Top-Ticking)"]
     Climax --> Retrace["Underlying Stalls / Retests / Mean-Reverts"]
     
-    Retrace --> OTM_Bleed["OTM Option Decimated<br/>(-7.5% Stop Hit via Spread + IV Crush + Theta)"]
-    Retrace --> ITM_Survive["ITM Option Survives<br/>(High Delta ~0.70 captures drift into rolling +2.5% target)"]
+    Retrace --> OTM_Bleed["OTM Option Decimated\n(-7.5% Stop Hit via Spread + IV Crush + Theta)"]
+    Retrace --> ITM_Survive["ITM Option Survives\n(High Delta ~0.70 captures drift into rolling +2.5% target)"]
 ```
 
 #### Flaw 1: The "Top-Ticking" Exhaustion Climax Paradox

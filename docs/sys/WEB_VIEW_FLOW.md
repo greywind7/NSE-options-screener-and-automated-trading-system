@@ -25,62 +25,63 @@ It directly succeeds and retires the legacy terminal ANSI/Rich dashboard (`runne
 ```mermaid
 flowchart TD
     subgraph Browser ["Client Tier (Modern Web Browser)"]
-        UI["Single Page Application (SPA)<br/>index.html / app.js"]
+        UI["Single Page Application (SPA)\nindex.html / app.js"]
         UI_Live["Live Tab: Real-Time MTM & Positions"]
         UI_Hist["Historical Tab: Past Sessions & Journals"]
-        UI_Sim["Simulation Tab: Single & Batch Runner"]
+        UI_Sim["Simulation Tab: Single, Batch & Regime Reports"]
         UI_Alerts["Alerts Tab: SHM Candlesticks & Triggers"]
-        UI_Standalone["Standalone Results Tab<br/>sim_results.html"]
-        
+        UI_Standalone["Standalone Results Tab\nsim_results.html"]
+
         UI --> UI_Live & UI_Hist & UI_Sim & UI_Alerts & UI_Standalone
     end
 
     subgraph WebServer ["Web Application Tier (aiohttp Asynchronous Server)"]
         Server["AnalyticsWebServer (web/server.py:8080)"]
-        
+
         WS_Endpoint["/api/live/ws (WebSocket Hub)"]
         REST_Live["/api/live/* (REST Handlers)"]
         REST_Hist["/api/historical/* (REST Handlers)"]
-        REST_Sim["/api/sim/* (REST Handlers)"]
+        REST_Sim["/api/sim/* (Single, Batch & Regime APIs)"]
         REST_Chart["/api/chart/candles (REST Handlers)"]
         REST_Alerts["/api/alerts/* (REST Handlers)"]
-        
+
         Server --> WS_Endpoint & REST_Live & REST_Hist & REST_Sim & REST_Chart & REST_Alerts
     end
 
     subgraph ServiceLayer ["Backend Service Infrastructure"]
         LiveSvc["LiveService (web/live_service.py)"]
         HistSvc["HistoricalService (web/historical_service.py)"]
-        SimSvc["SimulationService (web/simulation_service.py)"]
+        SimSvc["SimulationService + Batch & Regime Analytics"]
         CandleSvc["CandleService (web/candle_service.py)"]
         AlertSvc["AlertService (web/alert_service.py)"]
-        
+
         Server --> LiveSvc & HistSvc & SimSvc & CandleSvc & AlertSvc
     end
 
     subgraph WorkerTier ["Heavy Compute & Process Isolation"]
-        WorkerProc["Worker Process (_simulation_worker_process)<br/>Independent GIL & Memory Space"]
-        SimSvc -->|multiprocessing.Process| WorkerProc
+        WorkerProc["Worker Process (_simulation_worker_process)\nIndependent GIL & Memory Space"]
+        SimSvc -->|"multiprocessing.Process"| WorkerProc
         WorkerProc --> PolarsEngine["ColumnarSimEngine (Polars/Arrow)"]
     end
 
     subgraph StorageAndIPC ["Platform State & Storage Tier"]
         ZMQ_Opt["ZeroMQ: feed_options.ipc / quotes_stream.ipc"]
         SHM[("POSIX Shared Memory: shm_ohlc_221 (777 KB)")]
-        DiskJournals[("Trade Journals:<br/>recordings/YYYYMMDD/journal_*.jsonl")]
-        DiskParquet[("Lossless Parquet Ticks:<br/>recordings/YYYYMMDD/*.parquet")]
-        AlertsLog[("Alerts Log:<br/>logs/alerts_*.jsonl")]
-        
-        LiveSvc <-->|ZeroMQ SUB| ZMQ_Opt
-        LiveSvc <-->|Fast mtime Polling| DiskJournals
-        HistSvc <-->|Scan & Parse| DiskJournals
-        AlertSvc <-->|Direct Read (< 2 us)| SHM
-        AlertSvc <-->|Read| AlertsLog
-        CandleSvc <-->|Scan & Aggregate| DiskParquet
-        PolarsEngine <-->|Memory Map| DiskParquet
+        DiskJournals[("Trade Journals\nrecordings/YYYYMMDD/journal_*.jsonl")]
+        DiskParquet[("Lossless Parquet Ticks\nrecordings/YYYYMMDD/*.parquet")]
+        AlertsLog[("Alerts Log\nlogs/alerts_*.jsonl")]
+
+        LiveSvc <-->|"ZeroMQ SUB"| ZMQ_Opt
+        LiveSvc <-->|"Fast mtime Polling"| DiskJournals
+        HistSvc <-->|"Scan & Parse"| DiskJournals
+        AlertSvc <-->|"Direct Read (< 2 us)"| SHM
+        AlertSvc <-->|"Read"| AlertsLog
+        CandleSvc <-->|"Scan & Aggregate"| DiskParquet
+        PolarsEngine <-->|"Memory Map"| DiskParquet
+        SimSvc -.->|"5m F&O Basket Regimes"| DiskParquet
     end
 
-    WS_Endpoint <-->|Bi-directional 1s Heartbeat & Updates| UI_Live
+    WS_Endpoint <-->|"Bi-directional 1s Heartbeat & Updates"| UI_Live
     REST_Live <--> UI_Live
     REST_Hist <--> UI_Hist
     REST_Sim <--> UI_Sim
@@ -243,10 +244,14 @@ sequenceDiagram
   - Modes to simulate (`paper`, `paper_delayed`).
   - Active Tracks selection (`ALL`, `DYNAMIC_TRIO`, `ATM`, `ITM`, etc.).
   - Capital per track, Minimum Score, Minimum Pole %, Brokerage per order.
-- **Batch Mode Support**:
-  - Run across a list of dates or multiple track combinations sequentially.
-  - Queue persists across job completions, allowing the user to review each run's results without data being wiped out.
-  - Manual "Clear Queue" button resets all session runs and temporary files.
+- **Batch Mode Support & Cross-Session Batch Reports**:
+  - Run across a list of dates sequentially (`BATCH-<ts>`) with automatic run grouping, or group any ad-hoc completed runs (`__all__` / named batch snapshots).
+  - Queue persists across job completions; switching to **Batch Analytics & Multi-Day Report** displays:
+    - Unified **Track Rankings & Performance Leaderboard** separable by `All / Paper / Paper Delayed` with metric pills (`Net P&L`, `45° Linear Consistency`, `Max Green Days %`, `Calmar`, `Profit Factor`, `Expectancy ₹/Tr`, `Lowest Max DD %`, `Delayed Retention %`, `Daily Sharpe`) and **Session-by-Session P&L Attribution**.
+    - Paper vs. Paper-Delayed retention `%` and slippage cost (`₹`), fixed-color Spotlight Winner cards, and Multi-Batch side-by-side comparison.
+    - Dual 1:1 Square Cumulative Multi-Day Charts: **Spotlight Winners Comparison (`BatchWinnersChart`)** with fixed metric colors and alternating colored dashes for multi-winners alongside **Track/Portfolio Equity & Underwater Drawdown (`BatchEquityDrawdownChart`)**.
+    - Deterministic F&O Synthetic Basket & Breadth Market Regime tagging (`TREND_UP`, `TREND_DOWN`, `CHOPPY_RANGE`, `V_REVERSAL`, `HIGH_VOL_EXPIRY`), intraday window slicing (`OPENING`, `MIDDAY`, `CLOSING`), and Markdown / CSV export.
+  - Manual "Clear Queue" button resets all session runs, registered batches, regime cache, and temporary files.
 - **Pop-Out Results Viewer**:
   - Clicking "Open in New Tab" opens `/sim/results?run_id=<id>` for distraction-free analysis and report export.
 
@@ -284,7 +289,12 @@ sequenceDiagram
 | `GET` | `/api/sim/results` | None | Returns latest simulation run results or running progress status. |
 | `GET` | `/api/sim/runs` | None | Returns history list of completed simulation runs in current server session. |
 | `GET` | `/api/sim/run/{run_id}` | None | Returns full trade journal and performance matrix for a specific run ID. |
-| `POST`| `/api/sim/clear` | None | Clears all simulation history, temporary pickle files, and cached datasets. |
+| `GET` | `/api/sim/batches` | None | Returns registered batches list and multi-batch comparison table. |
+| `POST`| `/api/sim/batches` | `batch_id`, `label`, `run_ids` | Creates or snapshots a named simulation batch from completed runs. |
+| `GET` | `/api/sim/batch/{batch_id}` | `regime`, `window`, `rank_by` | Returns full cross-session Batch Report, curves, spotlights, and regime breakdowns. |
+| `GET` | `/api/sim/batch/{batch_id}/export` | `format=md\|csv`, `regime`, `window`, `rank_by` | Exports the Batch Simulation Report as Markdown or CSV attachment. |
+| `GET` | `/api/sim/regimes` | `dates` (comma-separated, optional) | Returns cached F&O synthetic basket & breadth regime tags per recording date. |
+| `POST`| `/api/sim/clear` | None | Clears all simulation history, batch groups, regime cache, temp files, and datasets. |
 | `GET` | `/api/chart/candles` | `date`, `token`, `symbol`, `is_option`, `interval` | Aggregates and returns OHLCV candles from Parquet recordings. |
 | `GET` | `/api/alerts` | `date` (optional) | Returns setup alerts list (top 5 actionable + chronological log). |
 | `GET` | `/api/alerts/candles` | `symbol`, `date`, `trigger_price`, `trigger_ts` | Returns 5m candles attached to SHM or Parquet with trigger overlay. |

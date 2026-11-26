@@ -15,25 +15,25 @@ Track B redesigns the system from first principles using an **Event-Sourced Micr
 
 ```mermaid
 flowchart TD
-    subgraph Inbound Adapters [Market Feeds & Triggers]
-        F1[Broker WebSocket Adapter]
-        F2[Historical Bar/Tick Replay Adapter]
-        F3[CLI & Admin Management Adapter]
+    subgraph InboundAdapters ["Market Feeds & Triggers"]
+        F1["Broker WebSocket Adapter"]
+        F2["Historical Bar/Tick Replay Adapter"]
+        F3["CLI & Admin Management Adapter"]
     end
 
-    subgraph Core Domain Microkernel [Deterministic Pure Logic]
-        Bus((Deterministic Event Bus))
-        Clock[Virtualized Clock Engine]
-        State[Immutable Domain State]
+    subgraph CoreDomain ["Deterministic Pure Logic"]
+        Bus(("Deterministic Event Bus"))
+        Clock["Virtualized Clock Engine"]
+        State["Immutable Domain State"]
         
         Bus <--> Clock
         Bus <--> State
         
-        subgraph Domain Engines
-            FE[Time-Series Feature Engine]
-            SM[State-Machine Alpha Engine]
-            RM[Pre-Trade Risk & Margin Guardian]
-            PM[Ledger & Position Manager]
+        subgraph DomainEngines ["Domain Engines"]
+            FE["Time-Series Feature Engine"]
+            SM["State-Machine Alpha Engine"]
+            RM["Pre-Trade Risk & Margin Guardian"]
+            PM["Ledger & Position Manager"]
         end
         
         Bus <--> FE
@@ -42,12 +42,12 @@ flowchart TD
         Bus <--> PM
     end
 
-    subgraph Outbound Adapters [Execution Venues & Sinks]
-        V1[Live Broker Execution Venue]
-        V2[Deterministic Paper Venue]
-        V3[Virtualized Latency Venue]
-        L1[Fast Parquet/DuckDB Event Store]
-        D1[Curses/Web Console Visualizer]
+    subgraph OutboundAdapters ["Execution Venues & Sinks"]
+        V1["Live Broker Execution Venue"]
+        V2["Deterministic Paper Venue"]
+        V3["Virtualized Latency Venue"]
+        L1["Fast Parquet/DuckDB Event Store"]
+        D1["Curses/Web Console Visualizer"]
     end
 ```
 
@@ -126,24 +126,24 @@ Each tracked equity maintains a pre-allocated fixed-size circular array in conti
 
 ```mermaid
 flowchart LR
-    Tick[New Tick Stream] --> Ingest[Direct Buffer Insert]
+    Tick["New Tick Stream"] --> Ingest["Direct Buffer Insert"]
     
-    subgraph Pre-Allocated Circular Memory Buffer
-        B0[Index 0]
-        B1[Index 1]
-        B2[Index 2]
-        B3[Index ...]
-        BN[Index Max-1]
-        Head((Pointer Head))
+    subgraph RingBuffer ["Pre-Allocated Circular Memory Buffer"]
+        B0["Index 0"]
+        B1["Index 1"]
+        B2["Index 2"]
+        B3["Index ..."]
+        BN["Index Max-1"]
+        Head(("Pointer Head"))
     end
     
     Ingest --> Head
     Head -.-> B2
     
-    subgraph Vectorized Math Engine
-        Head --> FastATR[Numba Vectorized ATR]
-        Head --> FastVWAP[Running Sum VWAP]
-        Head --> FastRange[Min/Max Range Expansion]
+    subgraph VectorMath ["Vectorized Math Engine"]
+        Head --> FastATR["Numba Vectorized ATR"]
+        Head --> FastVWAP["Running Sum VWAP"]
+        Head --> FastRange["Min/Max Range Expansion"]
     end
 ```
 

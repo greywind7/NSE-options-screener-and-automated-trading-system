@@ -15,8 +15,8 @@ The methodology for detecting explosive institutional breakouts has evolved thro
 
 ```mermaid
 flowchart LR
-    A["Version Alpha<br/>(Static rVOL Threshold)"] -->|"Morning Skew & False Positives"| B["Scoring 1.0 & 2.0<br/>(100-Point Linear Score & Regime Bonus)"]
-    B -->|"Dud Inflation & Winner Clamping"| C["Scoring Engine 3.0<br/>(Zero Continuous Score & Physical Invariants)"]
+    A["Version Alpha\n(Static rVOL Threshold)"] -->|"Morning Skew & False Positives"| B["Scoring 1.0 & 2.0\n(100-Point Linear Score & Regime Bonus)"]
+    B -->|"Dud Inflation & Winner Clamping"| C["Scoring Engine 3.0\n(Zero Continuous Score & Physical Invariants)"]
 ```
 
 | Dimension | Version Alpha | Scoring 1.0 & 2.0 | Scoring Engine 3.0 (Current) |
@@ -52,11 +52,11 @@ $$\text{rVOL} = \frac{\text{Current Cumulative Volume}}{\text{Average Daily Volu
 To address Alpha's shortcomings, Scoring 1.0 and 2.0 constructed a multi-factor quantitative model aggregating four orthogonal pillars into a normalized 0–100 score:
 
 ```mermaid
-pie title 100-Point Scoring Matrix (Legacy 1.0 / 2.0)
-    "Pillar 1: Volume & Variance (Z_vol)" : 25
-    "Pillar 2: Position & Extreme Freshness" : 20
-    "Pillar 3: Directional Momentum" : 30
-    "Pillar 4: Day-Relative Micro-Tick Velocity" : 25
+xychart-beta
+    title "100-Point Scoring Matrix (Legacy 1.0 / 2.0)"
+    x-axis ["Volume & Variance", "Pos & Freshness", "Dir. Momentum", "Micro-Tick Vel."]
+    y-axis "Max Points" 0 --> 35
+    bar [25, 20, 30, 25]
 ```
 
 - **Pillar 1 (Volume & Variance - 25 pts)**: Historical 5m rVOL (15 pts), cadenced variance surge $Z_{\text{vol}}$ (10 pts), inactivity decay (-15 pts).
@@ -94,28 +94,28 @@ flowchart TD
     
     subgraph SubEarlyGates ["O(1) Micro-Gates (< 50ns)"]
         Iterate --> G1{"Candle ts == Cached ts?"}
-        G1 -->|Yes| Skip["Skip to Next Symbol"]
-        G1 -->|No| G2{"Status active on current ts?"}
-        G2 -->|Yes| Skip
-        G2 -->|No| G3{"Strict 5m rVOL >= 2.0x?"}
-        G3 -->|No: Low institutional activity| Skip
-        G3 -->|Yes| G4{"Wall-clock elapsed >= 45s?"}
-        G4 -->|No: Jitter guard| Skip
+        G1 -->|"Yes"| Skip["Skip to Next Symbol"]
+        G1 -->|"No"| G2{"Status active on current ts?"}
+        G2 -->|"Yes"| Skip
+        G2 -->|"No"| G3{"Strict 5m rVOL >= 2.0x?"}
+        G3 -->|"No: Low institutional activity"| Skip
+        G3 -->|"Yes"| G4{"Wall-clock elapsed >= 45s?"}
+        G4 -->|"No: Jitter guard"| Skip
     end
 
     subgraph SubArchetypes ["Deterministic Archetype Evaluation"]
-        G4 -->|Yes| EvalFlag["Archetype 1: Bull / Bear Flag Breakout"]
-        EvalFlag -->|Passed: 50% Retracement + Reg Line + RoV + CLV| AddAction["Add to Loop-Local Actionable List"]
+        G4 -->|"Yes"| EvalFlag["Archetype 1: Bull / Bear Flag Breakout"]
+        EvalFlag -->|"Passed: 50% Retracement + Reg Line + RoV + CLV"| AddAction["Add to Loop-Local Actionable List"]
         
-        EvalFlag -->|No Flag| EvalPure["Archetype 2: Pure 3-Candle Impulse Breakout"]
-        EvalPure -->|Passed: Thrust >= 2x + RoV + CLV| AddAction
-        EvalPure -->|No Setup| Skip
+        EvalFlag -->|"No Flag"| EvalPure["Archetype 2: Pure 3-Candle Impulse Breakout"]
+        EvalPure -->|"Passed: Thrust >= 2x + RoV + CLV"| AddAction
+        EvalPure -->|"No Setup"| Skip
     end
 
     AddAction --> Next["Next Symbol"]
     Skip --> Next
     Next --> CheckEnd{"Universe finished?"}
-    CheckEnd -->|Yes| Dispatch["Sort by rVOL Descending -> Push to alerts_breakout.ipc"]
+    CheckEnd -->|"Yes"| Dispatch["Sort by rVOL Descending -> Push to alerts_breakout.ipc"]
 ```
 
 ### 4.1 Key Mathematical Invariants in 3.0:

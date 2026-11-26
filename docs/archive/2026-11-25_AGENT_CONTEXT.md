@@ -127,24 +127,24 @@ flowchart TD
     subgraph MarketIngestion ["Market Ingestion Tier (Upstox API v3 Dual WebSockets)"]
         WS_0["Upstox WS Conn 0 (Shard 0: ~107 Stocks + NIFTY)"] --> Feed["FeedHandler Process"]
         WS_1["Upstox WS Conn 1 (Shard 1: ~108 Stocks)"] --> Feed
-        Feed -->|ZMQ PUB: Equity Ticks| IPC_EQ["ipc:///tmp/feed_equity.ipc (TICK.EQ)"]
-        Feed -->|ZMQ PUB: Option Depth Ticks| IPC_OPT["ipc:///tmp/feed_options.ipc (TICK.OPT)"]
+        Feed -->|"ZMQ PUB: Equity Ticks"| IPC_EQ["ipc:///tmp/feed_equity.ipc (TICK.EQ)"]
+        Feed -->|"ZMQ PUB: Option Depth Ticks"| IPC_OPT["ipc:///tmp/feed_options.ipc (TICK.OPT)"]
     end
 
     subgraph MemoryTier ["Lock-Free Shared Memory & Cache Tier"]
         IPC_EQ --> CM["CandleManager Process (Single Writer)"]
-        CM -->|Write 5m OHLCV Bars| SHM[("POSIX Shared Memory: shm_ohlc_221 (777 KB)")]
+        CM -->|"Write 5m OHLCV Bars"| SHM[("POSIX Shared Memory: shm_ohlc_221 (777 KB)")]
         IPC_OPT --> QB["QuotesBroker Process (LVC Cache)"]
-        QB -->|ZMQ ROUTER / DEALER| IPC_ROUTER["ipc:///tmp/quotes_router.ipc"]
-        QB -->|ZMQ PUB: Heartbeat & Active Depth| IPC_STREAM["ipc:///tmp/quotes_stream.ipc"]
+        QB -->|"ZMQ ROUTER / DEALER"| IPC_ROUTER["ipc:///tmp/quotes_router.ipc"]
+        QB -->|"ZMQ PUB: Heartbeat & Active Depth"| IPC_STREAM["ipc:///tmp/quotes_stream.ipc"]
     end
 
     subgraph AlphaTier ["Alpha Pipeline Tier"]
         SHM -.->|"Lock-Free Busy Spin Loop (< 2 us)"| SE["ScoringEngine 3.0 Process"]
-        SE -->|ZMQ PUB: Setup Alerts (pole/flag/clv)| IPC_ALERTS["ipc:///tmp/scoring_alerts_pub.ipc"]
+        SE -->|"ZMQ PUB: Setup Alerts (pole / flag / clv)"| IPC_ALERTS["ipc:///tmp/scoring_alerts_pub.ipc"]
         IPC_ALERTS --> RMS["RMSService Process (Liquidity Gate)"]
-        RMS <-->|ZMQ REQ/REP: Snapshot Depth| IPC_ROUTER
-        RMS -->|ZMQ PUB: Actionable Opportunities| IPC_OPP["ipc:///tmp/rms_strike_pub.ipc"]
+        RMS <-->|"ZMQ REQ/REP: Snapshot Depth"| IPC_ROUTER
+        RMS -->|"ZMQ PUB: Actionable Opportunities"| IPC_OPP["ipc:///tmp/rms_strike_pub.ipc"]
     end
 
     subgraph ExecutionTier ["Execution Superstructures Tier"]

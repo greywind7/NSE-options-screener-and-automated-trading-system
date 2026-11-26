@@ -16,6 +16,18 @@ window.SimulationTab = {
   includeBrokerage: true,
   isParamsCollapsed: false,
   simMode: "single",
+  batchChart: null,
+  batchWinnersChart: null,
+  activeResultsSubview: "single",
+  currentBatchId: "__all__",
+  batchRankBy: "net_pnl",
+  batchRegimeFilter: "ALL",
+  batchWindowFilter: "ALL",
+  batchModeFilter: "all",
+  batchSelectedTrack: "__portfolio__",
+  batchCompareDelayed: true,
+  currentBatchReport: null,
+  batchesList: [],
 
   init() {
     this.bindControls();
@@ -23,6 +35,16 @@ window.SimulationTab = {
     const canvas = document.getElementById("sr-chart-canvas");
     if (canvas && window.IntradayChart) {
       this.chart = new window.IntradayChart(canvas);
+    }
+
+    const winnersCanvas = document.getElementById("br-winners-canvas");
+    if (winnersCanvas && window.BatchWinnersChart) {
+      this.batchWinnersChart = new window.BatchWinnersChart(winnersCanvas);
+    }
+
+    const batchCanvas = document.getElementById("br-equity-canvas");
+    if (batchCanvas && window.BatchEquityDrawdownChart) {
+      this.batchChart = new window.BatchEquityDrawdownChart(batchCanvas);
     }
 
     const bToggle = document.getElementById("sr-brokerage-toggle");
@@ -97,6 +119,9 @@ window.SimulationTab = {
   clearRunsLocally(newBootId) {
     this.runs = [];
     this.currentRun = null;
+    this.currentBatchReport = null;
+    this.batchesList = [];
+    this.currentBatchId = "__all__";
     try {
       localStorage.removeItem("sim_runs");
       if (newBootId) {
@@ -133,6 +158,7 @@ window.SimulationTab = {
         map.set(sr.id, {
           id: sr.id,
           date: sr.date,
+          batch_id: sr.batch_id || null,
           startTime: sr.timestamp,
           status: "completed",
           runtime: sr.runtime,
@@ -335,6 +361,130 @@ window.SimulationTab = {
         this.currentModeFilter = p.getAttribute("data-mode");
         if (this.currentRun && this.currentRun.results) {
           this.renderRunMatrix();
+        }
+      });
+    });
+
+    // Batch Report entrypoints & subview controls
+    const openBatchBtn = document.getElementById("sim-open-batch-report-btn");
+    if (openBatchBtn) {
+      openBatchBtn.addEventListener("click", () => this.openBatchReport("__all__"));
+    }
+
+    const backTopBtn = document.getElementById("sr-back-to-sim-top-btn");
+    if (backTopBtn) {
+      backTopBtn.addEventListener("click", () => window.App.switchTab("simulation"));
+    }
+
+    const subSingleBtn = document.getElementById("sr-subview-single-btn");
+    const subBatchBtn = document.getElementById("sr-subview-batch-btn");
+    if (subSingleBtn) {
+      subSingleBtn.addEventListener("click", () => this.toggleResultsSubview("single"));
+    }
+    if (subBatchBtn) {
+      subBatchBtn.addEventListener("click", () => this.openBatchReport(this.currentBatchId || "__all__"));
+    }
+
+    const brBatchSel = document.getElementById("br-batch-select");
+    if (brBatchSel) {
+      brBatchSel.addEventListener("change", (e) => {
+        this.currentBatchId = e.target.value || "__all__";
+        this.batchSelectedTrack = "__portfolio__";
+        this.fetchAndRenderBatchReport();
+      });
+    }
+
+    const brRankSel = document.getElementById("br-rank-select");
+    if (brRankSel) {
+      brRankSel.addEventListener("change", (e) => {
+        this.batchRankBy = e.target.value || "net_pnl";
+        document.querySelectorAll(".br-rank-pill").forEach((x) => {
+          x.classList.toggle("active", x.getAttribute("data-metric") === this.batchRankBy);
+        });
+        this.fetchAndRenderBatchReport();
+      });
+    }
+
+    const brWinSel = document.getElementById("br-window-select");
+    if (brWinSel) {
+      brWinSel.addEventListener("change", (e) => {
+        this.batchWindowFilter = e.target.value || "ALL";
+        this.fetchAndRenderBatchReport();
+      });
+    }
+
+    const brCreateBtn = document.getElementById("br-create-batch-btn");
+    if (brCreateBtn) {
+      brCreateBtn.addEventListener("click", () => this.snapshotCurrentRunsAsBatch());
+    }
+
+    const brMdBtn = document.getElementById("br-export-md-btn");
+    if (brMdBtn) brMdBtn.addEventListener("click", () => this.exportBatchReport("md"));
+
+    const brCsvBtn = document.getElementById("br-export-csv-btn");
+    if (brCsvBtn) brCsvBtn.addEventListener("click", () => this.exportBatchReport("csv"));
+
+    const brTrackSel = document.getElementById("br-chart-track-select");
+    if (brTrackSel) {
+      brTrackSel.addEventListener("change", (e) => {
+        this.batchSelectedTrack = e.target.value || "__portfolio__";
+        if (this.currentBatchReport) {
+          this.renderBatchEquityChart(this.currentBatchReport);
+        }
+      });
+    }
+
+    const brDelayToggle = document.getElementById("br-compare-delayed-toggle");
+    if (brDelayToggle) {
+      brDelayToggle.addEventListener("change", (e) => {
+        this.batchCompareDelayed = !!e.target.checked;
+        if (this.currentBatchReport) {
+          this.renderBatchEquityChart(this.currentBatchReport);
+        }
+      });
+    }
+
+    document.querySelectorAll(".br-regime-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        document.querySelectorAll(".br-regime-pill").forEach((x) => x.classList.remove("active"));
+        pill.classList.add("active");
+        this.batchRegimeFilter = pill.getAttribute("data-regime") || "ALL";
+        this.fetchAndRenderBatchReport();
+      });
+    });
+
+    document.querySelectorAll(".br-mode-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        document.querySelectorAll(".br-mode-pill").forEach((x) => x.classList.remove("active"));
+        pill.classList.add("active");
+        this.batchModeFilter = pill.getAttribute("data-mode") || "all";
+        if (this.currentBatchReport) {
+          this.renderBatchLeaderboard(this.currentBatchReport);
+        }
+      });
+    });
+
+    document.querySelectorAll(".br-rank-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        const metric = pill.getAttribute("data-metric") || "net_pnl";
+        document.querySelectorAll(".br-rank-pill").forEach((x) => x.classList.remove("active"));
+        pill.classList.add("active");
+        this.batchRankBy = metric;
+        if (brRankSel) brRankSel.value = metric;
+        this.fetchAndRenderBatchReport();
+      });
+    });
+
+    document.querySelectorAll("#sr-batch-view th.sortable-th").forEach((th) => {
+      th.addEventListener("click", () => {
+        const rankKey = th.getAttribute("data-rank");
+        if (rankKey) {
+          this.batchRankBy = rankKey;
+          if (brRankSel) brRankSel.value = rankKey;
+          document.querySelectorAll(".br-rank-pill").forEach((x) => {
+            x.classList.toggle("active", x.getAttribute("data-metric") === rankKey);
+          });
+          this.fetchAndRenderBatchReport();
         }
       });
     });
@@ -787,6 +937,10 @@ window.SimulationTab = {
     if (progBox) progBox.style.display = "flex";
 
     const basePayload = this.gatherPayload();
+    this._batchSeq = (this._batchSeq || 0) + 1;
+    const batchId = `BATCH-${Date.now()}-${this._batchSeq}`;
+    const batchLabel = `Batch ${fromDate} → ${toDate}`;
+    const batchRunIds = [];
 
     for (let i = 0; i < rangeDates.length; i++) {
       const curDate = rangeDates[i];
@@ -800,6 +954,9 @@ window.SimulationTab = {
       payload.date = curDate;
       this._batchRunSeq = (this._batchRunSeq || 0) + 1;
       payload.run_id = `RUN-${Date.now()}-${this._batchRunSeq}`;
+      payload.batch_id = batchId;
+      payload.batch_label = batchLabel;
+      batchRunIds.push(payload.run_id);
 
       await this.runSingleSimAsync(payload);
 
@@ -818,6 +975,14 @@ window.SimulationTab = {
       await new Promise((r) => setTimeout(r, 400));
     }
 
+    try {
+      await fetch("/api/sim/batches", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batch_id: batchId, label: batchLabel, run_ids: batchRunIds }),
+      });
+    } catch (_) {}
+
     if (progFill) progFill.style.width = "100%";
     if (progPct) progPct.innerText = "100%";
     if (progStatus) progStatus.innerText = `Batch Completed (${rangeDates.length} dates)`;
@@ -833,6 +998,7 @@ window.SimulationTab = {
       this.populateRunSelect();
       this.currentRun = this.runs[0];
     }
+    await this.openBatchReport(batchId);
   },
 
   pollStatus(run) {
@@ -1104,8 +1270,9 @@ window.SimulationTab = {
     const navTab = document.getElementById("nav-tab-sim-results");
     if (navTab) navTab.style.display = "inline-flex";
 
-    // Switch to tab
+    // Switch to tab and Single Run subview
     window.App.switchTab("sim-results");
+    this.toggleResultsSubview("single");
     this.populateRunSelect();
     if (run.status === "completed" && (!run.results || !run.results.details)) {
       await this.fetchRunResults(run);
@@ -1567,6 +1734,551 @@ window.SimulationTab = {
       });
       container.appendChild(chip);
     });
+  },
+
+  // =========================================================================
+  // BATCH REPORT & MARKET REGIME ANALYTICS UI
+  // =========================================================================
+  toggleResultsSubview(viewName) {
+    this.activeResultsSubview = viewName === "batch" ? "batch" : "single";
+    const singleEl = document.getElementById("sr-single-view");
+    const batchEl = document.getElementById("sr-batch-view");
+    const btnSingle = document.getElementById("sr-subview-single-btn");
+    const btnBatch = document.getElementById("sr-subview-batch-btn");
+
+    if (singleEl) singleEl.style.display = this.activeResultsSubview === "single" ? "block" : "none";
+    if (batchEl) batchEl.style.display = this.activeResultsSubview === "batch" ? "block" : "none";
+    if (btnSingle) btnSingle.classList.toggle("active", this.activeResultsSubview === "single");
+    if (btnBatch) btnBatch.classList.toggle("active", this.activeResultsSubview === "batch");
+
+    if (this.activeResultsSubview === "batch") {
+      setTimeout(() => {
+        if (this.batchWinnersChart) {
+          this.batchWinnersChart._setupCanvas();
+          this.batchWinnersChart.render();
+        }
+        if (this.batchChart) {
+          this.batchChart._setupCanvas();
+          this.batchChart.render();
+        }
+      }, 20);
+    }
+  },
+
+  async openBatchReport(batchId = "__all__") {
+    const navTab = document.getElementById("nav-tab-sim-results");
+    if (navTab) navTab.style.display = "inline-flex";
+    window.App.switchTab("sim-results");
+    this.toggleResultsSubview("batch");
+    if (batchId) {
+      this.currentBatchId = batchId;
+    }
+    await this.loadBatchList(this.currentBatchId);
+    await this.fetchAndRenderBatchReport();
+  },
+
+  async loadBatchList(preferredId = null) {
+    const sel = document.getElementById("br-batch-select");
+    try {
+      const res = await fetch("/api/sim/batches");
+      if (!res.ok) return;
+      const data = await res.json();
+      this.batchesList = data.batches || [];
+      this.renderMultiBatchComparison(data.comparison || []);
+
+      if (sel) {
+        sel.innerHTML = `<option value="__all__">All Completed Runs (${data.completed_runs_count || 0})</option>`;
+        this.batchesList.forEach((b) => {
+          const opt = document.createElement("option");
+          opt.value = b.batch_id;
+          opt.innerText = `${b.label || b.batch_id} (${b.sessions}d: ${b.date_start} → ${b.date_end})`;
+          sel.appendChild(opt);
+        });
+
+        const candidate = preferredId || this.currentBatchId || "__all__";
+        const exists = Array.from(sel.options).some((o) => o.value === candidate);
+        this.currentBatchId = exists ? candidate : "__all__";
+        sel.value = this.currentBatchId;
+      }
+    } catch (e) {
+      console.warn("Could not load batch list:", e);
+    }
+  },
+
+  async snapshotCurrentRunsAsBatch() {
+    const completedIds = this.runs.filter((r) => r.status === "completed").map((r) => r.id);
+    if (completedIds.length === 0) {
+      window.App.showToast("No completed runs available to snapshot.", "error");
+      return;
+    }
+    const label = prompt("Enter a label for this Batch Snapshot (e.g. V3 Gate Tuning):", `Snapshot (${completedIds.length} runs)`);
+    if (label === null) return;
+    try {
+      const res = await fetch("/api/sim/batches", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: label.trim() || `Snapshot (${completedIds.length})`, run_ids: completedIds }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const bid = data.batch?.batch_id;
+        window.App.showToast(`Saved batch '${data.batch?.label || bid}'`, "success");
+        await this.loadBatchList(bid);
+        await this.fetchAndRenderBatchReport();
+      }
+    } catch (e) {
+      window.App.showToast("Failed to save batch snapshot.", "error");
+    }
+  },
+
+  async fetchAndRenderBatchReport() {
+    const bid = encodeURIComponent(this.currentBatchId || "__all__");
+    const params = new URLSearchParams({
+      regime: this.batchRegimeFilter || "ALL",
+      window: this.batchWindowFilter || "ALL",
+      rank_by: this.batchRankBy || "net_pnl",
+    });
+
+    try {
+      const res = await fetch(`/api/sim/batch/${bid}?${params.toString()}`);
+      if (!res.ok) {
+        this.renderEmptyBatchReport();
+        return;
+      }
+      const data = await res.json();
+      if (data.report) {
+        this.currentBatchReport = data.report;
+        this.renderBatchReport(data.report);
+      }
+    } catch (e) {
+      console.warn("Error fetching batch report:", e);
+    }
+  },
+
+  renderEmptyBatchReport() {
+    const lb = document.getElementById("br-leaderboard-tbody");
+    if (lb) {
+      lb.innerHTML = `<tr><td colspan="16" class="text-center" style="padding:24px; color:var(--text-dim);">No completed batch runs found yet. Run a Single or Batch simulation first!</td></tr>`;
+    }
+    const sess = document.getElementById("br-sessions-tbody");
+    if (sess) {
+      sess.innerHTML = `<tr><td colspan="8" class="text-center" style="padding:18px; color:var(--text-dim);">No sessions recorded.</td></tr>`;
+    }
+    if (this.batchWinnersChart) this.batchWinnersChart.setData([]);
+    if (this.batchChart) this.batchChart.setData([], [], "Portfolio", "Delayed");
+  },
+
+  renderMultiBatchComparison(comparison) {
+    const panel = document.getElementById("br-comparison-panel");
+    const tbody = document.getElementById("br-comparison-tbody");
+    if (!panel || !tbody) return;
+
+    if (!comparison || comparison.length < 2) {
+      panel.style.display = "none";
+      return;
+    }
+
+    panel.style.display = "block";
+    tbody.innerHTML = "";
+    comparison.forEach((c) => {
+      const tr = document.createElement("tr");
+      tr.style.cursor = "pointer";
+      const netCls = c.portfolio_avg_net_pnl >= 0 ? "val-profit" : "val-loss";
+      const topCls = c.top_track_net_pnl >= 0 ? "val-profit" : "val-loss";
+      tr.innerHTML = `
+        <td style="font-weight:700; color:#fff;">${c.batch_label || c.batch_id}</td>
+        <td class="font-mono">${c.date_range}</td>
+        <td class="font-mono text-center">${c.sessions}</td>
+        <td class="font-mono text-right font-bold ${netCls}">${window.App.formatINR(c.portfolio_avg_net_pnl)}</td>
+        <td class="font-mono text-right val-loss">-${c.portfolio_max_dd_pct.toFixed(2)}%</td>
+        <td class="font-mono text-right">${c.portfolio_daily_win_rate_pct.toFixed(1)}%</td>
+        <td class="font-mono" style="color:var(--accent-cyan);">${c.top_track}</td>
+        <td class="font-mono text-right font-bold ${topCls}">${window.App.formatINR(c.top_track_net_pnl)}</td>
+        <td class="font-mono">${c.best_calmar_track} (${c.best_calmar.toFixed(2)}x)</td>
+      `;
+      tr.addEventListener("click", () => {
+        this.currentBatchId = c.batch_id;
+        const sel = document.getElementById("br-batch-select");
+        if (sel) sel.value = c.batch_id;
+        this.fetchAndRenderBatchReport();
+      });
+      tbody.appendChild(tr);
+    });
+  },
+
+  renderBatchReport(report) {
+    const sm = report.summary || {};
+
+    const elSess = document.getElementById("br-stat-sessions");
+    if (elSess) elSess.innerText = `${sm.filtered_sessions || 0} / ${sm.total_sessions || 0}`;
+    const elDates = document.getElementById("br-stat-daterange");
+    if (elDates) elDates.innerText = sm.date_start ? `${sm.date_start} → ${sm.date_end}` : "-";
+
+    const netVal = sm.portfolio_avg_net_pnl || 0;
+    const elNet = document.getElementById("br-stat-net-pnl");
+    if (elNet) {
+      elNet.className = `stat-value font-mono ${netVal >= 0 ? "val-profit" : "val-loss"}`;
+      elNet.innerText = window.App.formatINR(netVal);
+    }
+    const elGross = document.getElementById("br-stat-gross-pnl");
+    if (elGross) elGross.innerText = `Gross: ${window.App.formatINR(sm.portfolio_avg_gross_pnl || 0)}`;
+
+    const elDdPct = document.getElementById("br-stat-max-dd");
+    if (elDdPct) {
+      elDdPct.className = "stat-value font-mono val-loss";
+      elDdPct.innerText = `-${(sm.portfolio_max_dd_pct || 0).toFixed(2)}%`;
+    }
+    const elDdInr = document.getElementById("br-stat-max-dd-inr");
+    if (elDdInr) elDdInr.innerText = window.App.formatINR(-(sm.portfolio_max_dd_inr || 0));
+
+    const elDwr = document.getElementById("br-stat-daily-wr");
+    if (elDwr) elDwr.innerText = `${(sm.portfolio_daily_win_rate_pct || 0).toFixed(1)}%`;
+    const elGreen = document.getElementById("br-stat-green-days");
+    if (elGreen) elGreen.innerText = `${sm.portfolio_green_days || 0} / ${sm.filtered_sessions || 0} Green Days`;
+
+    const elTrk = document.getElementById("br-stat-tracks");
+    if (elTrk) elTrk.innerText = `${sm.track_count || 0}`;
+    const elModes = document.getElementById("br-stat-modes");
+    if (elModes) elModes.innerText = (sm.modes || []).map((m) => m.toUpperCase()).join(", ") || "-";
+
+    this.renderBatchSpotlights(report.spotlights || {});
+    this.renderBatchRegimes(report);
+    this.populateBatchChartTrackSelect(report);
+    this.renderBatchWinnersChart(report);
+    this.renderBatchEquityChart(report);
+    this.renderBatchLeaderboard(report);
+    this.renderBatchTimeline(report);
+  },
+
+  SPOTLIGHT_METRIC_SPECS: [
+    { key: "highest_net", title: "🏆 Highest Net P&L", tag: "Net P&L", color: "#10b981" },
+    { key: "best_calmar", title: "📐 Best Calmar (Ret/DD)", tag: "Calmar", color: "#00f0ff" },
+    { key: "most_consistent", title: "📈 Most Consistent (45°)", tag: "45° Slope", color: "#38bdf8" },
+    { key: "max_green_days", title: "📅 Max Green Days", tag: "Max Green", color: "#a3e635" },
+    { key: "lowest_drawdown", title: "🛡️ Lowest Max Drawdown", tag: "Low DD", color: "#f59e0b" },
+    { key: "best_delayed_retention", title: "⚡ Best Delayed Retention", tag: "Delayed Ret", color: "#c084fc" },
+  ],
+
+  renderBatchSpotlights(spotlights) {
+    const grid = document.getElementById("br-spotlights-grid");
+    if (!grid) return;
+
+    grid.innerHTML = "";
+    this.SPOTLIGHT_METRIC_SPECS.forEach((c) => {
+      const item = spotlights[c.key];
+      if (!item) return;
+      const div = document.createElement("div");
+      div.className = "br-spotlight-card";
+      div.style.cursor = "pointer";
+      div.style.borderTop = `2px solid ${c.color}`;
+      const cvStr = (item.pnl_cv !== null && item.pnl_cv !== undefined) ? `CV ${item.pnl_cv} | ` : "";
+      div.innerHTML = `
+        <div class="br-spotlight-label" style="color:${c.color};">${c.title}</div>
+        <div class="br-spotlight-track">${item.track}</div>
+        <div class="br-spotlight-val" style="color:${c.color};">${item.value_display}</div>
+        <div class="br-spotlight-meta">${cvStr}Daily WR ${item.daily_win_rate_pct}% | DD -${item.max_drawdown_pct}%</div>
+      `;
+      div.addEventListener("click", () => {
+        this.batchSelectedTrack = `${item.mode}::${item.track}`;
+        const sel = document.getElementById("br-chart-track-select");
+        if (sel) sel.value = this.batchSelectedTrack;
+        if (this.currentBatchReport) {
+          this.renderBatchEquityChart(this.currentBatchReport);
+          this.renderBatchLeaderboard(this.currentBatchReport);
+        }
+      });
+      grid.appendChild(div);
+    });
+  },
+
+  renderBatchRegimes(report) {
+    const regCounts = report.regime_counts || {};
+    const total = report.summary?.total_sessions || 0;
+    document.querySelectorAll(".br-regime-pill").forEach((pill) => {
+      const rKey = pill.getAttribute("data-regime");
+      const baseLabels = {
+        ALL: "All Regimes",
+        TREND_UP: "Trend Up",
+        TREND_DOWN: "Trend Down",
+        CHOPPY_RANGE: "Choppy/Range",
+        V_REVERSAL: "V-Reversal",
+        HIGH_VOL_EXPIRY: "High-Vol/Expiry",
+      };
+      const cnt = rKey === "ALL" ? total : (regCounts[rKey] || 0);
+      pill.innerText = `${baseLabels[rKey] || rKey} (${cnt})`;
+    });
+
+    const strip = document.getElementById("br-regime-breakdown");
+    if (!strip) return;
+    strip.innerHTML = "";
+    (report.regime_breakdown || []).forEach((rb) => {
+      const card = document.createElement("div");
+      card.className = "br-regime-mini-card";
+      const cls = rb.avg_track_session_pnl >= 0 ? "val-profit" : "val-loss";
+      card.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span class="badge badge-regime-${rb.regime}">${rb.label}</span>
+          <span class="font-mono" style="font-size:11px; color:var(--text-dim);">${rb.sessions}d</span>
+        </div>
+        <div class="font-mono font-bold ${cls}" style="font-size:13px;">Avg: ${window.App.formatINR(rb.avg_track_session_pnl)} / day</div>
+        <div class="font-mono" style="font-size:10px; color:var(--text-muted);">Green: ${rb.green_sessions}/${rb.sessions} | WR: ${rb.win_rate_pct}% (${rb.total_trades} tr)</div>
+      `;
+      strip.appendChild(card);
+    });
+  },
+
+  populateBatchChartTrackSelect(report) {
+    const sel = document.getElementById("br-chart-track-select");
+    if (!sel) return;
+    const prev = this.batchSelectedTrack || "__portfolio__";
+    sel.innerHTML = `<option value="__portfolio__">Equal-Weighted Portfolio Avg</option>`;
+
+    const seen = new Set();
+    (report.leaderboard || []).forEach((row) => {
+      const key = `${row.mode}::${row.track}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        const opt = document.createElement("option");
+        opt.value = key;
+        opt.innerText = `[${row.mode.toUpperCase()}] ${row.track} (${window.App.formatINR(row.net_pnl)})`;
+        sel.appendChild(opt);
+      }
+    });
+
+    const hasPrev = Array.from(sel.options).some((o) => o.value === prev);
+    this.batchSelectedTrack = hasPrev ? prev : "__portfolio__";
+    sel.value = this.batchSelectedTrack;
+  },
+
+  renderBatchWinnersChart(report) {
+    const legendEl = document.getElementById("br-winners-legend");
+    const subEl = document.getElementById("br-winners-subtitle");
+    const spotlights = report.spotlights || {};
+    const leaderboard = report.leaderboard || [];
+
+    // Deduplicate spotlight winners by mode::track, collecting all metric colors won
+    const dedupMap = new Map();
+    this.SPOTLIGHT_METRIC_SPECS.forEach((sp) => {
+      const item = spotlights[sp.key];
+      if (!item) return;
+      const key = `${item.mode}::${item.track}`;
+      if (!dedupMap.has(key)) {
+        const row = leaderboard.find((r) => r.mode === item.mode && r.track === item.track);
+        if (row && Array.isArray(row.equity_curve) && row.equity_curve.length > 0) {
+          dedupMap.set(key, {
+            key,
+            track: item.track,
+            mode: item.mode,
+            color: sp.color,
+            colors: [sp.color],
+            badges: [sp.tag],
+            curve: row.equity_curve,
+          });
+        }
+      } else {
+        const existing = dedupMap.get(key);
+        existing.colors.push(sp.color);
+        existing.badges.push(sp.tag);
+      }
+    });
+
+    const winnersList = Array.from(dedupMap.values());
+    if (subEl) subEl.innerText = `${winnersList.length} Unique Winner${winnersList.length === 1 ? "" : "s"}`;
+
+    if (legendEl) {
+      legendEl.innerHTML = "";
+      winnersList.forEach((w) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "br-winner-chip";
+        const dotsHtml = w.colors.map((c) => `<span class="br-winner-dot" style="background:${c};"></span>`).join("");
+        chip.innerHTML = `${dotsHtml}<span>${w.track}</span><span style="color:var(--text-dim);">(${w.badges.join(" · ")})</span>`;
+        chip.addEventListener("click", () => {
+          this.batchSelectedTrack = w.key;
+          const sel = document.getElementById("br-chart-track-select");
+          if (sel) sel.value = w.key;
+          this.renderBatchEquityChart(report);
+          this.renderBatchLeaderboard(report);
+        });
+        legendEl.appendChild(chip);
+      });
+    }
+
+    if (this.batchWinnersChart) {
+      this.batchWinnersChart.setData(winnersList);
+    }
+  },
+
+  renderBatchEquityChart(report) {
+    if (!this.batchChart) return;
+    const sub = document.getElementById("br-chart-subtitle");
+    const leaderboard = report.leaderboard || [];
+    const portCurves = report.portfolio_curves || {};
+
+    let primary = [];
+    let compare = [];
+    let pLabel = "Portfolio (PAPER)";
+    let cLabel = "Portfolio (DELAYED)";
+
+    if (!this.batchSelectedTrack || this.batchSelectedTrack === "__portfolio__") {
+      const primaryMode = portCurves.paper ? "paper" : Object.keys(portCurves)[0];
+      primary = (primaryMode && portCurves[primaryMode]) || [];
+      pLabel = `Portfolio Equal-Weighted (${(primaryMode || "paper").toUpperCase()})`;
+      if (this.batchCompareDelayed && primaryMode !== "paper_delayed" && portCurves.paper_delayed) {
+        compare = portCurves.paper_delayed;
+        cLabel = "Portfolio (PAPER_DELAYED)";
+      }
+    } else {
+      const parts = this.batchSelectedTrack.split("::");
+      const selMode = parts[0];
+      const selTrack = parts.slice(1).join("::");
+      const row = leaderboard.find((r) => r.mode === selMode && r.track === selTrack);
+      primary = (row && row.equity_curve) || [];
+      pLabel = `${selTrack} (${selMode.toUpperCase()})`;
+      if (this.batchCompareDelayed) {
+        const peerMode = selMode === "paper" ? "paper_delayed" : "paper";
+        const peer = leaderboard.find((r) => r.mode === peerMode && r.track === selTrack);
+        if (peer && peer.equity_curve) {
+          compare = peer.equity_curve;
+          cLabel = `${selTrack} (${peerMode.toUpperCase()})`;
+        }
+      }
+    }
+
+    if (sub) sub.innerText = pLabel;
+    this.batchChart.setData(primary, compare, pLabel, cLabel);
+  },
+
+  renderBatchLeaderboard(report) {
+    const tbody = document.getElementById("br-leaderboard-tbody");
+    if (!tbody) return;
+    tbody.innerHTML = "";
+
+    const rows = (report.leaderboard || []).filter((r) => {
+      if (this.batchModeFilter === "all") return true;
+      return r.mode === this.batchModeFilter;
+    });
+
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="16" class="text-center" style="padding:24px; color:var(--text-dim);">No tracks match current regime/mode filter.</td></tr>`;
+      return;
+    }
+
+    rows.forEach((r, idx) => {
+      const tr = document.createElement("tr");
+      const key = `${r.mode}::${r.track}`;
+      if (this.batchSelectedTrack === key) tr.classList.add("selected");
+      const netCls = r.net_pnl >= 0 ? "val-profit" : "val-loss";
+      const retCls = r.return_pct >= 0 ? "val-profit" : "val-loss";
+      const brokPct = r.brokerage_drag_pct !== null && r.brokerage_drag_pct !== undefined ? `${r.brokerage_drag_pct.toFixed(1)}%` : "-";
+      const pfText = r.profit_factor_inf ? "INF" : r.profit_factor.toFixed(2);
+      const delText = r.delayed_retention_pct !== null && r.delayed_retention_pct !== undefined ? `${r.delayed_retention_pct.toFixed(1)}%` : "-";
+      const slopeVal = (r.linearity_score !== null && r.linearity_score !== undefined) ? `${r.linearity_score.toFixed(1)}` : "-";
+
+      tr.innerHTML = `
+        <td class="font-mono text-center" style="color:var(--text-dim);">${idx + 1}</td>
+        <td><span class="badge badge-${r.mode}">${r.mode.toUpperCase()}</span></td>
+        <td style="font-weight:600; color:#fff;">${r.track}</td>
+        <td class="font-mono text-center">${r.sessions}</td>
+        <td class="font-mono text-center">${r.daily_win_rate_pct.toFixed(1)}% <span style="color:var(--text-dim); font-size:10px;">(${r.green_days}/${r.sessions})</span></td>
+        <td class="font-mono text-center">${r.trades}</td>
+        <td class="font-mono text-center">${r.win_rate_pct.toFixed(1)}%</td>
+        <td class="font-mono text-right font-bold ${netCls}">${window.App.formatINR(r.net_pnl)}</td>
+        <td class="font-mono text-right ${retCls}">${window.App.formatPct(r.return_pct)}</td>
+        <td class="font-mono text-right" style="color:var(--text-muted);">${brokPct}</td>
+        <td class="font-mono text-right" style="color:#38bdf8;">${slopeVal}</td>
+        <td class="font-mono text-right ${r.expectancy_inr >= 0 ? "val-profit" : "val-loss"}">${window.App.formatINR(r.expectancy_inr)}</td>
+        <td class="font-mono text-right">${pfText}</td>
+        <td class="font-mono text-right val-loss">-${r.max_drawdown_pct.toFixed(2)}%</td>
+        <td class="font-mono text-right" style="color:var(--accent-cyan); font-weight:700;">${r.calmar_ratio.toFixed(2)}</td>
+        <td class="font-mono text-right">${delText}</td>
+      `;
+      tr.addEventListener("click", () => {
+        this.batchSelectedTrack = key;
+        const sel = document.getElementById("br-chart-track-select");
+        if (sel) sel.value = key;
+        this.renderBatchLeaderboard(report);
+        this.renderBatchEquityChart(report);
+      });
+      tbody.appendChild(tr);
+    });
+  },
+
+  renderBatchTimeline(report) {
+    const winBar = document.getElementById("br-intraday-windows-bar");
+    if (winBar) {
+      winBar.innerHTML = "";
+      const activeWin = this.batchWindowFilter || "ALL";
+      (report.intraday_breakdown || []).forEach((wb) => {
+        const cls = wb.net_pnl >= 0 ? "val-profit" : "val-loss";
+        const chip = document.createElement("div");
+        chip.className = "srm-param-chip";
+        chip.style.flex = "1";
+        chip.style.cursor = "pointer";
+        if (activeWin === wb.window) {
+          chip.style.borderColor = "var(--accent-cyan)";
+        }
+        chip.innerHTML = `
+          <span class="chip-label">${wb.label} (by Entry Time)</span>
+          <span class="chip-val ${cls}">${window.App.formatINR(wb.net_pnl)} <span style="color:var(--text-muted); font-size:10px;">(${wb.trades}tr | ${wb.win_rate_pct}% WR)</span></span>
+        `;
+        chip.addEventListener("click", () => {
+          const nextWin = activeWin === wb.window ? "ALL" : wb.window;
+          this.batchWindowFilter = nextWin;
+          const winSel = document.getElementById("br-window-select");
+          if (winSel) winSel.value = nextWin;
+          this.fetchAndRenderBatchReport();
+        });
+        winBar.appendChild(chip);
+      });
+    }
+
+    const sessTbody = document.getElementById("br-sessions-tbody");
+    if (sessTbody) {
+      sessTbody.innerHTML = "";
+      (report.sessions || []).forEach((s) => {
+        const tr = document.createElement("tr");
+        tr.style.cursor = "pointer";
+        tr.title = "Click to inspect this date's Single Run Report";
+        const bCls = s.basket_return_pct >= 0 ? "val-profit" : "val-loss";
+        const pNet = s.paper_avg_net_pnl;
+        const dNet = s.delayed_avg_net_pnl;
+        const pCls = (pNet ?? 0) >= 0 ? "val-profit" : "val-loss";
+        const dCls = (dNet ?? 0) >= 0 ? "val-profit" : "val-loss";
+        const topCls = (s.top_track_pnl ?? 0) >= 0 ? "val-profit" : "val-loss";
+        tr.innerHTML = `
+          <td class="font-mono" style="color:#fff;">${s.date}</td>
+          <td><span class="badge badge-regime-${s.regime}">${s.regime_label}</span></td>
+          <td class="font-mono text-right font-bold ${bCls}">${window.App.formatPct(s.basket_return_pct)}</td>
+          <td class="font-mono text-center">${s.trades ?? "-"}</td>
+          <td class="font-mono text-center">${s.win_rate_pct !== undefined ? `${s.win_rate_pct.toFixed(1)}%` : "-"}</td>
+          <td class="font-mono text-right font-bold ${pCls}">${pNet !== null && pNet !== undefined ? window.App.formatINR(pNet) : "-"}</td>
+          <td class="font-mono text-right font-bold ${dCls}">${dNet !== null && dNet !== undefined ? window.App.formatINR(dNet) : "-"}</td>
+          <td class="font-mono" style="font-size:11px;">
+            <span style="color:var(--accent-cyan); font-weight:600;">${s.top_track || "-"}</span>
+            <span class="${topCls}" style="margin-left:4px;">(${window.App.formatINR(s.top_track_pnl || 0)})</span>
+          </td>
+        `;
+        tr.addEventListener("click", () => {
+          const found = this.runs.find((r) => r.id === s.run_id) || this.runs.find((r) => r.date === s.date);
+          if (found) {
+            this.showRunResults(found);
+          }
+        });
+        sessTbody.appendChild(tr);
+      });
+    }
+  },
+
+  exportBatchReport(fmt) {
+    const bid = encodeURIComponent(this.currentBatchId || "__all__");
+    const params = new URLSearchParams({
+      format: fmt || "md",
+      regime: this.batchRegimeFilter || "ALL",
+      window: this.batchWindowFilter || "ALL",
+      rank_by: this.batchRankBy || "net_pnl",
+    });
+    window.open(`/api/sim/batch/${bid}/export?${params.toString()}`, "_blank");
   },
 
   async checkSimStatus() {
