@@ -2,9 +2,9 @@
 
 > **Document Type**: Quantitative Alpha & Signal Evolution Record  
 > **Status**: Active Living History Document  
-> **Current Active Spec**: [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SCORING_ENGINE_3_0.md)  
-> **Architecture Spec**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/ARCHITECTURE_SPEC_2_0.md)  
-> **Low-Level Design**: [`LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/LOW_LEVEL_DESIGN_2_0.md)  
+> **Current Active Spec**: [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/SCORING_ENGINE_3_0.md)  
+> **Architecture Spec**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/ARCHITECTURE_SPEC_2_0.md)  
+> **Low-Level Design**: [`LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/LOW_LEVEL_DESIGN_2_0.md)  
 > **Archived Specs**: [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive)  
 
 ---

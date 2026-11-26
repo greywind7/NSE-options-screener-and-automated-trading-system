@@ -10,211 +10,7 @@
       "entry_freeze_time": "15:00",
       "eod_squareoff_time": "15:15",
       "brokerage_per_order": 30.0,
-      "enabled_tracks": [
-        {
-          "type": "base",
-          "name": "fast_momentum",
-          "modes": [
-            "ITM",
-            "ATM",
-            "OTM"
-          ]
-        },
-        {
-          "type": "base",
-          "name": "trend_pullback",
-          "modes": [
-            "ITM",
-            "ATM",
-            "OTM"
-          ]
-        },
-        {
-          "type": "base",
-          "name": "fixed_target",
-          "modes": [
-            "ITM",
-            "ATM",
-            "OTM"
-          ]
-        },
-        {
-          "type": "composite",
-          "name": "composite_shared_ITM",
-          "shared_pool": true,
-          "composition": [
-            {
-              "fast_momentum": [
-                "ITM"
-              ]
-            },
-            {
-              "trend_pullback": [
-                "ITM"
-              ]
-            },
-            {
-              "fixed_target": [
-                "ITM"
-              ]
-            }
-          ]
-        },
-        {
-          "type": "composite",
-          "name": "composite_shared_ATM",
-          "shared_pool": true,
-          "composition": [
-            {
-              "fast_momentum": [
-                "ATM"
-              ]
-            },
-            {
-              "trend_pullback": [
-                "ATM"
-              ]
-            },
-            {
-              "fixed_target": [
-                "ATM"
-              ]
-            }
-          ]
-        },
-        {
-          "type": "composite",
-          "name": "composite_shared_OTM",
-          "shared_pool": true,
-          "composition": [
-            {
-              "fast_momentum": [
-                "OTM"
-              ]
-            },
-            {
-              "trend_pullback": [
-                "OTM"
-              ]
-            },
-            {
-              "fixed_target": [
-                "OTM"
-              ]
-            }
-          ]
-        },
-        {
-          "type": "composite",
-          "name": "composite_split_ITM",
-          "shared_pool": false,
-          "composition": [
-            {
-              "fast_momentum": [
-                "ITM"
-              ]
-            },
-            {
-              "trend_pullback": [
-                "ITM"
-              ]
-            },
-            {
-              "fixed_target": [
-                "ITM"
-              ]
-            }
-          ]
-        },
-        {
-          "type": "composite",
-          "name": "composite_split_OTM",
-          "shared_pool": false,
-          "composition": [
-            {
-              "fast_momentum": [
-                "OTM"
-              ]
-            },
-            {
-              "trend_pullback": [
-                "OTM"
-              ]
-            },
-            {
-              "fixed_target": [
-                "OTM"
-              ]
-            }
-          ]
-        },
-        {
-          "type": "composite",
-          "name": "composite_shared_fast_momentum",
-          "shared_pool": true,
-          "composition": [
-            {
-              "fast_momentum": [
-                "ATM",
-                "ITM",
-                "OTM"
-              ]
-            }
-          ]
-        },
-        {
-          "type": "composite",
-          "name": "composite_shared_trend_pullback",
-          "shared_pool": true,
-          "composition": [
-            {
-              "trend_pullback": [
-                "ATM",
-                "ITM",
-                "OTM"
-              ]
-            }
-          ]
-        },
-        {
-          "type": "composite",
-          "name": "composite_shared_fixed_target",
-          "shared_pool": true,
-          "composition": [
-            {
-              "fixed_target": [
-                "ATM",
-                "ITM",
-                "OTM"
-              ]
-            }
-          ]
-        },
-        {
-          "type": "composite",
-          "name": "combined_star",
-          "shared_pool": false,
-          "composition": [
-            {
-              "fast_momentum": [
-                "ITM"
-              ]
-            },
-            {
-              "trend_pullback": [
-                "ATM",
-                "ITM",
-                "OTM"
-              ]
-            },
-            {
-              "fixed_target": [
-                "ITM"
-              ]
-            }
-          ]
-        }
-      ],
+      "track_profile": "default",
       "tracks": {
         "fast_momentum": {
           "target_pct": 0.15,
@@ -261,14 +57,35 @@
         "min_pole_pct": 0.005,
         "max_consolidation_candles": 5,
         "quarantine_cooldown_sec": 5.0,
+        "min_candle_elapsed_sec": 15.0,
+        "flag_pole_buffer_pct": 0.25,
+        "pure_3bar_expansion_pct": 0.0045,
+        "max_alerts_per_symbol_per_day": 3,
         "priority_sort": "rvol_descending"
+      },
+      "midday_freeze": {
+        "enabled": false,
+        "start": "11:30",
+        "end": "13:30"
+      },
+      "option_convexity_scaling": {
+        "enabled": true,
+        "reference_premium_pct": 0.015,
+        "min_scale": 0.45,
+        "max_scale": 1.25,
+        "sl_min_scale": 0.75,
+        "sl_floor_min_pct": 0.035,
+        "sl_floor_max_pct": 0.12,
+        "sl_spread_mult": 2.5
       },
       "risk": {
         "enable_circuit_breaker": false,
         "daily_loss_limit_inr": 10000.0,
         "max_concurrent_positions": 5,
         "max_capital_allocation_pct": 0.50,
-        "max_spread_pct": 0.03
+        "max_spread_pct": 0.03,
+        "atr_spread_gate_enabled": true,
+        "atr_spread_gate_mult": 2.0
       }
     }
   }

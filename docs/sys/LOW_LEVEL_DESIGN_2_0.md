@@ -3,9 +3,9 @@
 > **Document Type**: Low-Level Engineering & Implementation Specification  
 > **Version**: 2.0 (Track C Production Architecture & Scoring Engine 3.0)  
 > **Status**: Ready for Implementation Planning  
-> **Master Architecture**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/ARCHITECTURE_SPEC_2_0.md)  
-> **Signal & Strategy Spec**: [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SCORING_ENGINE_3_0.md)  
-> **System Audit Registry**: [`SELF_AUDIT.md`](file:///Users/yorha/Documents/Trading%20Stuff/SELF_AUDIT.md)  
+> **Master Architecture**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/ARCHITECTURE_SPEC_2_0.md)  
+> **Signal & Strategy Spec**: [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/SCORING_ENGINE_3_0.md)  
+> **Active System Audit**: [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SYSTEM_AUDIT_2_0.md)  
 
 ---
 
@@ -157,17 +157,13 @@ Trading Stuff/
 │   └── strategies/
 │       └── momentum_3_0.yaml          # Strategy tracks, capital allocations, scoring config
 ├── docs/
-│   └── archive/                       # Archived brainstorm & legacy audit specs
+│   ├── sys/                           # Source-of-truth technical specs (Architecture, LLD, Scoring 3.0, Tracks, Web)
+│   ├── live/                          # Active roadmap (IMPROVEMENTS), audit, task docs, reports & experiment snapshots
+│   └── archive/                       # Historical brainstorms, evolution logs & superseded audits
 ├── runner.py                          # Unified CLI Orchestrator (prepare, start, sim, replay, status, stop)
 ├── scripts/
 │   ├── run_distributed.py             # Process supervisor (orchestrates core & mode processes)
-│   └── clean_shm.py                   # Emergency cleanup utility for orphaned SHM blocks
-├── ARCHITECTURE_SPEC_2_0.md
-├── ARCHITECTURE_EVOLUTION.md
-├── SCORING_ENGINE_3_0.md
-├── SCORING_EVOLUTION.md
-├── LOW_LEVEL_DESIGN_2_0.md
-└── SELF_AUDIT.md
+│   └── run_45_experiments.py          # 45-variant tick-by-tick batch hypothesis runner & report generator
 ```
 
 ---
@@ -548,7 +544,7 @@ flowchart TD
         G2 -->|Yes| Skip
         G2 -->|No| G3{"rVOL >= 2.0x?"}
         G3 -->|No| Skip
-        G3 -->|Yes| G4{"Wall-clock elapsed >= 45s?"}
+        G3 -->|Yes| G4{"Bar elapsed >= 15s?"}
         G4 -->|No| Skip
     end
 
@@ -931,7 +927,7 @@ class MarketRecorder:
 
 ### 4.9 Modern Analytics & Simulation Web UI (`web/server.py`)
 
-- **Objective**: Full-featured institutional browser observability and backtesting command center. Full details in [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/WEB_VIEW_FLOW.md).
+- **Objective**: Full-featured institutional browser observability and backtesting command center. Full details in [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/WEB_VIEW_FLOW.md).
 - **Core Architecture**:
   - `AnalyticsWebServer`: `aiohttp` web server hosting static assets, REST APIs, and WebSockets.
   - `LiveService`: Subscribes to `feed_options.ipc` and `quotes_stream.ipc`, updates Latest Value Cache (LVC), computes dynamic MTM, and streams updates every 1.0s over `/api/live/ws`.
@@ -1253,7 +1249,7 @@ if __name__ == "__main__":
 
 ## 6. Self-Audit Bug Reconciliation Matrix
 
-This Low-Level Design natively eradicates the architectural vulnerabilities identified in [`SELF_AUDIT.md`](file:///Users/yorha/Documents/Trading%20Stuff/SELF_AUDIT.md):
+This Low-Level Design natively eradicates the architectural vulnerabilities identified in [`SELF_AUDIT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive/SELF_AUDIT.md):
 
 | Bug ID | Severity | Root Cause in Legacy Code | Architectural Resolution in LLD 2.0 |
 | :--- | :--- | :--- | :--- |

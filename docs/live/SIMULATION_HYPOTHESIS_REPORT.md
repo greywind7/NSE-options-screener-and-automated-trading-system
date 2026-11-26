@@ -1,6 +1,8 @@
 # Simulation Hypothesis Experimentation Report (`Nov 16 – Nov 26, 2026` — Tick-by-Tick)
 
 > **Scope & Tick-by-Tick Baseline Parity:** All **8 clean recorded sessions** (`2026-11-16`, `2026-11-17`, `2026-11-18`, `2026-11-19`, `2026-11-20`, `2026-11-23` expiry, `2026-11-25`, `2026-11-26` expiry) across **all 20 tracks** (`12 v1` + `8 v2`) in both **`paper`** (instant fill at ask) and **`paper_delayed`** (`200ms–500ms` randomized latency fill), executed using the upgraded **event-driven tick-by-tick `ColumnarSimEngine`** (`3%` configurable spread gate, circuit breaker `false`, real-time equity `underlying_ltp` replay, and dated volume baselines `data/index_YYYYMMDD.json`).
+>
+> **Saved Results & Rollout:** Raw per-session outputs are archived in [`docs/live/experiments/nov16_26_45exp/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/experiments/nov16_26_45exp); reproducible scripts live at [`scripts/run_45_experiments.py`](file:///Users/yorha/Documents/Trading%20Stuff/scripts/run_45_experiments.py) & [`scripts/generate_full_report_45.py`](file:///Users/yorha/Documents/Trading%20Stuff/scripts/generate_full_report_45.py); production promotion of **`E10_W3_CAP3`** and retirement of **`gamma_runner_OTM2`** are tracked in [`TASK_E10_W3_CAP3_ROLLOUT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/TASK_E10_W3_CAP3_ROLLOUT.md).
 
 ---
 

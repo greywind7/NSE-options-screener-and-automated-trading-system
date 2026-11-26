@@ -3,7 +3,7 @@
 > **Document Type**: Comprehensive Architectural Blueprint & Specification  
 > **Version**: 2.0 (Distributed Multi-Process, ZeroMQ IPC, Shared Memory, Quotes Broker)  
 > **Status**: Finalized Design Specification  
-> **Historical Reference**: Previous brainstorming and legacy audit documents are archived in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive). Active code audit is in [`AUDIT_TODO.md`](file:///Users/yorha/Documents/Trading%20Stuff/AUDIT_TODO.md).
+> **Historical Reference**: Previous brainstorming and legacy audit documents are archived in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive). Active code audit is in [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SYSTEM_AUDIT_2_0.md).
 
 ---
 
@@ -324,7 +324,11 @@ classDiagram
   - **Simulation Service (`web/simulation_service.py`)**: Spawns isolated worker processes (`multiprocessing.Process`) to bypass Python's GIL; caches parsed Parquet DataFrames (`cached_equity_df`, `cached_options_df`) for sub-second re-runs; manages single and batch simulation queues with persistent history.
   - **Candle & Alert Services (`web/candle_service.py`, `web/alert_service.py`)**: Attaches directly to POSIX Shared Memory (`shm_ohlc_221`) in $< 2\ \mu\text{s}$ to render 5-minute candlestick charts with exact breakout trigger markers.
   - **Historical Service (`web/historical_service.py`)**: Discovers and indexes past trading sessions from `recordings/` and `logs/`, parsing closed trade journals for drill-down performance analytics.
-- Full details documented in [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/WEB_VIEW_FLOW.md).
+- Full details documented in [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/WEB_VIEW_FLOW.md).
+- **Execution & Risk Parity Updates (`2026-11-26`)**:
+  - **QuotesBroker (`core/quotes/quotes_broker.py`)**: Subscribes to both `TICK.OPT` (`feed_options.ipc`) and `TICK.EQ` (`feed_equity.ipc`) so underlying equities stream live `underlying_ltp` to [`BaseTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py) (e.g., `StructuralConvexityTrack`) without option-tick pollution.
+  - **RMS & Risk (`core/rms/rms_service.py`, `core/rms/mode_risk.py`)**: Enforces `max_spread_pct = 0.03` (`3%`), `atr_spread_gate_enabled = true` (`2.0x` expected half-ATR move vs spread), `max_alerts_per_symbol_per_day = 3` (`E10_W3_CAP3`), and configurable `enable_circuit_breaker` (`false` by default in `config/strategies.json`).
+  - **Simulation Engine (`simulation/columnar_sim_engine.py`)**: Uses an event-driven chronological min-heap replaying every raw option tick, underlying equity tick, delayed fill, and 1.0s heartbeat with exact production rule parity.
 
 ### 3.9 Universal Strategy Dashboard (`ui/dashboard.py`)
 - Independent, read-only terminal process displaying real-time platform telemetry (retired in favor of Web UI, retained for headless/SSH environments).

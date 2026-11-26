@@ -99,10 +99,10 @@ class TestScoringEngine3(unittest.TestCase):
         # Bar 3: Contraction 3 (High 5165, Low 5145, Close 5160, Volume 1500)
         self._set_bar(sym_idx, 3, now_ts - 300, 5150.0, 5165.0, 5145.0, 5160.0, 1500, atr=60.0)
 
-        # Active Bar 4: Breakout bar!
+        # Active Bar 4 (opened 60s before now_ts): Breakout bar!
         # Volume 3000 -> rVOL = 3.0 >= 2.0!
         # Close 5210 > regression line, High 5215, Low 5155 -> CLV = (5210-5155)/(5215-5155) = 55/60 = 0.916 >= 0.75
-        self._set_bar(sym_idx, 4, now_ts, 5160.0, 5215.0, 5155.0, 5210.0, 3000, rvol=3.0, atr=60.0, is_closed=False)
+        self._set_bar(sym_idx, 4, now_ts - 60, 5160.0, 5215.0, 5155.0, 5210.0, 3000, rvol=3.0, atr=60.0, is_closed=False)
 
         # Trigger evaluation
         alerts = self.engine.evaluate_universe(now_ts=now_ts)
@@ -139,7 +139,7 @@ class TestScoringEngine3(unittest.TestCase):
         # Vol = 2500 -> rVOL = 2.5 >= 2.0
         # Thrust = 1025 - 998 = 27 >= 2.0 * baseline_thrust
         # CLV = (1024 - 998) / (1025 - 998) = 26/27 = 0.963 >= 0.75
-        self._set_bar(1, 4, now_ts, 998.0, 1025.0, 998.0, 1024.0, 2500, rvol=2.5, atr=10.0, is_closed=False)
+        self._set_bar(1, 4, now_ts - 60, 998.0, 1025.0, 998.0, 1024.0, 2500, rvol=2.5, atr=10.0, is_closed=False)
 
         # 3 base bars for sym2 (ATR=15, High=2000)
         for b in range(1, 4):
@@ -149,7 +149,7 @@ class TestScoringEngine3(unittest.TestCase):
         # Vol = 4800 -> rVOL = 4.8 >= 2.0 (Higher than sym1!)
         # Thrust = 2050 - 1995 = 55 >= 2.0 * baseline_thrust
         # CLV = (2048 - 1995) / (2050 - 1995) = 53/55 = 0.963 >= 0.75
-        self._set_bar(2, 4, now_ts, 1995.0, 2050.0, 1995.0, 2048.0, 4800, rvol=4.8, atr=15.0, is_closed=False)
+        self._set_bar(2, 4, now_ts - 60, 1995.0, 2050.0, 1995.0, 2048.0, 4800, rvol=4.8, atr=15.0, is_closed=False)
 
         # Trigger evaluation
         alerts = self.engine.evaluate_universe(now_ts=now_ts)
@@ -182,7 +182,7 @@ class TestScoringEngine3(unittest.TestCase):
         self._set_bar(sym_idx, 5, now_ts - 300, 5160.0, 5175.0, 5140.0, 5155.0, 1800, atr=50.0)
 
         # Bar 6: Active Breakout Bar
-        self._set_bar(sym_idx, 6, now_ts, 5155.0, 5215.0, 5155.0, 5210.0, 3500, rvol=3.5, atr=50.0, is_closed=False)
+        self._set_bar(sym_idx, 6, now_ts - 60, 5155.0, 5215.0, 5155.0, 5210.0, 3500, rvol=3.5, atr=50.0, is_closed=False)
 
         alerts = self.engine.evaluate_universe(now_ts=now_ts)
         self.assertEqual(len(alerts), 1)
@@ -311,7 +311,7 @@ class TestScoringEngine3(unittest.TestCase):
 
         # Active Bar 4: Breakdown bar
         # Low 4780, High 4835, Close 4785 -> CLV bear = (4835 - 4785) / (4835 - 4780) = 50/55 = 0.909 >= 0.75
-        self._set_bar(sym_idx, 4, now_ts, 4830.0, 4835.0, 4780.0, 4785.0, 3500, rvol=3.5, atr=50.0, is_closed=False)
+        self._set_bar(sym_idx, 4, now_ts - 60, 4830.0, 4835.0, 4780.0, 4785.0, 3500, rvol=3.5, atr=50.0, is_closed=False)
 
         alerts = self.engine.evaluate_universe(now_ts=now_ts)
         self.assertEqual(len(alerts), 1)
@@ -341,7 +341,7 @@ class TestScoringEngine3(unittest.TestCase):
         self._set_bar(sym_idx, 4, now_ts - 300, 5160.0, 5175.0, 5145.0, 5150.0, 1800, atr=50.0)
 
         # Active Bar 5: Bull Breakout
-        self._set_bar(sym_idx, 5, now_ts, 5150.0, 5215.0, 5150.0, 5210.0, 3500, rvol=3.5, atr=50.0, is_closed=False)
+        self._set_bar(sym_idx, 5, now_ts - 60, 5150.0, 5215.0, 5150.0, 5210.0, 3500, rvol=3.5, atr=50.0, is_closed=False)
 
         alerts = self.engine.evaluate_universe(now_ts=now_ts)
         self.assertEqual(len(alerts), 1)
@@ -425,6 +425,57 @@ class TestScoringEngine3(unittest.TestCase):
         )
         self.assertIsNotNone(alert_allowed)
         self.assertEqual(alert_allowed.archetype, "PURE_BULL_BREAKOUT")
+
+    def test_e10_scoring_filters_elapsed_flag25_and_3bar045(self):
+        """Verify E10 rules: min_candle_elapsed_sec=15s, flag_pole_buffer_pct=0.25, pure_3bar_expansion_pct=0.0045."""
+        self.assertEqual(self.engine.min_candle_elapsed_sec, 15.0)
+        self.assertAlmostEqual(self.engine.flag_pole_buffer_pct, 0.25, places=6)
+        self.assertAlmostEqual(self.engine.pure_3bar_expansion_pct, 0.0045, places=6)
+
+        sym_idx = 0
+        symbol = self.engine.index_to_symbol[sym_idx]
+        bar_idx = 4
+        bar_open_ts = self._make_sim_timestamp(bar_idx, sec_offset=0)
+
+        # Build valid flag: pole 5000->5200 (height=200 -> top 25% floor is 5150), steep fade OLS below 5150
+        self._set_bar(sym_idx, 0, bar_open_ts - 1200, 5000.0, 5200.0, 5000.0, 5180.0, 10000, atr=60.0)
+        self._set_bar(sym_idx, 1, bar_open_ts - 900, 5180.0, 5185.0, 5140.0, 5150.0, 2000, atr=60.0)
+        self._set_bar(sym_idx, 2, bar_open_ts - 600, 5150.0, 5155.0, 5110.0, 5120.0, 1800, atr=60.0)
+        self._set_bar(sym_idx, 3, bar_open_ts - 300, 5120.0, 5125.0, 5105.0, 5115.0, 1500, atr=60.0)
+
+        # 1. Elapsed < 15s (now = bar_open + 10s) must be skipped even with high close
+        self._set_bar(sym_idx, 4, bar_open_ts, 5115.0, 5210.0, 5115.0, 5205.0, 4000, rvol=3.5, atr=60.0, is_closed=False)
+        self.assertEqual(self.engine.evaluate_universe(now_ts=bar_open_ts + 10.0), [])
+
+        # 2. FLAG25 rejects breakout at 5140 (beats OLS ~5095, but below top 25% threshold 5150)
+        self._set_bar(sym_idx, 4, bar_open_ts, 5115.0, 5142.0, 5115.0, 5140.0, 4000, rvol=3.5, atr=60.0, is_closed=False)
+        self.assertIsNone(
+            self.engine._check_flag_breakout(symbol, sym_idx, bar_idx, self.candles[sym_idx, bar_idx], 3.5, 60.0, bar_open_ts + 20.0)
+        )
+
+        # 3. Close at 5160 (>= 5150 top 25%) at elapsed=20s triggers cleanly
+        self._set_bar(sym_idx, 4, bar_open_ts, 5115.0, 5162.0, 5115.0, 5160.0, 4000, rvol=3.5, atr=60.0, is_closed=False)
+        alerts = self.engine.evaluate_universe(now_ts=bar_open_ts + 20.0)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].archetype, "FLAG_BULL_BREAKOUT")
+
+        # 4. PURE 3BAR >= 0.45%: 3 tight base bars on sym 1 (low=1000.0, high=1002.0)
+        sym2_idx = 1
+        sym2 = self.engine.index_to_symbol[sym2_idx]
+        for b in range(1, 4):
+            self._set_bar(sym2_idx, b, bar_open_ts - (4 - b) * 300, 1000.5, 1002.0, 1000.0, 1001.5, 1000, atr=1.0)
+
+        # Close 1004.0 -> +0.40% (< 0.45%) rejected despite thrust & CLV
+        self._set_bar(sym2_idx, 4, bar_open_ts, 1001.0, 1004.1, 1001.0, 1004.0, 4000, rvol=3.5, atr=1.0, is_closed=False)
+        self.assertIsNone(
+            self.engine._check_pure_breakout(sym2, sym2_idx, 4, self.candles[sym2_idx, 4], 3.5, 1.0, bar_open_ts + 30.0)
+        )
+
+        # Close 1005.0 -> +0.50% (>= 0.45%) accepted
+        self._set_bar(sym2_idx, 4, bar_open_ts, 1001.0, 1005.1, 1001.0, 1005.0, 4000, rvol=3.5, atr=1.0, is_closed=False)
+        pure_ok = self.engine._check_pure_breakout(sym2, sym2_idx, 4, self.candles[sym2_idx, 4], 3.5, 1.0, bar_open_ts + 30.0)
+        self.assertIsNotNone(pure_ok)
+        self.assertEqual(pure_ok.archetype, "PURE_BULL_BREAKOUT")
 
 
 if __name__ == "__main__":

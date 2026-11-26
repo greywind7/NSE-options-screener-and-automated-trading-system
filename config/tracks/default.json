@@ -60,13 +60,6 @@
     },
     {
       "type": "base",
-      "name": "gamma_runner",
-      "modes": [
-        "OTM2"
-      ]
-    },
-    {
-      "type": "base",
       "name": "volatility_expansion",
       "modes": [
         "ATM"

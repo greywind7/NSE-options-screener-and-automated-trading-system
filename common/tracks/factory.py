@@ -79,22 +79,34 @@ def _get_momentum_config(
     track_profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     if strategy_cfg is not None:
-        prof = track_profile or strategy_cfg.get("track_profile") or strategy_cfg.get("profile")
-        if prof:
+        if "strategies" in strategy_cfg and "momentum" in strategy_cfg["strategies"]:
+            base_mom = strategy_cfg["strategies"]["momentum"]
+        elif "momentum" in strategy_cfg:
+            base_mom = strategy_cfg["momentum"]
+        else:
+            base_mom = strategy_cfg
+
+        has_explicit_enabled = bool(_get_enabled_tracks_spec(base_mom))
+        prof = track_profile or strategy_cfg.get("track_profile") or base_mom.get("track_profile") or base_mom.get("profile")
+        if prof and (track_profile or not has_explicit_enabled):
             loaded = load_track_profile(prof)
             if loaded:
-                res = dict(strategy_cfg)
+                res = dict(base_mom)
                 res["enabled_tracks"] = loaded.get("enabled_tracks", [])
                 t_dict = dict(res.get("tracks", {}))
                 t_dict.update(loaded.get("tracks", {}))
                 res["tracks"] = t_dict
                 return res
-
-        if "strategies" in strategy_cfg and "momentum" in strategy_cfg["strategies"]:
-            return strategy_cfg["strategies"]["momentum"]
-        elif "momentum" in strategy_cfg:
-            return strategy_cfg["momentum"]
-        return strategy_cfg
+        elif not has_explicit_enabled:
+            default_prof = load_track_profile("default")
+            if default_prof:
+                res = dict(base_mom)
+                res["enabled_tracks"] = default_prof.get("enabled_tracks", [])
+                t_dict = dict(res.get("tracks", {}))
+                t_dict.update(default_prof.get("tracks", {}))
+                res["tracks"] = t_dict
+                return res
+        return base_mom
 
     if track_profile:
         loaded = load_track_profile(track_profile)
@@ -184,7 +196,54 @@ def _parse_composition(composition: Any) -> List[tuple]:
     return items
 
 
+def _resolve_option_scaling_cfg(
+    momentum_cfg: Dict[str, Any],
+    strategy_cfg: Optional[Dict[str, Any]],
+    cfg_mgr: Any,
+) -> Dict[str, Any]:
+    """Resolve option_convexity_scaling config from explicit override or config/strategies.json."""
+    strat_root = cfg_mgr.strategy.get("strategies", {}).get("momentum", {})
+    base_scale = dict(strat_root.get("option_convexity_scaling") or {})
+    if strategy_cfg:
+        s_mom = (
+            strategy_cfg.get("strategies", {}).get("momentum", {})
+            if "strategies" in strategy_cfg
+            else strategy_cfg.get("momentum", strategy_cfg)
+        )
+        if isinstance(s_mom, dict) and "option_convexity_scaling" in s_mom:
+            base_scale.update(s_mom.get("option_convexity_scaling") or {})
+    if "option_convexity_scaling" in momentum_cfg:
+        base_scale.update(momentum_cfg.get("option_convexity_scaling") or {})
+    return base_scale
+
+
 def _instantiate_base_track(
+    base_type: str,
+    track_name: str,
+    context: ExecutionContext,
+    preferred_mode: Optional[str] = None,
+    parent_track: Optional[str] = None,
+    track_params: Optional[Dict[str, Any]] = None,
+    entry_freeze_time: Optional[str] = None,
+    eod_squareoff_time: Optional[str] = None,
+) -> BaseTrack:
+    track_inst = _build_base_track_instance(
+        base_type=base_type,
+        track_name=track_name,
+        context=context,
+        preferred_mode=preferred_mode,
+        parent_track=parent_track,
+        track_params=track_params,
+        entry_freeze_time=entry_freeze_time,
+        eod_squareoff_time=eod_squareoff_time,
+    )
+    opt_scale = (track_params or {}).get("option_scaling_cfg")
+    if opt_scale:
+        track_inst.option_scaling_cfg = dict(opt_scale)
+    return track_inst
+
+
+def _build_base_track_instance(
     base_type: str,
     track_name: str,
     context: ExecutionContext,
@@ -413,6 +472,7 @@ def create_tracks(
 
     cfg_mgr = get_config_manager()
     exec_cfg = cfg_mgr.execution.get("execution", {})
+    eff_option_scaling = _resolve_option_scaling_cfg(momentum_cfg, strategy_cfg, cfg_mgr)
 
     eff_freeze = (
         entry_freeze_time
@@ -453,6 +513,7 @@ def create_tracks(
                 continue
             p = dict(track_params_dict.get(t_name, {}))
             p.setdefault("brokerage_per_order", eff_brokerage)
+            p.setdefault("option_scaling_cfg", eff_option_scaling)
             tracks[t_name] = _instantiate_base_track(
                 base_type=t_name,
                 track_name=t_name,
@@ -476,6 +537,7 @@ def create_tracks(
             modes = entry.get("modes", [])
             base_params = dict(track_params_dict.get(t_name, {}))
             base_params.setdefault("brokerage_per_order", eff_brokerage)
+            base_params.setdefault("option_scaling_cfg", eff_option_scaling)
             if "capital" in entry:
                 base_params["capital"] = entry["capital"]
             # If the exact base name was explicitly requested in filter (e.g. track_filter=["fast_momentum"])
@@ -523,6 +585,7 @@ def create_tracks(
                     if sub_key in active_filter:
                         p = dict(track_params_dict.get(sub_base, {}))
                         p.setdefault("brokerage_per_order", eff_brokerage)
+                        p.setdefault("option_scaling_cfg", eff_option_scaling)
                         tracks[sub_key] = _instantiate_base_track(
                             base_type=sub_base,
                             track_name=sub_key,
@@ -548,7 +611,11 @@ def create_tracks(
                     context=context,
                     preferred_mode=sub_m,
                     parent_track=t_name,
-                    track_params={**p, "brokerage_per_order": p.get("brokerage_per_order", eff_brokerage)},
+                    track_params={
+                        **p,
+                        "brokerage_per_order": p.get("brokerage_per_order", eff_brokerage),
+                        "option_scaling_cfg": p.get("option_scaling_cfg", eff_option_scaling),
+                    },
                     entry_freeze_time=eff_freeze,
                     eod_squareoff_time=eff_squareoff,
                 )

@@ -13,6 +13,36 @@ from core.common.ipc_schemas import ActionableOpportunity, OrderRequest, OrderRe
 from core.common.symbol_utils import is_option_contract, normalize_instrument_token
 
 
+def compute_convexity_scaled_targets(
+    target_pct: float,
+    sl_pct: float,
+    spot: float,
+    bid: float,
+    ask: float,
+    scaling_cfg: Optional[Dict[str, Any]],
+) -> tuple:
+    """Scale target/SL percentages to option leverage & spread when option_convexity_scaling is enabled."""
+    if not scaling_cfg or not scaling_cfg.get("enabled", False) or spot <= 0.0 or ask <= 0.0:
+        return float(target_pct), float(sl_pct)
+
+    ref_prem = float(scaling_cfg.get("reference_premium_pct", 0.015))
+    min_scale = float(scaling_cfg.get("min_scale", 0.45))
+    max_scale = float(scaling_cfg.get("max_scale", 1.25))
+    sl_min_scale = float(scaling_cfg.get("sl_min_scale", 0.75))
+    sl_floor_min = float(scaling_cfg.get("sl_floor_min_pct", 0.035))
+    sl_floor_max = float(scaling_cfg.get("sl_floor_max_pct", 0.12))
+    sl_spread_mult = float(scaling_cfg.get("sl_spread_mult", 2.5))
+
+    prem_pct = ask / spot
+    spread_pct = (ask - bid) / ask if bid > 0.0 else 0.02
+    scale = max(min_scale, min(max_scale, ref_prem / max(1e-6, prem_pct)))
+    new_t = float(target_pct) * scale
+    sl_floor = max(sl_floor_min, min(sl_floor_max, spread_pct * sl_spread_mult))
+    sl_scaled = min(float(sl_pct) * max_scale, float(sl_pct) * max(sl_min_scale, scale))
+    new_s = max(sl_floor, sl_scaled)
+    return new_t, new_s
+
+
 def _parse_time_to_minutes(time_val: Any, default_minutes: int) -> int:
     """Parse 'HH:MM' string or minutes int into minutes from midnight (0..1440)."""
     if time_val is None:
@@ -97,6 +127,7 @@ class BaseTrack(ABC):
         # Brokerage per order (BUY & SELL legs = 2x brokerage_per_order round trip)
         brok = kwargs.get("brokerage_per_order")
         self.brokerage_per_order: float = float(brok) if brok is not None else 30.0
+        self.option_scaling_cfg: Dict[str, Any] = dict(kwargs.get("option_scaling_cfg") or {})
 
         # Capital Availability Management (replaces arbitrary max_trades limits)
         self.allocated_capital: float = float(allocated_capital or kwargs.get("capital") or 250000.0)
@@ -220,9 +251,18 @@ class BaseTrack(ABC):
         if not self.can_allocate(required_capital):
             return None
 
-        # INVARIANT #2: Strict Ask-based entry, target, and SL computations
+        # INVARIANT #2: Strict Ask-based entry, target, and SL computations (with optional Option Convexity Scaling)
         eff_target_pct = float(target_pct_override) if target_pct_override is not None else self.target_pct
         eff_sl_pct = float(sl_pct_override) if sl_pct_override is not None else self.sl_pct
+        if self.option_scaling_cfg.get("enabled", False):
+            eff_target_pct, eff_sl_pct = compute_convexity_scaled_targets(
+                eff_target_pct,
+                eff_sl_pct,
+                float(getattr(opp, "trigger_price", 0.0) or 0.0),
+                bid,
+                ask,
+                self.option_scaling_cfg,
+            )
         entry_ask = ask
         target_price = entry_ask * (1.0 + eff_target_pct)
         stop_loss = entry_ask * (1.0 - eff_sl_pct)

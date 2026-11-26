@@ -1,9 +1,9 @@
 # Scoring Engine 3.0: Qualitative Price Action & Momentum Specification
 
 > **Document Type**: Strategy & Quantitative Signal Engine Specification  
-> **Version**: 3.0 (Zero Continuous Score, Pure Price Action & rVOL Invariants)  
-> **Status**: Finalized Design Specification  
-> **Related Architecture**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/ARCHITECTURE_SPEC_2_0.md)  
+> **Version**: 3.1 (`E10_W3_CAP3` Calibration: 15s Elapsed, Flag Top-25%, Pure 3-Bar `0.45%`, RMS 3/Sym/Day Cap)  
+> **Status**: Production Source of Truth  
+> **Related Architecture**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/ARCHITECTURE_SPEC_2_0.md)  
 > **Legacy Archive**: Legacy scoring documents are archived in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive).
 
 ---
@@ -38,15 +38,15 @@ flowchart TD
         F2 -->|Yes: Already evaluated| SkipStock
         F2 -->|No| F3{"rVOL >= 2.0x?"}
         F3 -->|No: Low institutional volume| SkipStock
-        F3 -->|Yes| F4{"Bar elapsed >= 45s?"}
+        F3 -->|Yes| F4{"Bar elapsed >= 15s?"}
         F4 -->|No: Early candle RoV jitter| SkipStock
     end
     
     subgraph SubArchetypes ["Archetype Evaluation (< 2 us)"]
-        F4 -->|Yes| EvalFlag["Archetype 1: Bull / Bear Flag Contraction Breakout"]
+        F4 -->|Yes| EvalFlag["Archetype 1: Flag Breakout (OLS & Top 25% of Pole)"]
         EvalFlag -->|Valid Flag Breakout| AddAction["Add to Loop-Local Actionable List"]
         
-        EvalFlag -->|No Flag| EvalPure["Archetype 2: Pure 3-Candle Impulse Breakout"]
+        EvalFlag -->|No Flag| EvalPure["Archetype 2: Pure 3-Bar Impulse (>= 0.45% Exp)"]
         EvalPure -->|Valid Pure Breakout| AddAction
         EvalPure -->|No Setup| SkipStock
     end
@@ -78,9 +78,15 @@ Before performing any pattern or regression math, each stock must pass four inst
    `if candle.rvol < 2.0: continue`
    - Guarantees that only stocks exhibiting **abnormal institutional volume ($\ge 2.0\times$ 20-day median)** on the current 5-minute candle are ever analyzed.
    - 210+ stocks are eliminated at this gate in $< 20\text{ nanoseconds}$.
-4. **Early-Candle Jitter Guard**:
-   `if (current_wall_clock - candle.timestamp) < 45.0: continue`
-   - Protects against artificial volume extrapolation jitter in the first 45 seconds of a 5-minute candle.
+4. **Early-Candle Jitter Guard (`min_candle_elapsed_sec = 15.0`)**:
+   `if (now_ts - candle.timestamp) < 15.0: continue`
+   - Empirically tuned (`H4a`: 15s vs 30s) in `config/strategies.json` under `scoring_engine_3_0.min_candle_elapsed_sec` to block 0–14s RoV spike false positives without sacrificing early momentum entries.
+5. **Flag Top-25% Pole Buffer (`flag_pole_buffer_pct = 0.25`)**:
+   - Bull Flag breakouts must satisfy `close >= max(OLS_proj, pole_high - 0.25 * pole_height)` (mirrored for Bear Flags at `min(OLS_proj, pole_low + 0.25 * pole_height)`), preventing deep-contraction fakeouts where steep downward OLS slopes project below mid-pole.
+6. **Pure 3-Bar Cumulative Expansion (`pure_3bar_expansion_pct = 0.0045`)**:
+   - Pure breakouts/breakdowns must demonstrate at least `0.45%` net 3-bar price displacement (`(close - prev3_low) / prev3_low >= 0.0045` for BULL; `(prev3_high - close) / prev3_high >= 0.0045` for BEAR), suppressing choppy range/expiry noise.
+7. **Downstream RMS Gate & Daily Cap (`max_alerts_per_symbol_per_day = 3`, `atr_spread_gate_enabled = true`)**:
+   - [`RMSService`](file:///Users/yorha/Documents/Trading%20Stuff/core/rms/rms_service.py) rejects illiquid strikes exceeding `3%` spread or failing the `2.0x` ATR/Spread expected-move check (`passes_atr_spread_gate`), and enforces `<= 3` accepted opportunities per symbol per day (illiquid rejections do not consume quota).
 
 ---
 

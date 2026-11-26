@@ -464,6 +464,35 @@ class TestColumnarSimEngine(unittest.TestCase):
         self.assertAlmostEqual(closed[0].exit_price, 90.0, places=2)
         self.assertEqual(closed[0].exit_reason, "SL_HIT")
 
+    def test_e10_sim_engine_defaults_and_atr_spread_gate(self):
+        """Verify ColumnarSimEngine reads E10_W3_CAP3 defaults from strategies.json and enforces ATR/Spread gate."""
+        sim = ColumnarSimEngine(
+            data_path=self.parquet_path,
+            modes=["paper"],
+            tracks=["fast_momentum_ATM"],
+        )
+        self.assertEqual(sim.min_candle_elapsed_sec, 15.0)
+        self.assertAlmostEqual(sim.flag_pole_buffer_pct, 0.25, places=6)
+        self.assertAlmostEqual(sim.pure_3bar_expansion_pct, 0.0045, places=6)
+        self.assertEqual(sim.max_alerts_per_symbol_per_day, 3)
+        self.assertTrue(sim.atr_spread_gate_enabled)
+        self.assertAlmostEqual(sim.atr_spread_gate_mult, 2.0, places=6)
+        self.assertNotIn("gamma_runner_OTM2", ColumnarSimEngine(data_path=self.parquet_path).tracks)
+
+        # Spot=1000, ask=20, bid=19.6 (2% spread < 3% cap).
+        # With quiet ATR=1.0 -> exp_opt_move=2.5% < 2 * 2% -> rejected when atr provided!
+        sim.options_catalog["GATE_SYM"] = {"CE": [(1000.0, "NSE:GATESYM26NOV1000CE")], "PE": []}
+        sim.options_by_token["NSE:GATESYM26NOV1000CE"] = {
+            "timestamps": __import__("numpy").array([1000.0]),
+            "bids": __import__("numpy").array([19.60]),
+            "asks": __import__("numpy").array([20.00]),
+            "ltps": __import__("numpy").array([19.80]),
+            "bid_qtys": __import__("numpy").array([100]),
+            "ask_qtys": __import__("numpy").array([100]),
+        }
+        self.assertEqual(sim.resolve_sim_strikes("GATE_SYM", "BULL", 1000.0, 1005.0, atr=1.0), {})
+        self.assertIn("ATM", sim.resolve_sim_strikes("GATE_SYM", "BULL", 1000.0, 1005.0, atr=4.0))
+
 
 if __name__ == "__main__":
     unittest.main()

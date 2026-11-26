@@ -2,6 +2,8 @@
 
 This document serves as the authoritative architectural specification and operational guide for all **Execution Tracks** in the Antigravity Trading Engine.
 
+> **Active Production Update (`2026-11-26`)**: Per [`SIMULATION_HYPOTHESIS_REPORT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SIMULATION_HYPOTHESIS_REPORT.md) and [`TASK_E10_W3_CAP3_ROLLOUT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/TASK_E10_W3_CAP3_ROLLOUT.md), **`gamma_runner_OTM2` is RETIRED** from `default.json` and `v2.json` (`19` active default tracks: `12 v1` + `7 v2`), and **`option_convexity_scaling` (`OptScale`)** is enabled globally via [`config/strategies.json`](file:///Users/yorha/Documents/Trading%20Stuff/config/strategies.json) + [`BaseTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py).
+
 ---
 
 ## 1. Architectural Role of Execution Tracks
@@ -104,8 +106,7 @@ Profile configuration: [`config/tracks/v1.json`](file:///Users/yorha/Documents/T
   - `composite_shared_ATM`: ATM options split across all three archetypes.
   - `composite_shared_OTM`: OTM options split across all three archetypes.
 - **Core Mechanism**:
-  - Wraps multiple child tracks under a single parent capital pool (₹250,000).
-  - Routes opportunities evenly across sub-tracks, preventing capital over-commitment while diversifying exit dynamics across strategies.
+  - Wraps multiple child tracks under a single parent capital pool (₹250,000), rotating accepted opportunities fairly across sub-tracks. Equal-share split presets (`composite_split_*`, `combined_star`) are retired; only `shared_pool: true` composites remain active.
 
 ---
 
@@ -121,8 +122,7 @@ Profile configuration: [`config/tracks/v2.json`](file:///Users/yorha/Documents/T
 ├───────────────────────────────────┬────────────────────────────────────┤
 │ LOW RISK / HIGH REWARD            │ HIGH RISK / HIGH REWARD            │
 │ • structural_convexity (ATM)      │ • opening_thrust_convex (ATM)      │
-│ • trend_pullback_v2 (ITM1)        │ • gamma_runner (OTM2)              │
-│                                   │ • volatility_expansion (ATM)       │
+│ • trend_pullback_v2 (ITM1)        │ • volatility_expansion (ATM)       │
 ├───────────────────────────────────┼────────────────────────────────────┤
 │ LOW RISK / LOW REWARD             │ DYNAMIC TIME REGIME                │
 │ • delta_scalp (ITM2)              │ • adaptive_regime (ATM / ITM1)     │
@@ -208,21 +208,14 @@ Profile configuration: [`config/tracks/v2.json`](file:///Users/yorha/Documents/T
 
 ---
 
-### 3.5 Gamma Runner Track (`gamma_runner`)
+### 3.5 Gamma Runner Track (`gamma_runner`) — **[RETIRED]**
 
-> **Quadrant: High Risk, High Reward**
+> **Quadrant: High Risk, Extreme Reward (Removed from `default.json` & `v2.json` on `2026-11-26`)**
 
+- **Retirement Rationale**: In the tick-by-tick `45`-experiment × `8`-session (`Nov 16–26`) benchmark ([`SIMULATION_HYPOTHESIS_REPORT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SIMULATION_HYPOTHESIS_REPORT.md)), `gamma_runner_OTM2` finished **`0/45` profitable** in both Paper and Delayed (`Avg -₹79,678` P / `-₹81,556` D). Disabled across active ensembles; [`GammaRunnerTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/gamma_runner.py) remains in code strictly for historical/unit-test compatibility.
 - **Class**: [`GammaRunnerTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/gamma_runner.py)
 - **Moneyness**: Deep `OTM2` ($\Delta \approx 0.25 - 0.30$)
-- **Core Philosophy**:
-  Asymmetric option convexity engine ("lottery ticket" mechanics with controlled loss). Cheaper premiums allow maximum contract leverage. When an underlying experiences an explosive trend day, gamma accelerates delta from 0.25 to 0.70+, producing outsized +75%+ gains that easily offset small scratch losses.
-- **Target / SL**: Target `+75.0%`, Initial SL `-15.0%`.
-- **Tiered Profit Ratchets**:
-  - **Tier 1 (+25% gain)**: SL moved to Breakeven (`0.0%` loss).
-  - **Tier 2 (+50% gain)**: SL locked at `+20.0%` guaranteed profit.
-  - **Tier 3 (+75% gain)**: Target Hit exit.
-- **Timeout**: None (relies on structural target or SL; exits at EOD 15:15 IST).
-- **Sim Performance (2026-11-19)**: 173 trades, **+1.0% Net PnL** (Paper) / **+1.1% Net PnL** (Delayed).
+- **Target / SL**: Target `+75.0%`, Initial SL `-15.0%` (Tier 1 breakeven `+25%`, Tier 2 lock `+20%` at `+50%`).
 
 ---
 
@@ -325,11 +318,12 @@ The table below compares the performance of all 8 new `v2` tracks against the fu
 
 ## 5. Track Management & Usage Guide
 
-### 5.1 Profile Directory (`config/tracks/`)
-Track configurations are isolated in dedicated profile JSON files:
-- `config/tracks/v1.json`: The 3 baseline legacy tracks + composite tracks.
-- `config/tracks/v2.json`: The 8 new multi-regime tracks.
-- `config/tracks/default.json`: Ensemble containing both v1 and v2 tracks.
+### 5.1 Profile Directory (`config/tracks/` & `config/strategies.json`)
+Track configurations are isolated in dedicated profile JSON files (`gamma_runner_OTM2` retired from active profiles on `2026-11-26`):
+- `config/tracks/v1.json`: The `12` baseline legacy tracks + composite tracks.
+- `config/tracks/v2.json`: The `7` active multi-regime tracks (`gamma_runner_OTM2` retired).
+- `config/tracks/default.json`: Active `19`-track ensemble combining `12 v1` + `7 v2` tracks.
+- `config/strategies.json` -> `option_convexity_scaling`: Globally scales per-trade `target_pct` (`scale = clip(0.015 / (ask / spot), 0.45, 1.25)`) and enforces spread-aware SL floors (`max(3.5%, min(12%, 2.5 * spread_pct))`) in [`BaseTrack.on_opportunity()`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py).
 
 ### 5.2 Command Line Interface (`runner.py`)
 Run simulations or live trading with profile presets or individual tracks:

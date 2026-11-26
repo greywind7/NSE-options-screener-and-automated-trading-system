@@ -4,7 +4,7 @@
 > **Component**: Antigravity Analytics & Simulation Web UI (`web/`)  
 > **Command Entry Point**: `python3 runner.py web [--host 0.0.0.0] [--port 8080] [--record-dir recordings]`  
 > **Status**: Production Specification  
-> **Related Architecture**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/ARCHITECTURE_SPEC_2_0.md), [`LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/LOW_LEVEL_DESIGN_2_0.md)
+> **Related Architecture**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/ARCHITECTURE_SPEC_2_0.md), [`LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/LOW_LEVEL_DESIGN_2_0.md)
 
 ---
 

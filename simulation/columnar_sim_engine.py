@@ -35,7 +35,7 @@ from core.common.symbol_utils import (
 )
 from core.config.config_loader import get_config_manager
 from core.rms.mode_risk import ModeRiskManager
-from core.rms.rms_service import passes_spread_gate
+from core.rms.rms_service import passes_atr_spread_gate, passes_spread_gate
 from strategies.momentum.scoring_engine import ScoringEngine3
 
 
@@ -211,7 +211,9 @@ class ColumnarSimEngine:
         self.eod_squareoff_minutes = _parse_time_to_minutes(self.eod_squareoff_time, 15 * 60 + 15)
 
         cfg_risk = cfg.get_risk_config()
+        cfg_scoring = cfg.get_scoring_config()
         strat_risk = strat_momentum.get("risk", {}) if isinstance(strat_momentum.get("risk"), dict) else {}
+        strat_scoring = strat_momentum.get("scoring_engine_3_0", {}) if isinstance(strat_momentum.get("scoring_engine_3_0"), dict) else {}
         self.enable_circuit_breaker = bool(
             strat_risk.get("enable_circuit_breaker", cfg_risk.get("enable_circuit_breaker", False))
         )
@@ -221,6 +223,26 @@ class ColumnarSimEngine:
         self.max_spread_pct = float(
             strat_risk.get("max_spread_pct", cfg_risk.get("max_spread_pct", 0.03))
         )
+        self.atr_spread_gate_enabled = bool(
+            strat_risk.get("atr_spread_gate_enabled", cfg_risk.get("atr_spread_gate_enabled", True))
+        )
+        self.atr_spread_gate_mult = float(
+            strat_risk.get("atr_spread_gate_mult", cfg_risk.get("atr_spread_gate_mult", 2.0))
+        )
+        self.min_candle_elapsed_sec = float(
+            strat_scoring.get("min_candle_elapsed_sec", cfg_scoring.get("min_candle_elapsed_sec", 15.0))
+        )
+        self.flag_pole_buffer_pct = float(
+            strat_scoring.get("flag_pole_buffer_pct", cfg_scoring.get("flag_pole_buffer_pct", 0.25))
+        )
+        self.pure_3bar_expansion_pct = float(
+            strat_scoring.get("pure_3bar_expansion_pct", cfg_scoring.get("pure_3bar_expansion_pct", 0.0045))
+        )
+        cap_raw = strat_scoring.get(
+            "max_alerts_per_symbol_per_day",
+            cfg_scoring.get("max_alerts_per_symbol_per_day", 3),
+        )
+        self.max_alerts_per_symbol_per_day: Optional[int] = int(cap_raw) if cap_raw is not None and int(cap_raw) > 0 else None
 
         if delay_sec is not None:
             self.min_delay_ms = float(delay_sec) * 1000.0
@@ -505,7 +527,7 @@ class ColumnarSimEngine:
         }
 
     def resolve_sim_strikes(
-        self, symbol: str, direction: str, trigger_price: float, timestamp: float
+        self, symbol: str, direction: str, trigger_price: float, timestamp: float, atr: float = 0.0
     ) -> Dict[str, Any]:
         """
         Resolve option strikes for symbol from ingested option depth catalog.
@@ -562,9 +584,18 @@ class ColumnarSimEngine:
 
             ask = q["ask"]
             bid = q["bid"]
-            # Enforce configurable max spread percentage (3% default) across both Live and Sim
+            # Enforce configurable max spread percentage (3% default) and ATR/Spread edge gate across Live and Sim
             if not passes_spread_gate(bid, ask, max_spread_pct=self.max_spread_pct):
                 continue
+            if self.atr_spread_gate_enabled and atr > 0.0:
+                if not passes_atr_spread_gate(
+                    bid,
+                    ask,
+                    spot=trigger_price,
+                    atr=atr,
+                    min_move_to_spread_mult=self.atr_spread_gate_mult,
+                ):
+                    continue
 
             resolved[role] = {
                 "token": tok,
@@ -625,8 +656,22 @@ class ColumnarSimEngine:
         # 1. Initialize State Layer: CandleManager & ScoringEngine with isolated SHM (ZeroMQ disabled in offline simulation)
         unlink_shm(self.shm_name)
         candle_mgr = CandleManager(shm_name=self.shm_name, enable_zmq=False)
-        scoring_eng = ScoringEngine3(shm_name=self.shm_name, min_pole_pct=self.min_pole_pct, enable_zmq=False, persist_alerts=False)
-        print(f"  • Scoring Engine: min_pole_pct={scoring_eng.min_pole_pct*100.0:.2f}% | min_clv={scoring_eng.min_clv} | invalidation_retrace={scoring_eng.invalidation_retrace_pct*100.0:.0f}%")
+        scoring_eng = ScoringEngine3(
+            shm_name=self.shm_name,
+            min_pole_pct=self.min_pole_pct,
+            enable_zmq=False,
+            persist_alerts=False,
+            min_candle_elapsed_sec=self.min_candle_elapsed_sec,
+            flag_pole_buffer_pct=self.flag_pole_buffer_pct,
+            pure_3bar_expansion_pct=self.pure_3bar_expansion_pct,
+        )
+        print(
+            f"  • Scoring Engine: min_pole_pct={scoring_eng.min_pole_pct*100.0:.2f}% | "
+            f"min_clv={scoring_eng.min_clv} | elapsed>={scoring_eng.min_candle_elapsed_sec:.0f}s | "
+            f"flag_buf={scoring_eng.flag_pole_buffer_pct*100.0:.0f}% | "
+            f"3bar_exp>={scoring_eng.pure_3bar_expansion_pct*100.0:.2f}% | "
+            f"cap={self.max_alerts_per_symbol_per_day}/sym/day"
+        )
 
         # 2. Initialize Execution Superstructures & Tracks for active modes only
         cfg = get_config_manager()
@@ -689,6 +734,7 @@ class ColumnarSimEngine:
         vols = df_eq["volume"].to_numpy().astype(np.int64) if "volume" in df_eq.columns else np.zeros(len(ts_arr), dtype=np.int64)
         total_eq = len(ts_arr)
         latest_equity_ltp: Dict[str, float] = {}
+        sym_daily_alert_counts: Dict[Tuple[str, str], int] = {}
 
         # Active open-trade indices for event-driven tick-by-tick replay
         open_trades_by_token: Dict[str, List[Tuple[str, str, Any, TradeState]]] = {}
@@ -928,16 +974,27 @@ class ColumnarSimEngine:
                 # Hard Entry Freeze Cutoff: no new trade setups generated after entry_freeze_time (default 15:00 IST)
                 if curr_minutes < self.entry_freeze_minutes:
                     alerts = scoring_eng.evaluate_universe(now_ts=t_curr)
+                    ist_date = dt_curr.strftime("%Y-%m-%d")
 
                     for alert in alerts:
+                        cap_key = (ist_date, alert.symbol.upper())
+                        if (
+                            self.max_alerts_per_symbol_per_day is not None
+                            and sym_daily_alert_counts.get(cap_key, 0) >= self.max_alerts_per_symbol_per_day
+                        ):
+                            continue
+
                         resolved_strikes = self.resolve_sim_strikes(
                             symbol=alert.symbol,
                             direction=alert.direction,
                             trigger_price=alert.trigger_price,
                             timestamp=t_curr,
+                            atr=float(getattr(alert, "atr", 0.0) or 0.0),
                         )
                         if not resolved_strikes:
                             continue
+
+                        sym_daily_alert_counts[cap_key] = sym_daily_alert_counts.get(cap_key, 0) + 1
 
                         opp = ActionableOpportunity(
                             opp_id=f"OPP_SIM_{alert.symbol}_{int(t_curr*1000)}",

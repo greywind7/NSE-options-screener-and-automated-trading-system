@@ -1,8 +1,13 @@
 # Platform Enhancements & Alpha Roadmap (`IMPROVEMENTS.md`)
 
-**Date**: 2026-11-25  
+**Date**: 2026-11-26  
 **Scope**: Post-Audit Architectural Evolution, Detection/Scoring Refinements, Simulation Research Tooling, Live Broker Hardening, and Multi-Strategy Alpha Expansion.  
-**Execution Policy**: Design & brainstorming blueprint only. No runtime code changes should be applied until active [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SYSTEM_AUDIT_2_0.md) items are resolved and market hours conclude.
+**Execution Policy**: Design & brainstorming blueprint. Remaining critical items in [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SYSTEM_AUDIT_2_0.md) still apply before live capital deployment.
+
+> **Implemented Production Baseline (`2026-11-26`)**:
+> - Promoted **`E10_W3_CAP3`** (`15s` elapsed floor, `FLAG25`, `3-Bar >= 0.45%`, `<= 3` accepted alerts/symbol/day, `2.0x` ATR/Spread edge gate, `option_convexity_scaling`, `midday_freeze.enabled = false`) into [`config/strategies.json`](file:///Users/yorha/Documents/Trading%20Stuff/config/strategies.json) + runtime engines ([`TASK_E10_W3_CAP3_ROLLOUT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/TASK_E10_W3_CAP3_ROLLOUT.md)).
+> - Retired **`gamma_runner_OTM2`** from `default.json` & `v2.json`.
+> - Completed configurable `enable_circuit_breaker` (`false` default), `max_spread_pct = 0.03`, `QuotesBroker` `TICK.EQ` underlying routing, and event-driven tick-by-tick `ColumnarSimEngine` replay (`§2` Batch Report criteria added & exercised in [`SIMULATION_HYPOTHESIS_REPORT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SIMULATION_HYPOTHESIS_REPORT.md)).
 
 ---
 
@@ -20,7 +25,7 @@ Many of the structural, UI, simulation, and alpha improvements below reinforce o
 ## Part 1 — Architecture, Data & Execution Infrastructure
 
 ### 1. Deterministic `origin_track` Recording in Composite Trade Journals (`--continue`)
-- **Current Limitation**: Composite tracks (`composite_shared_*`, `composite_split_*`) route opportunities into child sub-tracks, and `BaseSuperstructure` recovery relies on `origin_track` / metadata mapping. If an entry event lacks an explicit `origin_track` (or only persists top-level `track`), `--continue` cannot guarantee deterministic routing back to the exact child sub-track after a restart.
+- **Current Limitation**: Composite tracks (`composite_shared_*`) route opportunities into child sub-tracks, and `BaseSuperstructure` recovery relies on `origin_track` / metadata mapping. If an entry event lacks an explicit `origin_track` (or only persists top-level `track`), `--continue` cannot guarantee deterministic routing back to the exact child sub-track after a restart.
 - **Target Design**:
   1. Promote `origin_track` and `sub_track_rule` to first-class immutable fields on `TradeState` (emitted on `TRADE_ENTRY_SUBMITTED` and `TRADE_FILLED`).
   2. In [`CompositeTrack.add_recovered_trade()`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/composite_track.py), route **strictly** by `trade.origin_track` matching child track names—never random or round-robin assignment. If a legacy journal record lacks `origin_track`, fail loudly with an explicit warning and quarantine rather than silently misattributing SL/target rules.
@@ -100,7 +105,7 @@ Many of the structural, UI, simulation, and alpha improvements below reinforce o
     4. Export winning $\theta^*$ directly as a **Derived Config Profile** (#4) for paper verification.
 
 ### 7. Content-Addressed On-Disk Simulation Cache (Paper Only)
-- **Current Limitation**: [`SimulationService.cache_by_param_hash`](file:///Users/yorha/Documents/Trading%20Stuff/web/simulation_service.py#L101) is **in-memory only** (lost on every web restart) and currently omits `track_profile` from `compute_param_hash()` (`MED-09` in [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SYSTEM_AUDIT_2_0.md)).
+- **Current Limitation**: [`SimulationService.cache_by_param_hash`](file:///Users/yorha/Documents/Trading%20Stuff/web/simulation_service.py#L101) is **in-memory only** (lost on every web restart) and currently omits `track_profile` from `compute_param_hash()` (`MED-09` in [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SYSTEM_AUDIT_2_0.md)).
 - **Target Design**:
   1. **Strict Paper-Only Caching Rule**: Never cache `paper_delayed` simulations on disk (since random delay draws are non-deterministic unless an explicit `random_seed` is enabled in debug mode). Cache strictly when `modes == ["paper"]` (or cache the `paper` portion independently while always executing `paper_delayed` fresh).
   2. **Deterministic Cache Key (SHA-256)** combining:
@@ -280,7 +285,7 @@ We have **11 recorded sessions** (`2026-11-09` through `2026-11-25`, with ~60–
 
 | Wave | Focus | Key Items | Dependencies / Prerequisites |
 |---|---|---|---|
-| **Wave 0 (Immediate Post-Market)** | Critical Correctness & Zero Fabrication | Clear remaining [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SYSTEM_AUDIT_2_0.md) items (`CRIT-02`, `CRIT-05`, `HIGH-02`..`07`), **critical `FeedHandler` keepalive/watchdog reconnect & unbuffered logging (Part 4 §0)**, test isolation guard (#9), remove silent `except: pass` + health counters, hoist constants & C-style macros | Must finish before building new features on top |
+| **Wave 0 (Immediate Post-Market)** | Critical Correctness & Zero Fabrication | Clear remaining [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SYSTEM_AUDIT_2_0.md) items (`CRIT-02`, `CRIT-05`, `HIGH-02`..`07`), **critical `FeedHandler` keepalive/watchdog reconnect & unbuffered logging (Part 4 §0)**, test isolation guard (#9), remove silent `except: pass` + health counters, hoist constants & C-style macros | Must finish before building new features on top |
 | **Wave 1 (Foundations & Data Pipeline)** | Hygiene, Parity & Storage | Shared `common/options/strike_resolver.py`, shared `common/journals/reader.py`, `MarketRecorder` fast shard writes + exit/CLI collation, standardized logging & staged→master journals, `origin_track` persistence, configurable midday freeze, Nifty 50 recording fix | Enables clean multi-day data, zero live/sim drift & reliable `--continue` |
 | **Wave 2 (Research, Tasks & Web Platform)** | Backtest Speed & Ops Control | `ColumnarSimEngine` single-sort flat array refactor + warm workers, disk sim cache (paper only), immutable presets + derived configs, Batch Reports + regime classifier, surrogate parameter optimizer, Web UI Admin/Health & Tasks tabs + `cli/` refactor | Unlocks rapid empirical optimization across all 11+ recorded days |
 | **Wave 3 (Core Decoupling & Alpha)** | Multi-Strategy Engine | Decouple `RMSService` to core & add `strategy_id` routing, `CandleManager` & `ScoringEngine3` hot-path optimizations (dirty sequence skip), `BaseTrack` `O(1)` indexing + SHM underlying LTP, Mean Reversion (`11:30–13:30`) & Relative Strength strategies | Requires Wave 1–2 validation |

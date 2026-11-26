@@ -347,6 +347,8 @@ class SimulationService:
                 })
 
         risk_cfg = momentum.get("risk", {})
+        scoring_cfg = momentum.get("scoring_engine_3_0", {})
+        opt_scale_cfg = momentum.get("option_convexity_scaling", {})
         available_dates = self.get_simulation_dates()
         default_date = available_dates[-1]["date"] if available_dates else "2026-11-19"
 
@@ -362,12 +364,19 @@ class SimulationService:
                 "min_delay_ms": 200.0,
                 "max_delay_ms": 500.0,
                 "brokerage_per_order": float(momentum.get("brokerage_per_order", 30.0)),
-                "min_pole_pct": float(momentum.get("scoring_engine_3_0", {}).get("min_pole_pct", 0.005)),
+                "min_pole_pct": float(scoring_cfg.get("min_pole_pct", 0.005)),
+                "min_candle_elapsed_sec": float(scoring_cfg.get("min_candle_elapsed_sec", 15.0)),
+                "flag_pole_buffer_pct": float(scoring_cfg.get("flag_pole_buffer_pct", 0.25)),
+                "pure_3bar_expansion_pct": float(scoring_cfg.get("pure_3bar_expansion_pct", 0.0045)),
+                "max_alerts_per_symbol_per_day": scoring_cfg.get("max_alerts_per_symbol_per_day", 3),
                 "entry_freeze_time": momentum.get("entry_freeze_time", "15:00"),
                 "eod_squareoff_time": momentum.get("eod_squareoff_time", "15:15"),
                 "enable_circuit_breaker": bool(risk_cfg.get("enable_circuit_breaker", False)),
                 "daily_loss_limit_inr": float(risk_cfg.get("daily_loss_limit_inr", 10000.0)),
                 "max_spread_pct": float(risk_cfg.get("max_spread_pct", 0.03)),
+                "atr_spread_gate_enabled": bool(risk_cfg.get("atr_spread_gate_enabled", True)),
+                "atr_spread_gate_mult": float(risk_cfg.get("atr_spread_gate_mult", 2.0)),
+                "opt_scale_enabled": bool(opt_scale_cfg.get("enabled", True)),
             },
             "base_tracks": base_tracks,
             "composite_tracks": composite_tracks,
@@ -832,13 +841,33 @@ class SimulationService:
 
         glob = params.get("global_settings", {})
         from core.config.config_loader import get_config_manager
-        base_risk = dict(get_config_manager().get_risk_config())
+        cfg_mgr = get_config_manager()
+        base_risk = dict(cfg_mgr.get_risk_config())
         if "enable_circuit_breaker" in glob:
             base_risk["enable_circuit_breaker"] = bool(glob["enable_circuit_breaker"])
         if "daily_loss_limit_inr" in glob and glob["daily_loss_limit_inr"] is not None:
             base_risk["daily_loss_limit_inr"] = float(glob["daily_loss_limit_inr"])
         if "max_spread_pct" in glob and glob["max_spread_pct"] is not None:
             base_risk["max_spread_pct"] = float(glob["max_spread_pct"])
+        if "atr_spread_gate_enabled" in glob:
+            base_risk["atr_spread_gate_enabled"] = bool(glob["atr_spread_gate_enabled"])
+        if "atr_spread_gate_mult" in glob and glob["atr_spread_gate_mult"] is not None:
+            base_risk["atr_spread_gate_mult"] = float(glob["atr_spread_gate_mult"])
+
+        base_scoring = dict(cfg_mgr.get_scoring_config())
+        if "min_candle_elapsed_sec" in glob and glob["min_candle_elapsed_sec"] is not None:
+            base_scoring["min_candle_elapsed_sec"] = float(glob["min_candle_elapsed_sec"])
+        if "flag_pole_buffer_pct" in glob and glob["flag_pole_buffer_pct"] is not None:
+            base_scoring["flag_pole_buffer_pct"] = float(glob["flag_pole_buffer_pct"])
+        if "pure_3bar_expansion_pct" in glob and glob["pure_3bar_expansion_pct"] is not None:
+            base_scoring["pure_3bar_expansion_pct"] = float(glob["pure_3bar_expansion_pct"])
+        if "max_alerts_per_symbol_per_day" in glob:
+            cap_v = glob["max_alerts_per_symbol_per_day"]
+            base_scoring["max_alerts_per_symbol_per_day"] = int(cap_v) if cap_v is not None else None
+
+        base_opt_scale = dict(cfg_mgr.strategy.get("strategies", {}).get("momentum", {}).get("option_convexity_scaling") or {})
+        if "opt_scale_enabled" in glob:
+            base_opt_scale["enabled"] = bool(glob["opt_scale_enabled"])
 
         return {
             "strategies": {
@@ -849,6 +878,8 @@ class SimulationService:
                     "brokerage_per_order": float(glob.get("brokerage_per_order", 30.0)),
                     "entry_freeze_time": glob.get("entry_freeze_time", "15:00"),
                     "eod_squareoff_time": glob.get("eod_squareoff_time", "15:15"),
+                    "scoring_engine_3_0": base_scoring,
+                    "option_convexity_scaling": base_opt_scale,
                     "risk": base_risk,
                 }
             }

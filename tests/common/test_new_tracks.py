@@ -237,29 +237,49 @@ class TestNewExecutionTracks(unittest.TestCase):
         self.assertIn("fixed_target_ATM", v1_names)
         self.assertNotIn("structural_convexity_ATM", v1_names)
 
-        # 2. v2 profile
+        # 2. v2 profile (gamma_runner_OTM2 retired)
         v2_names = get_enabled_track_names(track_profile="v2")
         self.assertIn("structural_convexity_ATM", v2_names)
         self.assertIn("opening_thrust_convex_ATM", v2_names)
         self.assertIn("delta_scalp_ITM2", v2_names)
         self.assertIn("micro_chandelier_ITM1", v2_names)
-        self.assertIn("gamma_runner_OTM2", v2_names)
+        self.assertNotIn("gamma_runner_OTM2", v2_names)
         self.assertIn("volatility_expansion_ATM", v2_names)
         self.assertIn("adaptive_regime_ATM", v2_names)
         self.assertIn("trend_pullback_v2_ITM1", v2_names)
         self.assertNotIn("fast_momentum_ATM", v2_names)
 
-        # 3. default profile (both v1 and v2)
+        # 3. default profile (both v1 and active v2, without gamma_runner_OTM2)
         def_names = get_enabled_track_names(track_profile="default")
         self.assertIn("fast_momentum_ATM", def_names)
         self.assertIn("structural_convexity_ATM", def_names)
+        self.assertNotIn("gamma_runner_OTM2", def_names)
 
         # 4. Instantiate v2 tracks via create_tracks
         tracks_v2 = create_tracks(context=self.context, track_profile="v2")
-        self.assertEqual(len(tracks_v2), 8)
+        self.assertEqual(len(tracks_v2), 7)
         self.assertIsInstance(tracks_v2["structural_convexity_ATM"], StructuralConvexityTrack)
         self.assertIsInstance(tracks_v2["delta_scalp_ITM2"], DeltaScalpTrack)
-        self.assertIsInstance(tracks_v2["gamma_runner_OTM2"], GammaRunnerTrack)
+        self.assertTrue(tracks_v2["structural_convexity_ATM"].option_scaling_cfg.get("enabled"))
+
+    def test_option_convexity_scaling_and_spread_sl_floor(self):
+        # Expensive ITM2 option (ask = 50 on 1500 spot -> prem_pct = 3.33%, scale = 0.015 / 0.03333 = 0.45)
+        tracks_v1 = create_tracks(context=self.context, track_filter=["fixed_target_ATM"])
+        tr_obj = tracks_v1["fixed_target_ATM"]
+        # High-premium quote (ask = 45.0 -> 3.0% on 1500 spot -> scale = 0.50)
+        opp_hi = _make_dummy_opp(trigger_price=1500.0)
+        opp_hi.strikes["ATM"] = {"token": "INFY_ATM", "strike": 1500.0, "ask": 45.0, "bid": 44.5, "lot_size": 300}
+        trade = tr_obj.on_opportunity(opp_hi)
+        self.assertIsNotNone(trade)
+        # target scaled by 0.50: 0.15 * 0.50 = 0.075
+        self.assertAlmostEqual(trade.metadata["target_pct"], 0.075, places=4)
+        self.assertAlmostEqual(trade.target_price, 45.0 * 1.075, places=4)
+        # Wide-spread quote triggers 2.5x spread SL floor (>= 6.25% for 2.5% spread)
+        opp_sp = _make_dummy_opp(trigger_price=1500.0)
+        opp_sp.strikes["ATM"] = {"token": "INFY_ATM", "strike": 1500.0, "ask": 20.0, "bid": 19.5, "lot_size": 300}
+        trade_sp = tr_obj.on_opportunity(opp_sp)
+        self.assertIsNotNone(trade_sp)
+        self.assertAlmostEqual(trade_sp.metadata["sl_pct"], 0.0625, places=4)
 
 
 if __name__ == "__main__":

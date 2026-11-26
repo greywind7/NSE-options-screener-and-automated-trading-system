@@ -17,6 +17,7 @@ import zmq
 
 from core.common.ipc_schemas import ActionableOpportunity, SetupAlert, pack_message, unpack_message
 from core.common.symbol_utils import normalize_instrument_token
+from core.common.time_utils import IST
 from core.quotes.quotes_broker import QuotesBrokerClient, DEFAULT_QUOTES_ROUTER_IPC
 
 DEFAULT_ALERTS_SUB_IPC = "ipc:///tmp/scoring_alerts_pub.ipc"
@@ -54,6 +55,24 @@ def passes_spread_gate(bid: float, ask: float, max_spread_pct: float = 0.03) -> 
     return ((ask - bid) / ask) <= float(max_spread_pct)
 
 
+def passes_atr_spread_gate(
+    bid: float,
+    ask: float,
+    spot: float,
+    atr: float,
+    min_move_to_spread_mult: float = 2.0,
+) -> bool:
+    """Reject contracts whose bid-ask spread consumes too much of an expected 0.5-ATR option move."""
+    if ask <= 0.0 or bid <= 0.0 or bid >= ask:
+        return False
+    if spot <= 0.0 or atr <= 0.0 or min_move_to_spread_mult <= 0.0:
+        return True
+    prem_pct = ask / spot
+    spread_pct = (ask - bid) / ask
+    exp_opt_move = (0.5 * atr / spot) / max(1e-6, prem_pct)
+    return exp_opt_move >= float(min_move_to_spread_mult) * spread_pct
+
+
 class RMSService:
     def __init__(
         self,
@@ -68,6 +87,7 @@ class RMSService:
         cfg = get_config_manager()
         ipc = cfg.get_ipc_endpoints()
         risk_cfg = cfg.get_risk_config()
+        scoring_cfg = cfg.get_scoring_config()
         inst_paths = cfg.instruments.get("instruments", {}).get("paths", {})
 
         self.alerts_ipc = alerts_ipc or ipc.get("scoring_alerts_ipc", DEFAULT_ALERTS_SUB_IPC)
@@ -81,6 +101,18 @@ class RMSService:
                 spread_gate_cfg.get("max_spread_pct", risk_cfg.get("max_spread_pct", 0.03))
             ),
         }
+        self.atr_spread_gate_enabled = bool(
+            kwargs.get("atr_spread_gate_enabled", risk_cfg.get("atr_spread_gate_enabled", True))
+        )
+        self.atr_spread_gate_mult = float(
+            kwargs.get("atr_spread_gate_mult", risk_cfg.get("atr_spread_gate_mult", 2.0))
+        )
+        cap_raw = kwargs.get(
+            "max_alerts_per_symbol_per_day",
+            scoring_cfg.get("max_alerts_per_symbol_per_day", risk_cfg.get("max_alerts_per_symbol_per_day", 3)),
+        )
+        self.max_alerts_per_symbol_per_day: Optional[int] = int(cap_raw) if cap_raw is not None and int(cap_raw) > 0 else None
+        self._daily_symbol_counts: Dict[tuple, int] = {}
         self.default_expiry_tag = str(
             kwargs.get("default_expiry_tag") or risk_cfg.get("default_expiry_tag") or get_current_expiry_tag()
         )
@@ -140,7 +172,7 @@ class RMSService:
             except Exception as e:
                 print(f"[RMS_SERVICE] Warning loading options map: {e}")
 
-    def resolve_strikes(self, symbol: str, direction: str, trigger_price: float) -> Dict[str, Any]:
+    def resolve_strikes(self, symbol: str, direction: str, trigger_price: float, atr: float = 0.0) -> Dict[str, Any]:
         """
         Compute ATM, ITM1, ITM2, OTM1, OTM2 strikes and query QuotesBroker for depth.
         Enforces hybrid tick spread gate (Gap 1 / HIGH-004): (ask - bid) <= max(0.50, 0.03 * ask).
@@ -250,6 +282,15 @@ class RMSService:
             if not passes_spread_gate(bid, ask, max_spread_pct=max_spread_pct):
                 # Spread is too wide or quote invalid; skip this illiquid strike
                 continue
+            if self.atr_spread_gate_enabled and atr > 0.0:
+                if not passes_atr_spread_gate(
+                    bid,
+                    ask,
+                    spot=trigger_price,
+                    atr=atr,
+                    min_move_to_spread_mult=self.atr_spread_gate_mult,
+                ):
+                    continue
 
             resolved[role] = {
                 "token": norm_token,
@@ -272,10 +313,29 @@ class RMSService:
 
     def process_alert(self, alert: SetupAlert) -> Optional[ActionableOpportunity]:
         """
-        Evaluate SetupAlert against strike liquidity gates and construct ActionableOpportunity.
+        Evaluate SetupAlert against strike liquidity gates, per-symbol daily cap, and emit ActionableOpportunity.
         """
-        # Resolve strikes with hybrid spread gate
-        strikes = self.resolve_strikes(alert.symbol, alert.direction, alert.trigger_price)
+        now_ts = float(alert.timestamp or time.time())
+        date_str = datetime.fromtimestamp(now_ts, tz=IST).strftime("%Y-%m-%d")
+        cap_key = (date_str, alert.symbol.upper())
+        if (
+            self.max_alerts_per_symbol_per_day is not None
+            and self._daily_symbol_counts.get(cap_key, 0) >= self.max_alerts_per_symbol_per_day
+        ):
+            print(
+                f"[RMS_SERVICE] Alert {alert.alert_id} capped: {alert.symbol} reached "
+                f"{self.max_alerts_per_symbol_per_day}/day limit",
+                flush=True,
+            )
+            return None
+
+        # Resolve strikes with spread & ATR/spread edge gates
+        strikes = self.resolve_strikes(
+            alert.symbol,
+            alert.direction,
+            alert.trigger_price,
+            atr=float(getattr(alert, "atr", 0.0) or 0.0),
+        )
         if not strikes:
             print(
                 f"[RMS_SERVICE] Alert {alert.alert_id} rejected: no liquid strikes for "
@@ -283,6 +343,8 @@ class RMSService:
                 flush=True,
             )
             return None
+
+        self._daily_symbol_counts[cap_key] = self._daily_symbol_counts.get(cap_key, 0) + 1
 
         opp = ActionableOpportunity(
             opp_id=f"OPP_{alert.symbol}_{int(time.time()*1000)}",

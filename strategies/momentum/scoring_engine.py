@@ -75,6 +75,9 @@ class ScoringEngine3:
         min_pole_pct: Optional[float] = None,
         enable_zmq: bool = True,
         persist_alerts: Optional[bool] = None,
+        min_candle_elapsed_sec: Optional[float] = None,
+        flag_pole_buffer_pct: Optional[float] = None,
+        pure_3bar_expansion_pct: Optional[float] = None,
     ):
         from core.config.config_loader import get_config_manager
         cfg = get_config_manager()
@@ -103,6 +106,21 @@ class ScoringEngine3:
 
         self.max_consolidation_candles = int(scoring_cfg.get("max_consolidation_candles", 5))
         self.quarantine_cooldown_sec = float(scoring_cfg.get("quarantine_cooldown_sec", 5.0))
+        self.min_candle_elapsed_sec = float(
+            scoring_cfg.get("min_candle_elapsed_sec", 15.0)
+            if min_candle_elapsed_sec is None
+            else min_candle_elapsed_sec
+        )
+        self.flag_pole_buffer_pct = float(
+            scoring_cfg.get("flag_pole_buffer_pct", 0.25)
+            if flag_pole_buffer_pct is None
+            else flag_pole_buffer_pct
+        )
+        self.pure_3bar_expansion_pct = float(
+            scoring_cfg.get("pure_3bar_expansion_pct", 0.0045)
+            if pure_3bar_expansion_pct is None
+            else pure_3bar_expansion_pct
+        )
 
         self._owns_pool = pool is None
         self.pool = pool or OpportunityPool(
@@ -360,6 +378,11 @@ class ScoringEngine3:
                         ys = np.array([float(b["high"]) for b in contraction], dtype=np.float64)
                         m, c_val = np.polyfit(xs, ys, 1)
                         proj_trigger = float(m * len(contraction) + c_val)
+                        req_trig = (
+                            max(proj_trigger, pole_high - self.flag_pole_buffer_pct * pole_height)
+                            if self.flag_pole_buffer_pct > 0.0
+                            else proj_trigger
+                        )
 
                         avg_contr_rov = float(np.mean([float(b["volume"]) / 300.0 for b in contraction]))
                         curr_elapsed = max(1.0, now_ts - float(c["timestamp"]))
@@ -367,7 +390,7 @@ class ScoringEngine3:
                         clv = float(c["close"] - c["low"]) / max(0.01, float(c["high"] - c["low"]))
 
                         if (
-                            float(c["close"]) >= proj_trigger
+                            float(c["close"]) >= req_trig
                             and curr_rov >= self.min_volume_thrust_mult * avg_contr_rov
                             and clv >= self.min_clv
                         ):
@@ -398,6 +421,11 @@ class ScoringEngine3:
                         ys = np.array([float(b["low"]) for b in contraction], dtype=np.float64)
                         m, c_val = np.polyfit(xs, ys, 1)
                         proj_trigger = float(m * len(contraction) + c_val)
+                        req_trig = (
+                            min(proj_trigger, pole_low + self.flag_pole_buffer_pct * pole_height)
+                            if self.flag_pole_buffer_pct > 0.0
+                            else proj_trigger
+                        )
 
                         avg_contr_rov = float(np.mean([float(b["volume"]) / 300.0 for b in contraction]))
                         curr_elapsed = max(1.0, now_ts - float(c["timestamp"]))
@@ -405,7 +433,7 @@ class ScoringEngine3:
                         clv_bear = float(c["high"] - c["close"]) / max(0.01, float(c["high"] - c["low"]))
 
                         if (
-                            float(c["close"]) <= proj_trigger
+                            float(c["close"]) <= req_trig
                             and curr_rov >= self.min_volume_thrust_mult * avg_contr_rov
                             and clv_bear >= self.min_clv
                         ):
@@ -448,6 +476,7 @@ class ScoringEngine3:
 
         # Bull Impulse
         combined_high = float(max(b["high"] for b in prev))
+        combined_low = float(min(b["low"] for b in prev))
         avg_thrust = float(sum(abs(float(b["close"]) - float(b["open"])) for b in prev)) / 3.0
         baseline_thrust = max(avg_thrust, 0.35 * atr)
         curr_thrust = float(c["close"] - c["open"])
@@ -456,9 +485,13 @@ class ScoringEngine3:
         curr_elapsed = max(1.0, now_ts - float(c["timestamp"]))
         curr_rov = float(c["volume"]) / curr_elapsed
         clv = float(c["close"] - c["low"]) / max(0.01, float(c["high"] - c["low"]))
+        bull_exp_ok = self.pure_3bar_expansion_pct <= 0.0 or (
+            combined_low > 0.0 and ((float(c["close"]) - combined_low) / combined_low) >= self.pure_3bar_expansion_pct
+        )
 
         if (
             float(c["close"]) > combined_high
+            and bull_exp_ok
             and curr_thrust >= self.min_volume_thrust_mult * baseline_thrust
             and curr_rov >= self.min_volume_thrust_mult * avg_rov
             and clv >= self.min_clv
@@ -473,21 +506,24 @@ class ScoringEngine3:
                 clv=clv,
                 atr=atr,
                 flag_high=combined_high,
-                flag_low=float(min(b["low"] for b in prev)),
+                flag_low=combined_low,
                 timestamp=now_ts,
                 pole_high=combined_high,
-                pole_low=float(min(b["low"] for b in prev)),
+                pole_low=combined_low,
             )
 
         # Bear Impulse
-        combined_low = float(min(b["low"] for b in prev))
-        avg_bear_thrust = float(sum(abs(float(b["close"]) - float(b["open"])) for b in prev)) / 3.0
-        baseline_bear_thrust = max(avg_bear_thrust, 0.35 * atr)
+        avg_bear_thrust = avg_thrust
+        baseline_bear_thrust = baseline_thrust
         curr_bear_thrust = float(c["open"] - c["close"])
         clv_bear = float(c["high"] - c["close"]) / max(0.01, float(c["high"] - c["low"]))
+        bear_exp_ok = self.pure_3bar_expansion_pct <= 0.0 or (
+            combined_high > 0.0 and ((combined_high - float(c["close"])) / combined_high) >= self.pure_3bar_expansion_pct
+        )
 
         if (
             float(c["close"]) < combined_low
+            and bear_exp_ok
             and curr_bear_thrust >= self.min_volume_thrust_mult * baseline_bear_thrust
             and curr_rov >= self.min_volume_thrust_mult * avg_rov
             and clv_bear >= self.min_clv
@@ -501,10 +537,10 @@ class ScoringEngine3:
                 rvol=rvol,
                 clv=clv_bear,
                 atr=atr,
-                flag_high=float(max(b["high"] for b in prev)),
+                flag_high=combined_high,
                 flag_low=combined_low,
                 timestamp=now_ts,
-                pole_high=float(max(b["high"] for b in prev)),
+                pole_high=combined_high,
                 pole_low=combined_low,
             )
 
@@ -528,6 +564,10 @@ class ScoringEngine3:
 
             # Gate 2: Already triggered on this bar
             if m.status is not None and m.status_bar_idx == bar_idx:
+                continue
+
+            # Gate 2b: Min elapsed seconds inside active candle before firing setup alerts
+            if self.min_candle_elapsed_sec > 0.0 and (now_ts - c_ts) < self.min_candle_elapsed_sec:
                 continue
 
             # Strict current-candle rVOL and ATR-14 from Shared Memory (computed by CandleManager)

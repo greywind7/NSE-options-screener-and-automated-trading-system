@@ -231,6 +231,47 @@ class TestRMSService(unittest.TestCase):
         self.assertFalse(mgr_off.is_circuit_breaker_tripped())
         self.assertTrue(mgr_off.can_allocate(10000.0))
 
+    def test_atr_spread_gate_and_daily_symbol_cap(self):
+        from core.rms.rms_service import passes_atr_spread_gate
+
+        # Spot=1000, ATR=4.0 (0.5*ATR/spot = 0.20%), option ask=20 (prem_pct=2%) -> exp_opt_move = 10%
+        # Spread 2% (bid=19.60, ask=20.00): 10% >= 2 * 2% -> passes
+        self.assertTrue(passes_atr_spread_gate(bid=19.60, ask=20.00, spot=1000.0, atr=4.0, min_move_to_spread_mult=2.0))
+        # Quiet ATR=1.0 (0.5*ATR/spot = 0.05%) -> exp_opt_move = 2.5% < 2 * 2% (4%) -> rejected
+        self.assertFalse(passes_atr_spread_gate(bid=19.60, ask=20.00, spot=1000.0, atr=1.0, min_move_to_spread_mult=2.0))
+
+        self.assertTrue(self.rms.atr_spread_gate_enabled)
+        self.assertEqual(self.rms.max_alerts_per_symbol_per_day, 3)
+
+        atm_token = "NSE:INFY26NOV1500CE"
+        # First inject an illiquid wide spread -> rejected alerts must NOT consume daily symbol cap!
+        self.broker.on_tick({
+            "token": atm_token, "symbol": "INFY", "ltp": 29.0, "bid": 28.0, "ask": 30.0, "bid_qty": 100, "ask_qty": 100,
+        })
+        base_ts = 1795060800.0
+        bad_alert = SetupAlert(
+            alert_id="ALT_BAD", symbol="INFY", direction="BULL", archetype="FLAG_BULL_BREAKOUT",
+            trigger_price=1500.0, rvol=3.0, clv=0.9, atr=15.0, flag_high=1505.0, flag_low=1490.0, timestamp=base_ts,
+        )
+        self.assertIsNone(self.rms.process_alert(bad_alert))
+
+        # Now inject tight liquid spread; 3 alerts succeed and 4th is capped
+        self.broker.on_tick({
+            "token": atm_token, "symbol": "INFY", "ltp": 30.0, "bid": 29.8, "ask": 30.1, "bid_qty": 200, "ask_qty": 200,
+        })
+        for i in range(3):
+            ok_alert = SetupAlert(
+                alert_id=f"ALT_OK_{i}", symbol="INFY", direction="BULL", archetype="FLAG_BULL_BREAKOUT",
+                trigger_price=1500.0, rvol=3.0, clv=0.9, atr=15.0, flag_high=1505.0, flag_low=1490.0, timestamp=base_ts + i * 60.0,
+            )
+            self.assertIsNotNone(self.rms.process_alert(ok_alert))
+
+        fourth_alert = SetupAlert(
+            alert_id="ALT_CAP_4", symbol="INFY", direction="BULL", archetype="FLAG_BULL_BREAKOUT",
+            trigger_price=1500.0, rvol=3.0, clv=0.9, atr=15.0, flag_high=1505.0, flag_low=1490.0, timestamp=base_ts + 240.0,
+        )
+        self.assertIsNone(self.rms.process_alert(fourth_alert))
+
 
 if __name__ == "__main__":
     unittest.main()

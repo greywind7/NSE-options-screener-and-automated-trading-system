@@ -109,15 +109,18 @@ Trading Stuff/
 │   └── utils/                 # Structured logger, clock utilities, CPU affinity helpers
 ├── execution/
 │   └── superstructures/       # BaseSuperstructure (IPC + --continue recovery), Paper, Delayed, Live (Groww)
-├── simulation/                # Monolithic Polars/Arrow columnar session simulator
+├── simulation/                # Event-driven tick-by-tick ColumnarSimEngine (min-heap equity/option replay)
 ├── web/                       # aiohttp web server, WS live MTM streamer, historical/alert/sim services, SPA
 ├── ui/                        # Legacy terminal dashboard (replaced by web/)
+├── scripts/                   # Standalone utilities, Parquet converter, and 45-experiment runner/report scripts
 ├── tests/                     # Automated unittest suites across core, common, execution, simulation, web
 ├── data/                      # Daily instrument masters, filtered F&O universe, manifests (generated)
 ├── recordings/                # Session Parquet market data & JSONL execution journals (YYYY-MM-DD/)
 ├── logs/                      # Service logs, PID registry (pids.json), active_positions.json
-├── SYSTEM_AUDIT_2_0.md        # Active codebase audit & prioritized fix queue
-└── docs/archive/              # Legacy 1.0 specs, historical brainstorms, and superseded audits
+└── docs/
+    ├── sys/                   # Source-of-truth technical specifications (architecture, LLD, scoring, tracks, web)
+    ├── live/                  # Active docs: task docs, roadmap (IMPROVEMENTS), audit, reports & experiment data
+    └── archive/               # Historical evolution logs, brainstorms & superseded audits
 ```
 
 ---
@@ -148,7 +151,7 @@ python3 runner.py prepare
 python3 runner.py core --feed --candlemanager --quotesbroker --record
 
 # 3. Launch Strategy & Execution Processes (~09:15 IST)
-# Launches ScoringEngine3, RMSService, and one execution process per (mode × track)
+# Launches ScoringEngine3 (E10_W3_CAP3 defaults), RMSService, and one execution process per (mode × track)
 python3 runner.py start --mode paper,paper_delayed
 
 # Resume mid-day after a restart, recovering open positions & capital from today's journals:
@@ -157,7 +160,7 @@ python3 runner.py start --mode paper,paper_delayed --continue
 # 4. Launch Web Analytics & Simulation UI (http://localhost:8080)
 python3 runner.py web --port 8080
 
-# 5. Run Offline Columnar Backtest (3-5 seconds per full session)
+# 5. Run Offline Tick-by-Tick Columnar Backtest
 python3 runner.py sim --date 2026-11-19 --track v2 --mode paper,paper_delayed
 
 # 6. Check Process Health, SHM Counter & Protected Contracts
@@ -175,14 +178,25 @@ python3 runner.py post-market --date 20261125
 
 ---
 
-## 6. Further Documentation
+## 6. Documentation Map (`docs/`)
 
+### Source-of-Truth Specifications (`docs/sys/`)
 | Document | Scope |
 |---|---|
-| [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/ARCHITECTURE_SPEC_2_0.md) | System-level ADRs, IPC topology, Shared Memory design, and execution guarantees |
-| [`LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/LOW_LEVEL_DESIGN_2_0.md) | Struct definitions, MessagePack schemas, interfaces, and module contracts |
-| [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SCORING_ENGINE_3_0.md) | Mathematical specification for Flag Breakout and Pure Impulse archetypes |
-| [`EXECUTION_TRACKS.md`](file:///Users/yorha/Documents/Trading%20Stuff/EXECUTION_TRACKS.md) | Reference for v1, v2, and composite execution track rules and strike selections |
-| [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/WEB_VIEW_FLOW.md) | Web UI tabs, REST/WebSocket APIs, and multiprocessing simulation flow |
-| [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SYSTEM_AUDIT_2_0.md) | Current system audit, open bugs, and prioritized fix roadmap |
-| [`IMPROVEMENTS.md`](file:///Users/yorha/Documents/Trading%20Stuff/IMPROVEMENTS.md) | Future roadmap: structural refactors, scoring ideas, live Groww hardening, and new strategies |
+| [`docs/sys/ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/ARCHITECTURE_SPEC_2_0.md) | System-level ADRs, IPC topology, Shared Memory design, and execution guarantees |
+| [`docs/sys/LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/LOW_LEVEL_DESIGN_2_0.md) | Struct definitions, MessagePack schemas, interfaces, and module contracts |
+| [`docs/sys/SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/SCORING_ENGINE_3_0.md) | Qualitative signal invariants (`E10_W3_CAP3`: 15s elapsed, Top-25% Flag, `0.45%` 3-Bar expansion) |
+| [`docs/sys/EXECUTION_TRACKS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/EXECUTION_TRACKS.md) | Active 19-track catalog (`12 v1` + `7 v2`, `gamma_runner_OTM2` retired) & `OptScale` rules |
+| [`docs/sys/WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/WEB_VIEW_FLOW.md) | Web UI tabs, REST/WebSocket APIs, and multiprocessing simulation flow |
+
+### Live Operations, Tasks & Research (`docs/live/`)
+| Document | Scope |
+|---|---|
+| [`docs/live/TASK_E10_W3_CAP3_ROLLOUT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/TASK_E10_W3_CAP3_ROLLOUT.md) | `E10_W3_CAP3` rollout checklist, saved snapshots & 8-day OOS validation procedure |
+| [`docs/live/SIMULATION_HYPOTHESIS_REPORT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SIMULATION_HYPOTHESIS_REPORT.md) | 45-experiment × 8-session (`Nov 16–26`) tick-by-tick study & track consistency matrices |
+| [`docs/live/SCORING_FALSE_POSITIVE_ANALYSIS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SCORING_FALSE_POSITIVE_ANALYSIS.md) | Empirical alert accuracy & option-depth friction study across `33.78M` equity ticks |
+| [`docs/live/SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SYSTEM_AUDIT_2_0.md) | Codebase audit findings & remaining remediation queue |
+| [`docs/live/IMPROVEMENTS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/IMPROVEMENTS.md) | Active enhancements roadmap, batch analytics criteria & live Groww hardening plan |
+
+### Historical Reference (`docs/archive/`)
+Legacy 1.0 specs, architecture/scoring evolution logs, brainstorms, and completed audits live in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive).
