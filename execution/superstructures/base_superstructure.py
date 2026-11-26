@@ -66,15 +66,18 @@ class BaseSuperstructure(ExecutionContext, ABC):
 
         # Mode-specific Risk & Capital Management
         from core.rms.mode_risk import ModeRiskManager
+        risk_cfg = self._cfg.get_risk_config()
         exec_mode_cfg = self._cfg.get_execution_mode_config(self.mode)
         starting_cap = float(exec_mode_cfg.get("starting_capital_per_sim", 250000.0))
-        daily_loss = float(exec_mode_cfg.get("daily_loss_limit_inr", 10000.0))
-        max_cap_pct = float(exec_mode_cfg.get("max_capital_per_trade_pct", 0.50))
+        daily_loss = float(risk_cfg.get("daily_loss_limit_inr", exec_mode_cfg.get("daily_loss_limit_inr", 10000.0)))
+        max_cap_pct = float(risk_cfg.get("max_capital_allocation_pct", exec_mode_cfg.get("max_capital_per_trade_pct", 0.50)))
+        enable_cb = bool(risk_cfg.get("enable_circuit_breaker", False))
         self.risk_mgr = ModeRiskManager(
             mode=self.mode,
             starting_capital=starting_cap,
             daily_loss_limit_inr=daily_loss,
             max_capital_per_trade_pct=max_cap_pct,
+            enable_circuit_breaker=enable_cb,
         )
 
         # Instantiate tracks
@@ -255,6 +258,9 @@ class BaseSuperstructure(ExecutionContext, ABC):
                     if trade.status == "OPEN":
                         if trade.token:
                             tokens_to_sub.add(trade.token)
+                        if trade.symbol:
+                            tokens_to_sub.add(trade.symbol)
+                            tokens_to_sub.add(f"NSE:{trade.symbol}")
                         total_open_recovered += 1
                         if self.mode == "paper_delayed" and not is_filled:
                             self._pending_delayed_recovery.append(trade)

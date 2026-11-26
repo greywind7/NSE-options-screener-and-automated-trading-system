@@ -15,7 +15,7 @@ import time
 from typing import Any, Dict, List, Optional, Set
 import zmq
 
-from core.common.symbol_utils import normalize_instrument_token
+from core.common.symbol_utils import is_option_contract, normalize_instrument_token
 from core.common.ipc_schemas import (
     QuoteDepthUpdate,
     QuoteHeartbeat,
@@ -40,11 +40,18 @@ class QuotesBroker:
         stream_ipc: Optional[str] = None,
         heartbeat_ipc: Optional[str] = None,
         ctx: Optional[zmq.Context] = None,
+        feed_equity_ipc: Optional[str] = None,
     ):
         cfg = get_config_manager()
         ipc_endpoints = cfg.get_ipc_endpoints()
 
         self.feed_ipc = feed_ipc or ipc_endpoints.get("feed_options_ipc", DEFAULT_FEED_IPC)
+        if feed_equity_ipc is not None:
+            self.feed_equity_ipc = feed_equity_ipc
+        elif feed_ipc and str(feed_ipc).startswith("inproc://"):
+            self.feed_equity_ipc = None
+        else:
+            self.feed_equity_ipc = ipc_endpoints.get("feed_equity_ipc", "ipc:///tmp/feed_equity.ipc")
         self.router_ipc = router_ipc or ipc_endpoints.get("quotes_router_ipc", DEFAULT_QUOTES_ROUTER_IPC)
         self.stream_ipc = stream_ipc or ipc_endpoints.get("quotes_stream_ipc", DEFAULT_QUOTES_STREAM_IPC)
         self.heartbeat_ipc = heartbeat_ipc or ipc_endpoints.get("heartbeat_ipc", DEFAULT_HEARTBEAT_PUB_IPC)
@@ -63,12 +70,16 @@ class QuotesBroker:
         self._owns_ctx = ctx is None
         self.ctx = ctx or zmq.Context()
 
-        # 1. Subscriber to live option depth ticks from FeedHandler
+        # 1. Subscriber to live option depth & equity ticks from FeedHandler
         self.sub = self.ctx.socket(zmq.SUB)
         self.sub.setsockopt(zmq.LINGER, 0)
         self.sub.setsockopt(zmq.RCVHWM, 100000)
         self.sub.setsockopt(zmq.SUBSCRIBE, b"TICK.OPT")
         self.sub.connect(self.feed_ipc)
+        if self.feed_equity_ipc:
+            self.sub.setsockopt(zmq.SUBSCRIBE, b"TICK.EQ")
+            if self.feed_equity_ipc != self.feed_ipc:
+                self.sub.connect(self.feed_equity_ipc)
 
         # 2. ROUTER socket for snapshot and sub/unsub commands
         self.router = self.ctx.socket(zmq.ROUTER)
@@ -126,26 +137,36 @@ class QuotesBroker:
             "asks": asks,
             "timestamp": ts,
         }
-        self._lvc[token] = quote_data
         sym = tick.get("symbol", "")
-        if sym:
+        is_opt = is_option_contract(token) or is_option_contract(sym)
+        self._lvc[token] = quote_data
+        # Only index/stream under sym alias for genuine equity ticks (or option trading symbols),
+        # preventing mock/synthetic option ticks with symbol='RELIANCE' from polluting underlying equity quotes.
+        allow_sym_alias = bool(sym) and ((not is_opt) or is_option_contract(sym))
+        if allow_sym_alias:
             norm_sym = normalize_instrument_token(sym)
             self._lvc[norm_sym] = quote_data
-            if ":" not in sym:
+            if ":" not in sym and not is_opt:
                 self._lvc[f"NSE:{sym}"] = quote_data
 
-        # If this contract is currently subscribed by superstructures/tracks, broadcast depth update
+        # If this contract or underlying is currently subscribed by superstructures/tracks, broadcast update
         if token in self.subscribed_tokens:
             payload = pack_message(quote_data)
             topic = f"QUOTE.{token}".encode("utf-8")
             self._publish_stream(topic, payload)
 
-        if sym:
+        if allow_sym_alias:
             norm_sym = normalize_instrument_token(sym)
             if norm_sym != token and norm_sym in self.subscribed_tokens:
                 payload = pack_message(quote_data)
                 topic = f"QUOTE.{norm_sym}".encode("utf-8")
                 self._publish_stream(topic, payload)
+            elif not is_opt and ":" not in sym:
+                nse_sym = f"NSE:{sym}".upper()
+                if nse_sym != token and nse_sym in self.subscribed_tokens:
+                    payload = pack_message(quote_data)
+                    topic = f"QUOTE.{nse_sym}".encode("utf-8")
+                    self._publish_stream(topic, payload)
 
     def _format_quote(self, q: Dict[str, Any], best_depth: bool) -> Dict[str, Any]:
         if best_depth:
@@ -161,12 +182,12 @@ class QuotesBroker:
             }
         return q
 
-    def _handle_request(self) -> None:
-        """Handle incoming ROUTER snapshot or subscription request."""
+    def _handle_request(self) -> bool:
+        """Handle incoming ROUTER snapshot or subscription request. Returns True if a request was processed."""
         try:
             frames = self.router.recv_multipart(flags=zmq.NOBLOCK)
             if len(frames) < 3 or frames[1] != b"":
-                return
+                return True
             client_id = frames[0]
             # frame 1 is validated empty delimiter
             payload = unpack_message(frames[2])
@@ -239,10 +260,12 @@ class QuotesBroker:
                 reply_payload = pack_message({"status": "ERROR", "error": f"Unknown action: {action}"})
 
             self.router.send_multipart([client_id, b"", reply_payload], flags=zmq.NOBLOCK)
+            return True
         except zmq.Again:
-            pass
+            return False
         except Exception as e:
             print(f"[QUOTES_BROKER] Request error: {e}", file=sys.stderr)
+            return True
 
     def _emit_heartbeat(self, now: Optional[float] = None) -> None:
         """Emit a single 1-second heartbeat from the owning event-loop thread."""
@@ -284,13 +307,21 @@ class QuotesBroker:
             try:
                 events = dict(poller.poll(timeout=10))
                 if self.sub in events:
-                    frames = self.sub.recv_multipart()
-                    if len(frames) >= 2:
-                        tick = unpack_message(frames[-1])
-                        self.on_tick(tick)
+                    for _ in range(256):
+                        try:
+                            frames = self.sub.recv_multipart(flags=zmq.NOBLOCK)
+                        except zmq.Again:
+                            break
+                        if len(frames) >= 2:
+                            tick = unpack_message(frames[-1])
+                            self.on_tick(tick)
+                        if not self.running:
+                            break
 
                 if self.router in events:
-                    self._handle_request()
+                    for _ in range(64):
+                        if not self._handle_request() or not self.running:
+                            break
 
                 now = time.time()
                 if now - last_hb_ts >= 1.0:
@@ -406,7 +437,8 @@ class QuotesBrokerClient:
 
 def main():
     parser = argparse.ArgumentParser(description="Quotes Broker Service")
-    parser.add_argument("--feed-ipc", default=DEFAULT_FEED_IPC, help="ZeroMQ feed address")
+    parser.add_argument("--feed-ipc", default=DEFAULT_FEED_IPC, help="ZeroMQ options feed address")
+    parser.add_argument("--feed-equity-ipc", default=None, help="ZeroMQ equity feed address")
     parser.add_argument("--router-ipc", default=DEFAULT_QUOTES_ROUTER_IPC, help="ROUTER address")
     parser.add_argument("--stream-ipc", default=DEFAULT_QUOTES_STREAM_IPC, help="STREAM PUB address")
     parser.add_argument("--heartbeat-ipc", default=DEFAULT_HEARTBEAT_PUB_IPC, help="Heartbeat PUB address")
@@ -417,6 +449,7 @@ def main():
         router_ipc=args.router_ipc,
         stream_ipc=args.stream_ipc,
         heartbeat_ipc=args.heartbeat_ipc,
+        feed_equity_ipc=args.feed_equity_ipc,
     )
 
     def sig_handler(sig, frame):

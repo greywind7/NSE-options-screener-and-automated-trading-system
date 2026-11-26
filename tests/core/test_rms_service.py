@@ -180,15 +180,56 @@ class TestRMSService(unittest.TestCase):
 
     def test_dynamic_expiry_tag_and_config_spread_gate(self):
         from datetime import date
-        from core.rms.rms_service import get_current_expiry_tag
+        from core.rms.rms_service import get_current_expiry_tag, passes_spread_gate
 
         self.assertEqual(get_current_expiry_tag(date(2026, 11, 25)), "26NOV")
         self.assertEqual(get_current_expiry_tag(date(2026, 11, 26)), "26NOV")
         self.assertEqual(get_current_expiry_tag(date(2026, 11, 27)), "03DEC")
         self.assertIn("max_spread_pct", self.rms.spread_gate)
-        self.assertIn("min_spread_abs", self.rms.spread_gate)
-        self.assertGreater(self.rms.spread_gate["max_spread_pct"], 0.0)
-        self.assertGreater(self.rms.spread_gate["min_spread_abs"], 0.0)
+        self.assertAlmostEqual(self.rms.spread_gate["max_spread_pct"], 0.03, places=6)
+
+        # Strict percentage gate: ₹0.50 on a ₹10.00 ask is 5% (> 3%) and must be rejected
+        self.assertFalse(passes_spread_gate(bid=9.50, ask=10.00, max_spread_pct=0.03))
+        self.assertTrue(passes_spread_gate(bid=9.75, ask=10.00, max_spread_pct=0.03))
+
+        # Verify QuotesBroker subscribes & forwards TICK.EQ to underlying equity subscribers
+        from core.common.ipc_schemas import pack_message, unpack_message
+        stream_sub = self.ctx.socket(zmq.SUB)
+        stream_sub.setsockopt(zmq.LINGER, 0)
+        stream_sub.setsockopt(zmq.RCVTIMEO, 1000)
+        stream_sub.setsockopt(zmq.SUBSCRIBE, b"QUOTE.NSE:RELIANCE")
+        stream_sub.connect("inproc://test_rms_stream")
+        time.sleep(0.05)
+        try:
+            client = self.rms.quotes_client
+            client.subscribe(["NSE:RELIANCE"], client_id="paper_test")
+            self.broker.on_tick({
+                "token": "NSE:INE002A01018",
+                "symbol": "RELIANCE",
+                "ltp": 2512.50,
+                "bid": 2512.0,
+                "ask": 2513.0,
+                "bid_qty": 10,
+                "ask_qty": 10,
+            })
+            frames = stream_sub.recv_multipart()
+            self.assertEqual(frames[0], b"QUOTE.NSE:RELIANCE")
+            q_msg = unpack_message(frames[1])
+            self.assertEqual(q_msg["ltp"], 2512.50)
+        finally:
+            stream_sub.close(linger=0)
+
+    def test_mode_risk_manager_circuit_breaker_flag(self):
+        from core.rms.mode_risk import ModeRiskManager
+        mgr_off = ModeRiskManager(
+            mode="paper",
+            starting_capital=250000.0,
+            daily_loss_limit_inr=10000.0,
+            enable_circuit_breaker=False,
+        )
+        mgr_off.release_capital(committed_amount=50000.0, realized_pnl=-15000.0)
+        self.assertFalse(mgr_off.is_circuit_breaker_tripped())
+        self.assertTrue(mgr_off.can_allocate(10000.0))
 
 
 if __name__ == "__main__":

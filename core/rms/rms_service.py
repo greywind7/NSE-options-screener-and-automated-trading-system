@@ -47,6 +47,13 @@ def get_strike_step(price: float) -> float:
         return 100.0
 
 
+def passes_spread_gate(bid: float, ask: float, max_spread_pct: float = 0.03) -> bool:
+    """Return True iff quote has valid positive market depth and (ask - bid) / ask <= max_spread_pct."""
+    if ask <= 0.0 or bid <= 0.0 or bid >= ask:
+        return False
+    return ((ask - bid) / ask) <= float(max_spread_pct)
+
+
 class RMSService:
     def __init__(
         self,
@@ -72,9 +79,6 @@ class RMSService:
         self.spread_gate = {
             "max_spread_pct": float(
                 spread_gate_cfg.get("max_spread_pct", risk_cfg.get("max_spread_pct", 0.03))
-            ),
-            "min_spread_abs": float(
-                spread_gate_cfg.get("min_spread_abs", risk_cfg.get("min_absolute_spread_inr", 0.50))
             ),
         }
         self.default_expiry_tag = str(
@@ -242,17 +246,9 @@ class RMSService:
             ask = float(q.get("ask", 0.0))
             bid = float(q.get("bid", 0.0))
             ltp = float(q.get("ltp", 0.0))
-            if ask <= 0.0 or bid <= 0.0 or bid >= ask:
-                continue
-
-            spread = ask - bid
-
-            # Gap 1 / HIGH-004: Hybrid spread gate prevents ₹3.00 OTM starvation
-            min_spread_abs = float(self.spread_gate.get("min_spread_abs", 0.50))
             max_spread_pct = float(self.spread_gate.get("max_spread_pct", 0.03))
-            max_allowed_spread = max(min_spread_abs, max_spread_pct * ask)
-            if spread > max_allowed_spread:
-                # Spread is too wide; skip this illiquid strike
+            if not passes_spread_gate(bid, ask, max_spread_pct=max_spread_pct):
+                # Spread is too wide or quote invalid; skip this illiquid strike
                 continue
 
             resolved[role] = {

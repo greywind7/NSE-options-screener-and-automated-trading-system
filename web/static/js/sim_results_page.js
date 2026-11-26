@@ -106,7 +106,7 @@ window.SimResultsPage = {
         if (raw) {
           const list = JSON.parse(raw);
           const found = list.find((r) => r.id === targetRunId || targetRunId === "latest");
-          if (found && found.results) {
+          if (found && found.results && found.results.details) {
             this.run = found;
             this.renderAll();
             return;

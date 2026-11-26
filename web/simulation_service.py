@@ -346,6 +346,7 @@ class SimulationService:
                     "enabled": True,
                 })
 
+        risk_cfg = momentum.get("risk", {})
         available_dates = self.get_simulation_dates()
         default_date = available_dates[-1]["date"] if available_dates else "2026-11-19"
 
@@ -364,6 +365,9 @@ class SimulationService:
                 "min_pole_pct": float(momentum.get("scoring_engine_3_0", {}).get("min_pole_pct", 0.005)),
                 "entry_freeze_time": momentum.get("entry_freeze_time", "15:00"),
                 "eod_squareoff_time": momentum.get("eod_squareoff_time", "15:15"),
+                "enable_circuit_breaker": bool(risk_cfg.get("enable_circuit_breaker", False)),
+                "daily_loss_limit_inr": float(risk_cfg.get("daily_loss_limit_inr", 10000.0)),
+                "max_spread_pct": float(risk_cfg.get("max_spread_pct", 0.03)),
             },
             "base_tracks": base_tracks,
             "composite_tracks": composite_tracks,
@@ -827,6 +831,14 @@ class SimulationService:
                 })
 
         glob = params.get("global_settings", {})
+        from core.config.config_loader import get_config_manager
+        base_risk = dict(get_config_manager().get_risk_config())
+        if "enable_circuit_breaker" in glob:
+            base_risk["enable_circuit_breaker"] = bool(glob["enable_circuit_breaker"])
+        if "daily_loss_limit_inr" in glob and glob["daily_loss_limit_inr"] is not None:
+            base_risk["daily_loss_limit_inr"] = float(glob["daily_loss_limit_inr"])
+        if "max_spread_pct" in glob and glob["max_spread_pct"] is not None:
+            base_risk["max_spread_pct"] = float(glob["max_spread_pct"])
 
         return {
             "strategies": {
@@ -837,6 +849,7 @@ class SimulationService:
                     "brokerage_per_order": float(glob.get("brokerage_per_order", 30.0)),
                     "entry_freeze_time": glob.get("entry_freeze_time", "15:00"),
                     "eod_squareoff_time": glob.get("eod_squareoff_time", "15:15"),
+                    "risk": base_risk,
                 }
             }
         }

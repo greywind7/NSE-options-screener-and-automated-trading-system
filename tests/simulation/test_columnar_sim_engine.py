@@ -324,6 +324,146 @@ class TestColumnarSimEngine(unittest.TestCase):
         t_dict = trade.to_dict()
         self.assertEqual(t_dict.get("underlying_entry_price"), 352.65)
 
+    def test_sim_circuit_breaker_and_spread_gate_from_strategy_config(self):
+        """Verify ColumnarSimEngine reads enable_circuit_breaker & max_spread_pct from strategy config."""
+        cfg_default = {
+            "strategies": {
+                "momentum": {
+                    "risk": {
+                        "enable_circuit_breaker": False,
+                        "daily_loss_limit_inr": 5000.0,
+                        "max_spread_pct": 0.03,
+                    }
+                }
+            }
+        }
+        sim_off = ColumnarSimEngine(
+            data_path=self.parquet_path,
+            modes=["paper"],
+            tracks=["fast_momentum"],
+            strategy_cfg=cfg_default,
+        )
+        self.assertFalse(sim_off.enable_circuit_breaker)
+        self.assertEqual(sim_off.max_spread_pct, 0.03)
+
+        # Configure spread gate of 3%: ₹0.50 on ₹10.00 ask (5%) must be rejected identically to RMS
+        sim_off.options_catalog["TESTSYM"] = {"CE": [(100.0, "NSE:TESTSYM26NOV100CE")], "PE": []}
+        sim_off.options_by_token["NSE:TESTSYM26NOV100CE"] = {
+            "timestamps": __import__("numpy").array([1000.0]),
+            "bids": __import__("numpy").array([9.50]),
+            "asks": __import__("numpy").array([10.00]),
+            "ltps": __import__("numpy").array([9.75]),
+            "bid_qtys": __import__("numpy").array([100]),
+            "ask_qtys": __import__("numpy").array([100]),
+        }
+        self.assertEqual(sim_off.resolve_sim_strikes("TESTSYM", "BULL", 100.0, 1005.0), {})
+
+        # Configure custom 6% spread gate -> ₹0.50 on ₹10.00 (5%) is accepted
+        cfg_wide = {
+            "strategies": {
+                "momentum": {
+                    "risk": {
+                        "enable_circuit_breaker": True,
+                        "daily_loss_limit_inr": 5000.0,
+                        "max_spread_pct": 0.06,
+                    }
+                }
+            }
+        }
+        sim_on = ColumnarSimEngine(
+            data_path=self.parquet_path,
+            modes=["paper"],
+            tracks=["fast_momentum"],
+            strategy_cfg=cfg_wide,
+        )
+        sim_on.options_catalog = sim_off.options_catalog
+        sim_on.options_by_token = sim_off.options_by_token
+        resolved = sim_on.resolve_sim_strikes("TESTSYM", "BULL", 100.0, 1005.0)
+        self.assertIn("ATM", resolved)
+
+        from simulation.columnar_sim_engine import SimExecutionContext
+        ctx_cb = SimExecutionContext(mode="paper", daily_loss_limit_inr=5000.0, enable_circuit_breaker=True)
+        self.assertFalse(ctx_cb.is_frozen())
+        ctx_cb.record_trade_event("TRADE_EXIT", {"realized_pnl": -6000.0})
+        self.assertTrue(ctx_cb.is_frozen())
+
+    def test_tick_by_tick_replay_catches_intra_interval_dip(self):
+        """Verify ColumnarSimEngine processes every option tick (including intra-0.5s spikes/dips)."""
+        import polars as pl
+        from datetime import datetime
+        from core.common.time_utils import IST
+        from common.interfaces import TradeState
+
+        tick_dir = os.path.join(self.test_dir, "tick_fidelity")
+        os.makedirs(tick_dir, exist_ok=True)
+        # Create >10 equity ticks spanning 09:30..09:32 with a pole+flag breakout at 09:30:00..09:31:00
+        # Wait: drive direct option tick replay verification inside run_simulation by testing that
+        # an option tick at t + 0.15s triggers SL even when the next equity tick is at t + 1.0s (and t + 0.5s quote recovered).
+        t0 = datetime(2026, 11, 26, 10, 0, 0, tzinfo=IST).timestamp()
+        # 12 equity ticks spaced by 1.0s (no equity ticks at 0.15s)
+        eq_rows = []
+        for i in range(15):
+            ts = t0 + i * 1.0
+            # Build clean bull flag on bar 0..1? Simpler: test option replay helper directly? No, test end-to-end with synthetic candle breakout!
+            eq_rows.append({
+                "token": "NSE:INFY",
+                "symbol": "INFY",
+                "ltp": 1500.0 + (i * 0.1),
+                "volume": 1000 * (i + 1),
+                "bid": 1500.0,
+                "ask": 1500.5,
+                "bid_qty": 100,
+                "ask_qty": 100,
+                "exchange_timestamp": ts,
+                "received_timestamp": ts,
+            })
+        # Option depth has a brief dip to 90.0 (below 95.0 SL on 100.0 entry) at t0+2.15s, then recovers to 101.0 by t0+2.45s!
+        # Old 0.5s sampler at t0+2.0s / t0+2.5s / t0+3.0s would completely miss the 90.0 stop-loss at t0+2.15s!
+        opt_rows = [
+            {"token": "NSE:INFY26NOV1500CE", "symbol": "INFY26NOV1500CE", "ltp": 100.0, "bid": 99.5, "ask": 100.0, "bid_qty": 100, "ask_qty": 100, "exchange_timestamp": t0, "received_timestamp": t0},
+            {"token": "NSE:INFY26NOV1500CE", "symbol": "INFY26NOV1500CE", "ltp": 90.0, "bid": 90.0, "ask": 90.5, "bid_qty": 100, "ask_qty": 100, "exchange_timestamp": t0 + 2.15, "received_timestamp": t0 + 2.15},
+            {"token": "NSE:INFY26NOV1500CE", "symbol": "INFY26NOV1500CE", "ltp": 101.0, "bid": 101.0, "ask": 101.5, "bid_qty": 100, "ask_qty": 100, "exchange_timestamp": t0 + 2.45, "received_timestamp": t0 + 2.45},
+        ]
+        pl.DataFrame(eq_rows).write_parquet(os.path.join(tick_dir, "equity_ticks_1.parquet"))
+        pl.DataFrame(opt_rows).write_parquet(os.path.join(tick_dir, "option_depth_1.parquet"))
+
+        from unittest.mock import patch
+        from core.common.ipc_schemas import SetupAlert
+
+        sim = ColumnarSimEngine(
+            data_path=tick_dir,
+            modes=["paper"],
+            tracks=["fast_momentum_ATM"],
+            shm_name="tmp_test_tick_replay",
+        )
+        emitted = [False]
+        def fake_eval(now_ts: float):
+            if not emitted[0] and now_ts >= t0 + 1.0:
+                emitted[0] = True
+                return [SetupAlert(
+                    alert_id="ALT_DIP_1",
+                    symbol="INFY",
+                    direction="BULL",
+                    archetype="FLAG_BULL_BREAKOUT",
+                    trigger_price=1500.0,
+                    rvol=3.0,
+                    clv=0.9,
+                    atr=10.0,
+                    flag_high=1500.0,
+                    flag_low=1490.0,
+                    timestamp=now_ts,
+                )]
+            return []
+
+        with patch("strategies.momentum.scoring_engine.ScoringEngine3.evaluate_universe", side_effect=fake_eval):
+            results = sim.run_simulation()
+
+        closed = sim.closed_trades["paper"]
+        self.assertEqual(len(closed), 1)
+        self.assertAlmostEqual(closed[0].exit_time, t0 + 2.15, places=3)
+        self.assertAlmostEqual(closed[0].exit_price, 90.0, places=2)
+        self.assertEqual(closed[0].exit_reason, "SL_HIT")
+
 
 if __name__ == "__main__":
     unittest.main()

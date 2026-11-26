@@ -10,7 +10,7 @@ import time
 
 from common.interfaces import ExecutionContext, TradeState
 from core.common.ipc_schemas import ActionableOpportunity, OrderRequest, OrderResult
-from core.common.symbol_utils import normalize_instrument_token
+from core.common.symbol_utils import is_option_contract, normalize_instrument_token
 
 
 def _parse_time_to_minutes(time_val: Any, default_minutes: int) -> int:
@@ -328,25 +328,26 @@ class BaseTrack(ABC):
         norm_topic = normalize_instrument_token(topic_token) if topic_token else ""
         norm_sym = normalize_instrument_token(symbol) if symbol else ""
 
-        # 1. Check if tick corresponds to underlying equity for active trades
-        for t in list(self.active_trades.values()):
-            if t.status != "OPEN":
-                continue
-            und_sym = (t.metadata.get("underlying_symbol") or "").upper().replace(" ", "").replace("NSE:", "")
-            und_norm = normalize_instrument_token(t.metadata.get("underlying_symbol", "")) if t.metadata.get("underlying_symbol") else ""
-            is_underlying = False
-            if und_sym:
-                is_underlying = (
-                    (symbol and symbol.upper().replace(" ", "").replace("NSE:", "") == und_sym)
-                    or (token and token.upper().replace(" ", "").replace("NSE:", "") == und_sym)
-                    or (norm_sym and und_norm and norm_sym == und_norm)
-                    or (norm_token and und_norm and norm_token == und_norm)
-                )
-            if is_underlying and ltp > 0.0:
-                t.metadata["underlying_ltp"] = ltp
-                t.metadata["underlying_last_ts"] = ts
-                if hasattr(self, "on_underlying_tick"):
-                    self.on_underlying_tick(t, ltp=ltp, ts=ts)
+        # 1. Check if tick corresponds to underlying equity for active trades (never option ticks)
+        if not is_option_contract(token) and not is_option_contract(symbol):
+            for t in list(self.active_trades.values()):
+                if t.status != "OPEN":
+                    continue
+                und_sym = (t.metadata.get("underlying_symbol") or "").upper().replace(" ", "").replace("NSE:", "")
+                und_norm = normalize_instrument_token(t.metadata.get("underlying_symbol", "")) if t.metadata.get("underlying_symbol") else ""
+                is_underlying = False
+                if und_sym:
+                    is_underlying = (
+                        (symbol and symbol.upper().replace(" ", "").replace("NSE:", "") == und_sym)
+                        or (token and token.upper().replace(" ", "").replace("NSE:", "") == und_sym)
+                        or (norm_sym and und_norm and norm_sym == und_norm)
+                        or (norm_token and und_norm and norm_token == und_norm)
+                    )
+                if is_underlying and ltp > 0.0:
+                    t.metadata["underlying_ltp"] = ltp
+                    t.metadata["underlying_last_ts"] = ts
+                    if hasattr(self, "on_underlying_tick"):
+                        self.on_underlying_tick(t, ltp=ltp, ts=ts)
 
         # 2. Match trades by option contract token, topic token, symbol, or normalized contract attributes
         trades_to_eval = []

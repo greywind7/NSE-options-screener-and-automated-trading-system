@@ -8,6 +8,7 @@ Prints separated simulation performance matrices per mode (paper, paper_delayed)
 import argparse
 from dataclasses import dataclass, field
 import glob
+import heapq
 import math
 import os
 import random
@@ -33,6 +34,8 @@ from core.common.symbol_utils import (
     parse_option_details,
 )
 from core.config.config_loader import get_config_manager
+from core.rms.mode_risk import ModeRiskManager
+from core.rms.rms_service import passes_spread_gate
 from strategies.momentum.scoring_engine import ScoringEngine3
 
 
@@ -50,17 +53,31 @@ class SimPendingOrder:
 
 
 class SimExecutionContext(ExecutionContext):
-    """Headless simulation execution context simulating Superstructures with no IPC."""
-    def __init__(self, mode: str):
+    """Headless simulation execution context simulating Superstructures with shared ModeRiskManager."""
+    def __init__(
+        self,
+        mode: str,
+        starting_capital: float = 250000.0,
+        daily_loss_limit_inr: float = 10000.0,
+        max_capital_per_trade_pct: float = 0.50,
+        enable_circuit_breaker: bool = False,
+    ):
         self._mode = mode
         self._frozen = False
+        self.risk_mgr = ModeRiskManager(
+            mode=mode,
+            starting_capital=starting_capital,
+            daily_loss_limit_inr=daily_loss_limit_inr,
+            max_capital_per_trade_pct=max_capital_per_trade_pct,
+            enable_circuit_breaker=enable_circuit_breaker,
+        )
 
     @property
     def mode(self) -> str:
         return self._mode
 
     def is_frozen(self) -> bool:
-        return self._frozen
+        return self._frozen or self.risk_mgr.is_circuit_breaker_tripped()
 
     def submit_order(self, request: OrderRequest) -> None:
         pass
@@ -69,24 +86,40 @@ class SimExecutionContext(ExecutionContext):
         pass
 
     def record_trade_event(self, event_type: str, data: Dict[str, Any]) -> None:
-        pass
+        if event_type == "TRADE_EXIT" and "realized_pnl" in data:
+            self.risk_mgr.update_pnl(float(data["realized_pnl"]))
 
 
 class SimDelayedExecutionContext(ExecutionContext):
     """Simulation execution context that queues OrderRequests for delayed fills."""
-    def __init__(self, min_delay_ms: float = 10000.0, max_delay_ms: float = 60000.0):
+    def __init__(
+        self,
+        min_delay_ms: float = 10000.0,
+        max_delay_ms: float = 60000.0,
+        starting_capital: float = 250000.0,
+        daily_loss_limit_inr: float = 10000.0,
+        max_capital_per_trade_pct: float = 0.50,
+        enable_circuit_breaker: bool = False,
+    ):
         self._mode = "paper_delayed"
         self._frozen = False
         self.min_delay_ms = min_delay_ms
         self.max_delay_ms = max_delay_ms
         self.pending_orders: List[Tuple[float, OrderRequest]] = []
+        self.risk_mgr = ModeRiskManager(
+            mode="paper_delayed",
+            starting_capital=starting_capital,
+            daily_loss_limit_inr=daily_loss_limit_inr,
+            max_capital_per_trade_pct=max_capital_per_trade_pct,
+            enable_circuit_breaker=enable_circuit_breaker,
+        )
 
     @property
     def mode(self) -> str:
         return self._mode
 
     def is_frozen(self) -> bool:
-        return self._frozen
+        return self._frozen or self.risk_mgr.is_circuit_breaker_tripped()
 
     def submit_order(self, request: OrderRequest) -> None:
         if request.transaction_type == "BUY":
@@ -102,7 +135,8 @@ class SimDelayedExecutionContext(ExecutionContext):
         self.pending_orders = [item for item in self.pending_orders if item[1].order_id != order_id]
 
     def record_trade_event(self, event_type: str, data: Dict[str, Any]) -> None:
-        pass
+        if event_type == "TRADE_EXIT" and "realized_pnl" in data:
+            self.risk_mgr.update_pnl(float(data["realized_pnl"]))
 
 
 class ColumnarSimEngine:
@@ -175,6 +209,18 @@ class ColumnarSimEngine:
         )
         self.entry_freeze_minutes = _parse_time_to_minutes(self.entry_freeze_time, 15 * 60)
         self.eod_squareoff_minutes = _parse_time_to_minutes(self.eod_squareoff_time, 15 * 60 + 15)
+
+        cfg_risk = cfg.get_risk_config()
+        strat_risk = strat_momentum.get("risk", {}) if isinstance(strat_momentum.get("risk"), dict) else {}
+        self.enable_circuit_breaker = bool(
+            strat_risk.get("enable_circuit_breaker", cfg_risk.get("enable_circuit_breaker", False))
+        )
+        self.daily_loss_limit_inr = float(
+            strat_risk.get("daily_loss_limit_inr", cfg_risk.get("daily_loss_limit_inr", 10000.0))
+        )
+        self.max_spread_pct = float(
+            strat_risk.get("max_spread_pct", cfg_risk.get("max_spread_pct", 0.03))
+        )
 
         if delay_sec is not None:
             self.min_delay_ms = float(delay_sec) * 1000.0
@@ -516,13 +562,8 @@ class ColumnarSimEngine:
 
             ask = q["ask"]
             bid = q["bid"]
-            if ask <= 0.0 or bid <= 0.0 or bid >= ask:
-                continue
-
-            spread = ask - bid
-            spread_pct = spread / ask
-            # Enforce max spread percentage (3% default) to avoid entering immediately into a stop loss
-            if spread_pct > 0.03:
+            # Enforce configurable max spread percentage (3% default) across both Live and Sim
+            if not passes_spread_gate(bid, ask, max_spread_pct=self.max_spread_pct):
                 continue
 
             resolved[role] = {
@@ -588,23 +629,40 @@ class ColumnarSimEngine:
         print(f"  • Scoring Engine: min_pole_pct={scoring_eng.min_pole_pct*100.0:.2f}% | min_clv={scoring_eng.min_clv} | invalidation_retrace={scoring_eng.invalidation_retrace_pct*100.0:.0f}%")
 
         # 2. Initialize Execution Superstructures & Tracks for active modes only
+        cfg = get_config_manager()
         tracks_by_mode: Dict[str, Dict[str, Any]] = {}
         ctx_delayed: Optional[SimDelayedExecutionContext] = None
 
         for m in self.modes:
+            exec_mode_cfg = cfg.get_execution_mode_config(m)
+            mode_start_cap = float(self.capital or exec_mode_cfg.get("starting_capital_per_sim", 250000.0))
+            mode_max_cap_pct = float(exec_mode_cfg.get("max_capital_per_trade_pct", 0.50))
+            mode_daily_loss = float(self.daily_loss_limit_inr or exec_mode_cfg.get("daily_loss_limit_inr", 10000.0))
             if m == "paper_delayed":
-                ctx_delayed = SimDelayedExecutionContext(min_delay_ms=self.min_delay_ms, max_delay_ms=self.max_delay_ms)
+                ctx_delayed = SimDelayedExecutionContext(
+                    min_delay_ms=self.min_delay_ms,
+                    max_delay_ms=self.max_delay_ms,
+                    starting_capital=mode_start_cap,
+                    daily_loss_limit_inr=mode_daily_loss,
+                    max_capital_per_trade_pct=mode_max_cap_pct,
+                    enable_circuit_breaker=self.enable_circuit_breaker,
+                )
                 tracks_by_mode[m] = self._init_tracks_for_mode(m, ctx_delayed)
             else:
-                ctx = SimExecutionContext(mode=m)
+                ctx = SimExecutionContext(
+                    mode=m,
+                    starting_capital=mode_start_cap,
+                    daily_loss_limit_inr=mode_daily_loss,
+                    max_capital_per_trade_pct=mode_max_cap_pct,
+                    enable_circuit_breaker=self.enable_circuit_breaker,
+                )
                 tracks_by_mode[m] = self._init_tracks_for_mode(m, ctx)
 
         self.tracks_by_mode = tracks_by_mode
 
         last_scoring_eval_ts = 0.0
-        last_hb_ts = 0.0
 
-        # 3. Serialized Chronological Event Loop with Fast Columnar Indexing
+        # 3. Event-Driven Chronological Replay (Tick-by-tick options + equity + 1s heartbeat)
         df_eq = self.df_equity
         if df_eq is None or len(df_eq) == 0:
             raise ValueError(f"No equity ticks available in dataset '{self.data_path}' to simulate.")
@@ -621,12 +679,199 @@ class ColumnarSimEngine:
                 f"in equity dataset '{self.data_path}'. Available columns: {df_eq.columns}"
             )
 
+        from datetime import datetime
+        from core.common.time_utils import IST
+
         ts_arr = df_eq[ts_col].to_numpy().astype(np.float64)
         tokens = df_eq["token"].to_list() if "token" in df_eq.columns else ["UNKNOWN"] * len(ts_arr)
+        eq_syms = df_eq["symbol"].to_list() if "symbol" in df_eq.columns else None
         ltps = df_eq["ltp"].to_numpy().astype(np.float64) if "ltp" in df_eq.columns else np.zeros(len(ts_arr))
         vols = df_eq["volume"].to_numpy().astype(np.int64) if "volume" in df_eq.columns else np.zeros(len(ts_arr), dtype=np.int64)
         total_eq = len(ts_arr)
         latest_equity_ltp: Dict[str, float] = {}
+
+        # Active open-trade indices for event-driven tick-by-tick replay
+        open_trades_by_token: Dict[str, List[Tuple[str, str, Any, TradeState]]] = {}
+        open_trades_by_symbol: Dict[str, List[Tuple[str, str, Any, TradeState]]] = {}
+        open_tracks: Dict[Tuple[str, str], Any] = {}
+        opt_heap: List[Tuple[float, str, int]] = []
+        opt_cursor: Dict[str, int] = {}
+        delayed_heap: List[Tuple[float, int, OrderRequest]] = []
+        pending_delayed_meta: Dict[str, Tuple[str, str, Any, TradeState]] = {}
+        delay_seq = 0
+        next_hb_ts: Optional[float] = None
+
+        def _prune_open_state(sym_hint: Optional[str] = None, tok_hint: Optional[str] = None) -> None:
+            nonlocal next_hb_ts
+            if tok_hint is not None and tok_hint in open_trades_by_token:
+                alive_tok = [e for e in open_trades_by_token[tok_hint] if e[3].status == "OPEN"]
+                if alive_tok:
+                    open_trades_by_token[tok_hint] = alive_tok
+                else:
+                    open_trades_by_token.pop(tok_hint, None)
+                    opt_cursor.pop(tok_hint, None)
+            if sym_hint is not None and sym_hint in open_trades_by_symbol:
+                alive_sym = [e for e in open_trades_by_symbol[sym_hint] if e[3].status == "OPEN"]
+                if alive_sym:
+                    open_trades_by_symbol[sym_hint] = alive_sym
+                else:
+                    open_trades_by_symbol.pop(sym_hint, None)
+            if tok_hint is None and sym_hint is None:
+                for tk in list(open_trades_by_token.keys()):
+                    alive_t = [e for e in open_trades_by_token[tk] if e[3].status == "OPEN"]
+                    if alive_t:
+                        open_trades_by_token[tk] = alive_t
+                    else:
+                        open_trades_by_token.pop(tk, None)
+                        opt_cursor.pop(tk, None)
+                for sk in list(open_trades_by_symbol.keys()):
+                    alive_s = [e for e in open_trades_by_symbol[sk] if e[3].status == "OPEN"]
+                    if alive_s:
+                        open_trades_by_symbol[sk] = alive_s
+                    else:
+                        open_trades_by_symbol.pop(sk, None)
+            for k in list(open_tracks.keys()):
+                tr_obj = open_tracks[k]
+                if not any(t.status == "OPEN" for t in tr_obj.active_trades.values()):
+                    open_tracks.pop(k, None)
+            if not open_tracks:
+                next_hb_ts = None
+
+        def _register_filled_trade(m_name: str, tr_name: str, track_obj: Any, trade: TradeState, fill_ts: float) -> None:
+            nonlocal next_hb_ts
+            if trade.status != "OPEN":
+                return
+            norm_tok = normalize_instrument_token(trade.token)
+            sym_u = (trade.symbol or "").upper()
+            open_trades_by_token.setdefault(norm_tok, []).append((m_name, tr_name, track_obj, trade))
+            if sym_u:
+                open_trades_by_symbol.setdefault(sym_u, []).append((m_name, tr_name, track_obj, trade))
+            open_tracks[(m_name, tr_name)] = track_obj
+            if next_hb_ts is None:
+                next_hb_ts = fill_ts + 1.0
+            if norm_tok not in opt_cursor:
+                opt_data = self.options_by_token.get(norm_tok)
+                if opt_data is not None and len(opt_data["timestamps"]) > 0:
+                    idx = int(np.searchsorted(opt_data["timestamps"], fill_ts, side="right"))
+                    if idx < len(opt_data["timestamps"]):
+                        opt_cursor[norm_tok] = idx
+                        heapq.heappush(opt_heap, (float(opt_data["timestamps"][idx]), norm_tok, idx))
+
+        def _process_delayed_release(release_ts: float, req: OrderRequest) -> None:
+            opt_q = self.get_option_quote(req.instrument_token, release_ts)
+            meta_entry = pending_delayed_meta.pop(req.order_id, None)
+            track = meta_entry[2] if meta_entry else tracks_by_mode.get("paper_delayed", {}).get(req.track)
+            if opt_q and opt_q["ask"] > 0:
+                fill_price = opt_q["ask"]
+                capital_delta = (fill_price - req.price) * req.quantity
+                if track and capital_delta > 0 and track.available_capital < capital_delta:
+                    res = OrderResult(
+                        order_id=req.order_id,
+                        status="REJECTED",
+                        fill_price=0.0,
+                        fill_quantity=0,
+                        fill_timestamp=release_ts,
+                    )
+                else:
+                    if track:
+                        if capital_delta > 0:
+                            track.commit_capital(capital_delta)
+                        elif capital_delta < 0:
+                            track.release_capital(abs(capital_delta), 0.0)
+                    res = OrderResult(
+                        order_id=req.order_id,
+                        status="FILLED",
+                        fill_price=fill_price,
+                        fill_quantity=req.quantity,
+                        fill_timestamp=release_ts,
+                    )
+            else:
+                res = OrderResult(
+                    order_id=req.order_id,
+                    status="REJECTED",
+                    fill_price=0.0,
+                    fill_quantity=0,
+                    fill_timestamp=release_ts,
+                )
+            if track:
+                track.on_order_result(res)
+                if res.status == "FILLED" and meta_entry is not None:
+                    m_name, tr_name, _, trade_obj = meta_entry
+                    if trade_obj.status == "OPEN":
+                        _register_filled_trade(m_name, tr_name, track, trade_obj, release_ts)
+
+        def _flush_events(limit_ts: float, inclusive: bool) -> None:
+            nonlocal next_hb_ts
+            while True:
+                next_d = delayed_heap[0][0] if delayed_heap else float("inf")
+                next_o = opt_heap[0][0] if opt_heap else float("inf")
+                next_h = next_hb_ts if (next_hb_ts is not None and open_tracks) else float("inf")
+                ev_ts = next_d if next_d <= next_o else next_o
+                if next_h < ev_ts:
+                    ev_ts = next_h
+                if inclusive:
+                    if ev_ts > limit_ts:
+                        break
+                else:
+                    if ev_ts >= limit_ts:
+                        break
+
+                if next_d <= next_o and next_d <= next_h:
+                    rel_ts, _, req = heapq.heappop(delayed_heap)
+                    _process_delayed_release(rel_ts, req)
+                elif next_o <= next_h:
+                    o_ts, norm_tok, idx = heapq.heappop(opt_heap)
+                    entries = open_trades_by_token.get(norm_tok)
+                    if not entries:
+                        opt_cursor.pop(norm_tok, None)
+                        continue
+                    alive = [e for e in entries if e[3].status == "OPEN"]
+                    if not alive:
+                        open_trades_by_token.pop(norm_tok, None)
+                        opt_cursor.pop(norm_tok, None)
+                        continue
+
+                    opt_data = self.options_by_token[norm_tok]
+                    bid = float(opt_data["bids"][idx])
+                    ask = float(opt_data["asks"][idx])
+                    ltp = float(opt_data["ltps"][idx])
+
+                    tracks_to_notify: Dict[Tuple[str, str], Any] = {}
+                    for m_name, tr_name, tr_obj, trade in alive:
+                        if trade.entry_time and o_ts <= trade.entry_time:
+                            continue
+                        if trade.symbol in latest_equity_ltp:
+                            trade.metadata["underlying_ltp"] = latest_equity_ltp[trade.symbol]
+                        tracks_to_notify[(m_name, tr_name)] = tr_obj
+
+                    for tr_obj in tracks_to_notify.values():
+                        tr_obj.on_tick(token=norm_tok, ltp=ltp, bid=bid, ask=ask, ts=o_ts, symbol="")
+
+                    still_alive = [e for e in alive if e[3].status == "OPEN"]
+                    if len(still_alive) < len(alive):
+                        _prune_open_state()
+                    if still_alive:
+                        open_trades_by_token[norm_tok] = still_alive
+                        nxt_idx = idx + 1
+                        if nxt_idx < len(opt_data["timestamps"]):
+                            opt_cursor[norm_tok] = nxt_idx
+                            heapq.heappush(opt_heap, (float(opt_data["timestamps"][nxt_idx]), norm_tok, nxt_idx))
+                        else:
+                            opt_cursor.pop(norm_tok, None)
+                    else:
+                        open_trades_by_token.pop(norm_tok, None)
+                        opt_cursor.pop(norm_tok, None)
+                else:
+                    hb_ts = next_h
+                    next_hb_ts = hb_ts + 1.0
+                    had_closure = False
+                    for (m_name, tr_name), tr_obj in list(open_tracks.items()):
+                        before_open = len(tr_obj.active_trades)
+                        tr_obj.on_heartbeat(hb_ts)
+                        if len(tr_obj.active_trades) < before_open:
+                            had_closure = True
+                    if had_closure:
+                        _prune_open_state()
 
         for i in range(total_eq):
             t_curr = float(ts_arr[i])
@@ -634,23 +879,49 @@ class ColumnarSimEngine:
             ltp = float(ltps[i])
             vol = int(vols[i])
 
-            # Step A: Feed equity tick to CandleManager
+            # 1. Flush chronological option ticks, delayed fills, and heartbeats strictly before t_curr
+            _flush_events(t_curr, inclusive=False)
+
+            # 2. Step A: Feed equity tick to CandleManager and update active underlying LTPs immediately
             candle_mgr.on_tick(token=token, ltp=ltp, vol=vol, ts=t_curr)
             sym_key = normalize_instrument_token(token)
             raw_sym = sym_key.split(":", 1)[1] if ":" in sym_key else sym_key
             sym_idx = candle_mgr.symbol_to_index.get(sym_key)
             if sym_idx is None:
                 sym_idx = candle_mgr.symbol_to_index.get(raw_sym)
-            if sym_idx is not None and sym_idx < len(candle_mgr.index_to_symbol):
-                canonical_sym = candle_mgr.index_to_symbol[sym_idx]
-                latest_equity_ltp[canonical_sym] = ltp
-                latest_equity_ltp[raw_sym] = ltp
+            if sym_idx is None and eq_syms is not None and eq_syms[i]:
+                eq_s = str(eq_syms[i]).upper()
+                sym_idx = candle_mgr.symbol_to_index.get(eq_s)
+            canonical_sym = (
+                candle_mgr.index_to_symbol[sym_idx]
+                if (sym_idx is not None and sym_idx < len(candle_mgr.index_to_symbol))
+                else (str(eq_syms[i]).upper() if (eq_syms is not None and eq_syms[i]) else raw_sym)
+            )
+            latest_equity_ltp[canonical_sym] = ltp
+            latest_equity_ltp[raw_sym] = ltp
 
-            # Step B: Serialized Scoring Spin Evaluation (Evaluates whenever 1.0 simulated second elapses)
+            if canonical_sym in open_trades_by_symbol:
+                sym_entries = open_trades_by_symbol[canonical_sym]
+                tracks_for_sym: Dict[Tuple[str, str], Any] = {}
+                for m_name, tr_name, tr_obj, trade in sym_entries:
+                    if trade.status == "OPEN" and (not trade.entry_time or t_curr > trade.entry_time):
+                        tracks_for_sym[(m_name, tr_name)] = tr_obj
+                if tracks_for_sym:
+                    had_sym_closure = False
+                    for tr_obj in tracks_for_sym.values():
+                        before_open = len(tr_obj.active_trades)
+                        tr_obj.on_tick(token=canonical_sym, ltp=ltp, bid=ltp, ask=ltp, ts=t_curr, symbol=canonical_sym)
+                        if len(tr_obj.active_trades) < before_open:
+                            had_sym_closure = True
+                    if had_sym_closure:
+                        _prune_open_state()
+
+            # 3. Flush events at exact t_curr (after equity LTP at t_curr is live)
+            _flush_events(t_curr, inclusive=True)
+
+            # 4. Step B: Serialized Scoring Spin Evaluation (Evaluates whenever 1.0 simulated second elapses)
             if (t_curr - last_scoring_eval_ts) >= 1.0:
                 last_scoring_eval_ts = t_curr
-                from datetime import datetime
-                from core.common.time_utils import IST
                 dt_curr = datetime.fromtimestamp(t_curr, tz=IST)
                 curr_minutes = dt_curr.hour * 60 + dt_curr.minute
 
@@ -689,78 +960,17 @@ class ColumnarSimEngine:
                         # Dispatch to Active Mode Tracks
                         for m_name, track_dict in tracks_by_mode.items():
                             for tr_name, track in track_dict.items():
-                                track.on_opportunity(opp)
-
-            # Step C: Progress Delayed Queue
-            if ctx_delayed and ctx_delayed.pending_orders:
-                remaining_pending = []
-                for release_ts, req in ctx_delayed.pending_orders:
-                    if t_curr >= release_ts:
-                        opt_q = self.get_option_quote(req.instrument_token, release_ts)
-                        track = tracks_by_mode.get("paper_delayed", {}).get(req.track)
-                        if opt_q and opt_q["ask"] > 0:
-                            fill_price = opt_q["ask"]
-                            capital_delta = (fill_price - req.price) * req.quantity
-                            if track and capital_delta > 0 and track.available_capital < capital_delta:
-                                res = OrderResult(
-                                    order_id=req.order_id,
-                                    status="REJECTED",
-                                    fill_price=0.0,
-                                    fill_quantity=0,
-                                    fill_timestamp=release_ts,
-                                )
-                            else:
-                                if track:
-                                    if capital_delta > 0:
-                                        track.commit_capital(capital_delta)
-                                    elif capital_delta < 0:
-                                        track.release_capital(abs(capital_delta), 0.0)
-                                res = OrderResult(
-                                    order_id=req.order_id,
-                                    status="FILLED",
-                                    fill_price=fill_price,
-                                    fill_quantity=req.quantity,
-                                    fill_timestamp=release_ts,
-                                )
-                        else:
-                            res = OrderResult(
-                                order_id=req.order_id,
-                                status="REJECTED",
-                                fill_price=0.0,
-                                fill_quantity=0,
-                                fill_timestamp=release_ts,
-                            )
-                        if track:
-                            track.on_order_result(res)
-                    else:
-                        remaining_pending.append((release_ts, req))
-                ctx_delayed.pending_orders = remaining_pending
-
-            # Step D & E: Heartbeat & Active Trades Exit Evaluation (Sampled at 0.5s intervals)
-            if (t_curr - last_hb_ts) >= 0.5:
-                last_hb_ts = t_curr
-                for m_name, track_dict in tracks_by_mode.items():
-                    for tr_name, track in track_dict.items():
-                        # Process active trade depth quotes
-                        for trade in list(track.active_trades.values()):
-                            if trade.status != "OPEN":
-                                continue
-                            if trade.entry_time and t_curr <= trade.entry_time:
-                                continue
-                            if trade.symbol in latest_equity_ltp:
-                                trade.metadata["underlying_ltp"] = latest_equity_ltp[trade.symbol]
-                            opt_q = self.get_option_quote(trade.token, t_curr)
-                            if opt_q:
-                                track.on_tick(
-                                    token=trade.token,
-                                    ltp=opt_q["ltp"],
-                                    bid=opt_q["bid"],
-                                    ask=opt_q["ask"],
-                                    ts=t_curr,
-                                    symbol=trade.symbol,
-                                )
-                        # 1s Heartbeat check
-                        track.on_heartbeat(t_curr)
+                                new_trade = track.on_opportunity(opp)
+                                if new_trade is None:
+                                    continue
+                                if m_name == "paper_delayed" and ctx_delayed is not None:
+                                    while ctx_delayed.pending_orders:
+                                        rel_ts, req = ctx_delayed.pending_orders.pop(0)
+                                        delay_seq += 1
+                                        pending_delayed_meta[req.order_id] = (m_name, tr_name, track, new_trade)
+                                        heapq.heappush(delayed_heap, (rel_ts, delay_seq, req))
+                                else:
+                                    _register_filled_trade(m_name, tr_name, track, new_trade, t_curr)
 
         # Final EOD Auto Square-off for any remaining open positions
         last_ts = float(ts_arr[-1]) if total_eq > 0 else 0.0

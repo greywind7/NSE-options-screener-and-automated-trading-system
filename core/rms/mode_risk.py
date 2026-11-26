@@ -18,11 +18,13 @@ class ModeRiskManager:
         starting_capital: float = 250000.0,
         daily_loss_limit_inr: float = 10000.0,
         max_capital_per_trade_pct: float = 0.50,
+        enable_circuit_breaker: bool = True,
     ):
         self.mode = mode.lower()
         self.starting_capital = float(starting_capital)
         self.daily_loss_limit_inr = float(daily_loss_limit_inr)
         self.max_capital_per_trade_pct = float(max_capital_per_trade_pct)
+        self.enable_circuit_breaker = bool(enable_circuit_breaker)
 
         self.daily_pnl = 0.0
         self.committed_capital = 0.0
@@ -40,7 +42,11 @@ class ModeRiskManager:
         return max(0.0, net_worth - self.committed_capital)
 
     def is_circuit_breaker_tripped(self) -> bool:
-        return self.circuit_breaker_tripped or self.frozen or (self.daily_pnl <= -self.daily_loss_limit_inr)
+        if self.frozen:
+            return True
+        if not self.enable_circuit_breaker:
+            return False
+        return self.circuit_breaker_tripped or (self.daily_pnl <= -self.daily_loss_limit_inr)
 
     def can_allocate(self, required_capital: float) -> bool:
         """Check whether capital is available for an entry order."""
@@ -67,9 +73,9 @@ class ModeRiskManager:
         self.update_pnl(realized_pnl)
 
     def update_pnl(self, realized_pnl_delta: float) -> None:
-        """Update cumulative realized daily PnL and evaluate circuit breaker."""
+        """Update cumulative realized daily PnL and evaluate circuit breaker if enabled."""
         self.daily_pnl += realized_pnl_delta
-        if self.daily_pnl <= -self.daily_loss_limit_inr:
+        if self.enable_circuit_breaker and self.daily_pnl <= -self.daily_loss_limit_inr:
             self.circuit_breaker_tripped = True
             self.frozen = True
             print(

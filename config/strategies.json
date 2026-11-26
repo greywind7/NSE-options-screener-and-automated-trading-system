@@ -264,11 +264,11 @@
         "priority_sort": "rvol_descending"
       },
       "risk": {
+        "enable_circuit_breaker": false,
         "daily_loss_limit_inr": 10000.0,
         "max_concurrent_positions": 5,
         "max_capital_allocation_pct": 0.50,
-        "max_spread_pct": 0.03,
-        "min_absolute_spread_inr": 0.50
+        "max_spread_pct": 0.03
       }
     }
   }

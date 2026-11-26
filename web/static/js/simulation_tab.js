@@ -156,6 +156,20 @@ window.SimulationTab = {
       this.populateRunSelect();
     }
     this.renderRunsList();
+    this.hydrateMissingRuns();
+  },
+
+  async hydrateMissingRuns() {
+    const missing = this.runs.filter((r) => r.status === "completed" && (!r.results || !r.results.matrix));
+    if (missing.length === 0) return;
+    for (const r of missing) {
+      await this.fetchRunResults(r);
+    }
+    this.saveRunsToStorage();
+    this.renderRunsList();
+    if (this.currentRun && this.currentRun.results && document.getElementById("tab-sim-results")?.classList.contains("active")) {
+      this.renderCurrentRun();
+    }
   },
 
   async clearAllRunsAndTempFiles() {
@@ -183,13 +197,19 @@ window.SimulationTab = {
     this.renderRunsList();
   },
 
-  onActivateResults() {
+  async onActivateResults() {
     this.populateRunSelect();
-    if (this.currentRun && this.currentRun.results) {
-      this.renderCurrentRun();
-    } else if (this.runs.length > 0) {
+    if (!this.currentRun && this.runs.length > 0) {
       this.currentRun = this.runs[0];
-      this.renderCurrentRun();
+    }
+    if (this.currentRun) {
+      if (this.currentRun.status === "completed" && (!this.currentRun.results || !this.currentRun.results.details)) {
+        await this.fetchRunResults(this.currentRun);
+        this.saveRunsToStorage();
+      }
+      if (this.currentRun.results) {
+        this.renderCurrentRun();
+      }
     }
   },
 
@@ -268,12 +288,15 @@ window.SimulationTab = {
     // Results Tab: Run selector
     const runSelect = document.getElementById("sr-run-select");
     if (runSelect) {
-      runSelect.addEventListener("change", (e) => {
+      runSelect.addEventListener("change", async (e) => {
         const found = this.runs.find((r) => r.id === e.target.value);
         if (found) {
           this.currentRun = found;
           this.selectedMode = null;
           this.selectedTrack = null;
+          if (found.status === "completed" && (!found.results || !found.results.details)) {
+            await this.fetchRunResults(found);
+          }
           this.renderCurrentRun();
         }
       });
@@ -924,7 +947,22 @@ window.SimulationTab = {
 
   saveRunsToStorage() {
     try {
-      localStorage.setItem("sim_runs", JSON.stringify(this.runs));
+      // Strip multi-megabyte trade details/candle arrays so batch histories fit cleanly within 5MB localStorage
+      const compact = this.runs.slice(0, 30).map((r) => ({
+        id: r.id,
+        date: r.date,
+        startTime: r.startTime,
+        status: r.status,
+        progressText: r.progressText,
+        payload: r.payload,
+        params: r.params,
+        runtime: r.runtime,
+        error: r.error,
+        results: r.results
+          ? { date: r.results.date, cached: r.results.cached, matrix: r.results.matrix }
+          : null,
+      }));
+      localStorage.setItem("sim_runs", JSON.stringify(compact));
     } catch (e) {
       console.warn("Could not save sim_runs to localStorage:", e);
     }
@@ -1057,7 +1095,7 @@ window.SimulationTab = {
     }
   },
 
-  showRunResults(run) {
+  async showRunResults(run) {
     this.currentRun = run;
     this.selectedMode = null;
     this.selectedTrack = null;
@@ -1069,6 +1107,9 @@ window.SimulationTab = {
     // Switch to tab
     window.App.switchTab("sim-results");
     this.populateRunSelect();
+    if (run.status === "completed" && (!run.results || !run.results.details)) {
+      await this.fetchRunResults(run);
+    }
     this.renderCurrentRun();
   },
 

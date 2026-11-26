@@ -210,6 +210,16 @@ We have **11 recorded sessions** (`2026-11-09` through `2026-11-25`, with ~60–
 
 ## Part 4 — Codebase Efficiency, Hardening & Operational Lifecycle Improvements
 
+### 0. [CRITICAL] `FeedHandler` Half-Open Socket Detection, Startup Retry & Unbuffered Reconnect Logging
+- **Current Limitation (`core/feed/feed_handler.py:996-1121`)**: While `ws_connection_worker()` already loops inside `while self._running:` and retries on explicit socket exceptions (`no close frame received or sent`), **three gaps cause silent disconnect hangs or invisible reconnect state**:
+  1. **Half-Open Connection Hang (`ping_interval=None` & Unbounded `ws.recv()`)**: Line `1020` explicitly sets `ping_interval=None` and line `1040` awaits `ws.recv()` with no timeout (`asyncio.wait_for`). When Wi-Fi drops silently or a router/NAT drops idle state without a TCP FIN/RST, `await ws.recv()` hangs indefinitely and the reconnect loop never triggers.
+  2. **Fatal Exit on Startup Auth Failure**: Line `996` calls `get_authorized_ws_url()` once before launching `dual_runner()`; if the network is momentarily down at startup, `FeedHandler` prints an error and exits cleanly instead of retrying with backoff inside the worker loop.
+  3. **Buffered Reconnect Telemetry**: `print(...)` calls in `ws_connection_worker` (lines `1013`, `1036`, `1118`) omit `flush=True`, causing disconnect/reconnect lines to sit invisible in an 8 KB block buffer when redirected to `logs/feed_handler.log` (`subprocess.Popen`), plus reconnects should refresh `ProtectedPositionRegistry` keys before re-sending `sub`.
+- **Required Fix (High Priority)**:
+  1. Enable WebSocket keepalive (`ping_interval=20, ping_timeout=10`) **and** wrap `await asyncio.wait_for(ws.recv(), timeout=15.0)` during market hours (`09:15–15:30 IST`), forcing a clean socket teardown and re-authorization if no tick/pong arrives within the watchdog window.
+  2. Remove the fatal startup `if not initial_url: return` early exit when WS mode is active so `ws_connection_worker` owns retry/backoff from second zero.
+  3. Always `flush=True` (or use standardized line-buffered logging per §8) on all connect, disconnect, and re-subscribe events, refresh protected open positions on reconnect, and publish a stale-feed status counter to the Web UI System Health panel (§9).
+
 ### 1. Fast Shard-Based `MarketRecorder`, Explicit Collation CLI & Web UI Tasks Tab
 - **Inefficiency**: [`MarketRecorder`](file:///Users/yorha/Documents/Trading%20Stuff/core/recorder/market_recorder.py#L163-L220) currently flushes every `5,000` ticks by reading the entire day's `equity_ticks.parquet` / `option_depth.parquet` (up to ~1.1 GB by afternoon), concatenating, re-compressing, and rewriting atomically—blocking the ZMQ receive thread for seconds at a time ($O(N^2)$ session I/O).
 - **Target Design**:
@@ -267,7 +277,7 @@ We have **11 recorded sessions** (`2026-11-09` through `2026-11-25`, with ~60–
 
 | Wave | Focus | Key Items | Dependencies / Prerequisites |
 |---|---|---|---|
-| **Wave 0 (Immediate Post-Market)** | Critical Correctness & Zero Fabrication | Clear remaining [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SYSTEM_AUDIT_2_0.md) items (`CRIT-02`, `CRIT-05`, `HIGH-02`..`07`), test isolation guard (#9), remove silent `except: pass` + health counters, hoist constants & C-style macros | Must finish before building new features on top |
+| **Wave 0 (Immediate Post-Market)** | Critical Correctness & Zero Fabrication | Clear remaining [`SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/SYSTEM_AUDIT_2_0.md) items (`CRIT-02`, `CRIT-05`, `HIGH-02`..`07`), **critical `FeedHandler` keepalive/watchdog reconnect & unbuffered logging (Part 4 §0)**, test isolation guard (#9), remove silent `except: pass` + health counters, hoist constants & C-style macros | Must finish before building new features on top |
 | **Wave 1 (Foundations & Data Pipeline)** | Hygiene, Parity & Storage | Shared `common/options/strike_resolver.py`, shared `common/journals/reader.py`, `MarketRecorder` fast shard writes + exit/CLI collation, standardized logging & staged→master journals, `origin_track` persistence, configurable midday freeze, Nifty 50 recording fix | Enables clean multi-day data, zero live/sim drift & reliable `--continue` |
 | **Wave 2 (Research, Tasks & Web Platform)** | Backtest Speed & Ops Control | `ColumnarSimEngine` single-sort flat array refactor + warm workers, disk sim cache (paper only), immutable presets + derived configs, Batch Reports + regime classifier, surrogate parameter optimizer, Web UI Admin/Health & Tasks tabs + `cli/` refactor | Unlocks rapid empirical optimization across all 11+ recorded days |
 | **Wave 3 (Core Decoupling & Alpha)** | Multi-Strategy Engine | Decouple `RMSService` to core & add `strategy_id` routing, `CandleManager` & `ScoringEngine3` hot-path optimizations (dirty sequence skip), `BaseTrack` `O(1)` indexing + SHM underlying LTP, Mean Reversion (`11:30–13:30`) & Relative Strength strategies | Requires Wave 1–2 validation |
