@@ -423,7 +423,26 @@ class TestBatchWebEndpoints(unittest.IsolatedAsyncioTestCase):
         self.assertIn("br-rankings-metric-pills", resp_idx.text)
         self.assertIn("br-sessions-tbody", resp_idx.text)
 
-        # 8. Clear endpoint wipes batches & regime cache
+        # 8. Two batches over the same date range remain strictly isolated
+        sim_svc.runs_history["RUN-C"] = _make_mock_run("RUN-C", "2026-11-16", {
+            ("paper", "E10_W3_CAP3_ATM"): [("09:30", 9000.0, 20.0)],
+            ("paper_delayed", "E10_W3_CAP3_ATM"): [("09:30", 8500.0, 19.0)],
+        }, batch_id="BATCH-THREE")
+        sim_svc.runs_history["RUN-UNBATCHED"] = _make_mock_run("RUN-UNBATCHED", "2026-11-18", {
+            ("paper", "E10_W3_CAP3_ATM"): [("10:30", 1200.0, 3.0)],
+        }, batch_id="")
+        sim_svc._register_run_in_batch("BATCH-THREE", "RUN-C", label="Override Day 1")
+        snap = sim_svc.create_or_update_batch(batch_id="BATCH-SNAP", label="Only Unbatched", run_ids=None)
+        self.assertEqual(snap["run_ids"], ["RUN-UNBATCHED"])
+
+        rep_b1 = sim_svc.get_batch_report("BATCH-ONE")
+        rep_b3 = sim_svc.get_batch_report("BATCH-THREE")
+        self.assertEqual(len(rep_b1["sessions"]), 2)
+        self.assertEqual(len(rep_b3["sessions"]), 1)
+        self.assertEqual(rep_b1["sessions"][0]["run_id"], "RUN-A")
+        self.assertEqual(rep_b3["sessions"][0]["run_id"], "RUN-C")
+
+        # 9. Clear endpoint wipes batches & regime cache
         req_clr = make_mocked_request("POST", "/api/sim/clear", app=self.server_inst.app)
         await self.server_inst.handle_sim_clear(req_clr)
         self.assertEqual(len(sim_svc.batches_history), 0)

@@ -19,7 +19,7 @@ window.SimulationTab = {
   batchChart: null,
   batchWinnersChart: null,
   activeResultsSubview: "single",
-  currentBatchId: "__all__",
+  currentBatchId: null,
   batchRankBy: "net_pnl",
   batchRegimeFilter: "ALL",
   batchWindowFilter: "ALL",
@@ -28,6 +28,8 @@ window.SimulationTab = {
   batchCompareDelayed: true,
   currentBatchReport: null,
   batchesList: [],
+  _isBatchRunning: false,
+  _batchFetchSeq: 0,
 
   init() {
     this.bindControls();
@@ -121,7 +123,8 @@ window.SimulationTab = {
     this.currentRun = null;
     this.currentBatchReport = null;
     this.batchesList = [];
-    this.currentBatchId = "__all__";
+    this.currentBatchId = null;
+    this._batchFetchSeq = (this._batchFetchSeq || 0) + 1;
     try {
       localStorage.removeItem("sim_runs");
       if (newBootId) {
@@ -166,6 +169,9 @@ window.SimulationTab = {
         });
       } else {
         const existing = map.get(sr.id);
+        if (!existing.batch_id && sr.batch_id) {
+          existing.batch_id = sr.batch_id;
+        }
         if (existing.status !== "completed") {
           existing.status = "completed";
           existing.runtime = sr.runtime || existing.runtime;
@@ -189,7 +195,7 @@ window.SimulationTab = {
     const missing = this.runs.filter((r) => r.status === "completed" && (!r.results || !r.results.matrix));
     if (missing.length === 0) return;
     for (const r of missing) {
-      await this.fetchRunResults(r);
+      await this.fetchRunResults(r, false);
     }
     this.saveRunsToStorage();
     this.renderRunsList();
@@ -368,7 +374,7 @@ window.SimulationTab = {
     // Batch Report entrypoints & subview controls
     const openBatchBtn = document.getElementById("sim-open-batch-report-btn");
     if (openBatchBtn) {
-      openBatchBtn.addEventListener("click", () => this.openBatchReport("__all__"));
+      openBatchBtn.addEventListener("click", () => this.openBatchReport(null));
     }
 
     const backTopBtn = document.getElementById("sr-back-to-sim-top-btn");
@@ -382,15 +388,13 @@ window.SimulationTab = {
       subSingleBtn.addEventListener("click", () => this.toggleResultsSubview("single"));
     }
     if (subBatchBtn) {
-      subBatchBtn.addEventListener("click", () => this.openBatchReport(this.currentBatchId || "__all__"));
+      subBatchBtn.addEventListener("click", () => this.openBatchReport(null));
     }
 
     const brBatchSel = document.getElementById("br-batch-select");
     if (brBatchSel) {
       brBatchSel.addEventListener("change", (e) => {
-        this.currentBatchId = e.target.value || "__all__";
-        this.batchSelectedTrack = "__portfolio__";
-        this.fetchAndRenderBatchReport();
+        this.selectBatch(e.target.value || "__all__", true);
       });
     }
 
@@ -814,6 +818,7 @@ window.SimulationTab = {
       run = {
         id: runId,
         date: payload.date,
+        batch_id: payload.batch_id || null,
         startTime: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
         status: "in_progress",
         progressText: "Initializing engine...",
@@ -824,6 +829,7 @@ window.SimulationTab = {
       };
       this.runs.unshift(run);
     } else {
+      run.batch_id = payload.batch_id || run.batch_id || null;
       run.status = "in_progress";
       run.progressText = "Initializing engine...";
       run.error = null;
@@ -896,9 +902,14 @@ window.SimulationTab = {
               run.status = "failed";
               run.error = st.error;
             } else {
-              run.status = "completed";
-              run.runtime = st.last_run_time || 0.0;
-              await this.fetchRunResults(run);
+              await this.fetchRunResults(run, false);
+              if (run.results) {
+                run.status = "completed";
+                run.runtime = run.runtime || st.last_run_time || 0.0;
+              } else {
+                run.status = "failed";
+                run.error = st.error || `Results for ${run.id} (${run.date}) not found on server`;
+              }
             }
             this.renderRunsList();
             this.saveRunsToStorage();
@@ -917,6 +928,11 @@ window.SimulationTab = {
   },
 
   async startBatchSimulation() {
+    if (this._isBatchRunning) {
+      window.App.showToast("A batch simulation is already running.", "info");
+      return;
+    }
+
     const fromEl = document.getElementById("sim-from-date-select");
     const toEl = document.getElementById("sim-to-date-select");
     const fromDate = fromEl ? fromEl.value : "";
@@ -937,72 +953,90 @@ window.SimulationTab = {
     const progStatus = document.getElementById("sim-batch-status-label");
     const progPct = document.getElementById("sim-batch-pct-label");
 
+    this._isBatchRunning = true;
     if (runBtn) runBtn.disabled = true;
     if (progBox) progBox.style.display = "flex";
 
     const basePayload = this.gatherPayload();
     this._batchSeq = (this._batchSeq || 0) + 1;
     const batchId = `BATCH-${Date.now()}-${this._batchSeq}`;
-    const batchLabel = `Batch ${fromDate} → ${toDate}`;
+    const profileTag = basePayload.track_profile || "default";
+    const timeTag = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false });
+    const batchLabel = `Batch #${this._batchSeq} (${profileTag}, ${timeTag}): ${fromDate} → ${toDate}`;
     const batchRunIds = [];
 
-    for (let i = 0; i < rangeDates.length; i++) {
-      const curDate = rangeDates[i];
-      const pct = Math.round((i / rangeDates.length) * 100);
-      if (progFill) progFill.style.width = `${pct}%`;
-      if (progPct) progPct.innerText = `${pct}%`;
-      if (progStatus) progStatus.innerText = `Running ${i + 1}/${rangeDates.length}: ${curDate}`;
-      if (statusText) statusText.innerText = `Batch simulating: ${curDate}...`;
-
-      const payload = JSON.parse(JSON.stringify(basePayload));
-      payload.date = curDate;
-      this._batchRunSeq = (this._batchRunSeq || 0) + 1;
-      payload.run_id = `RUN-${Date.now()}-${this._batchRunSeq}`;
-      payload.batch_id = batchId;
-      payload.batch_label = batchLabel;
-      batchRunIds.push(payload.run_id);
-
-      await this.runSingleSimAsync(payload);
-
-      // Verify server reports idle before launching the next date in the batch
-      for (let waitSec = 0; waitSec < 15; waitSec++) {
-        try {
-          const checkRes = await fetch("/api/sim/status");
-          if (checkRes.ok) {
-            const checkSt = await checkRes.json();
-            if (!checkSt.is_running) break;
-          }
-        } catch (_) {}
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      // Clean settle delay between sequential batch runs
-      await new Promise((r) => setTimeout(r, 400));
-    }
-
     try {
-      await fetch("/api/sim/batches", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ batch_id: batchId, label: batchLabel, run_ids: batchRunIds }),
-      });
-    } catch (_) {}
+      for (let i = 0; i < rangeDates.length; i++) {
+        const curDate = rangeDates[i];
+        const pct = Math.round((i / rangeDates.length) * 100);
+        if (progFill) progFill.style.width = `${pct}%`;
+        if (progPct) progPct.innerText = `${pct}%`;
+        if (progStatus) progStatus.innerText = `Running ${i + 1}/${rangeDates.length}: ${curDate}`;
+        if (statusText) statusText.innerText = `Batch simulating: ${curDate}...`;
 
-    if (progFill) progFill.style.width = "100%";
-    if (progPct) progPct.innerText = "100%";
-    if (progStatus) progStatus.innerText = `Batch Completed (${rangeDates.length} dates)`;
-    if (statusText) statusText.innerText = `Batch simulation completed (${rangeDates.length} runs)! ⚡`;
-    if (runBtn) runBtn.disabled = false;
+        const payload = JSON.parse(JSON.stringify(basePayload));
+        payload.date = curDate;
+        this._batchRunSeq = (this._batchRunSeq || 0) + 1;
+        payload.run_id = `RUN-${Date.now()}-${this._batchRunSeq}`;
+        payload.batch_id = batchId;
+        payload.batch_label = batchLabel;
 
-    // Reveal Results Tab in navigation
-    const navTab = document.getElementById("nav-tab-sim-results");
-    if (navTab) navTab.style.display = "inline-flex";
+        const completedRun = await this.runSingleSimAsync(payload);
+        if (completedRun && completedRun.status === "completed") {
+          batchRunIds.push(payload.run_id);
+        }
 
-    window.App.showToast(`Batch completed: ${rangeDates.length} simulations finished!`, "success");
-    if (this.runs.length > 0) {
-      this.populateRunSelect();
-      this.currentRun = this.runs[0];
+        // Verify server reports idle before launching the next date in the batch
+        for (let waitSec = 0; waitSec < 15; waitSec++) {
+          try {
+            const checkRes = await fetch("/api/sim/status");
+            if (checkRes.ok) {
+              const checkSt = await checkRes.json();
+              if (!checkSt.is_running) break;
+            }
+          } catch (_) {}
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        // Clean settle delay between sequential batch runs
+        await new Promise((r) => setTimeout(r, 400));
+      }
+
+      if (batchRunIds.length > 0) {
+        try {
+          await fetch("/api/sim/batches", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ batch_id: batchId, label: batchLabel, run_ids: batchRunIds }),
+          });
+        } catch (_) {}
+      }
+
+      if (progFill) progFill.style.width = "100%";
+      if (progPct) progPct.innerText = "100%";
+      if (progStatus) progStatus.innerText = `Batch Completed (${batchRunIds.length}/${rangeDates.length} dates)`;
+      if (statusText) statusText.innerText = `Batch simulation completed (${batchRunIds.length}/${rangeDates.length} runs)! ⚡`;
+
+      // Reveal Results Tab in navigation
+      const navTab = document.getElementById("nav-tab-sim-results");
+      if (navTab) navTab.style.display = "inline-flex";
+
+      if (batchRunIds.length > 0) {
+        window.App.showToast(`Batch completed: ${batchRunIds.length} simulations finished!`, "success");
+      } else {
+        window.App.showToast("Batch finished with no successful runs.", "error");
+      }
+      if (this.runs.length > 0) {
+        this.populateRunSelect();
+        this.currentRun = this.runs[0];
+      }
+      if (batchRunIds.length > 0) {
+        this.resetBatchViewFilters();
+        await this.openBatchReport(batchId);
+      }
+    } finally {
+      this._isBatchRunning = false;
+      if (runBtn) runBtn.disabled = false;
     }
-    await this.openBatchReport(batchId);
   },
 
   pollStatus(run) {
@@ -1093,22 +1127,26 @@ window.SimulationTab = {
     }, 1000);
   },
 
-  async fetchRunResults(run) {
+  async fetchRunResults(run, allowGlobalFallback = true) {
     try {
       const res = await fetch(`/api/sim/run/${encodeURIComponent(run.id)}`);
       if (res.ok) {
         const data = await res.json();
-        if (data.run && data.run.results) {
+        if (data.run && data.run.results && (!data.run.id || data.run.id === run.id)) {
           run.results = data.run.results;
           run.runtime = data.run.runtime || run.runtime;
+          run.batch_id = data.run.batch_id || run.batch_id || null;
           return;
         }
       }
-      // Fallback
+      if (!allowGlobalFallback) return;
+      // Fallback only for standalone single runs
       const res2 = await fetch("/api/sim/results");
       if (res2.ok) {
         const data2 = await res2.json();
-        if (data2.results) run.results = data2.results;
+        if (data2.results && (!run.date || data2.results.date === run.date)) {
+          run.results = data2.results;
+        }
       }
     } catch (e) {
       console.error("Failed to fetch simulation results:", e);
@@ -1121,6 +1159,7 @@ window.SimulationTab = {
       const compact = this.runs.slice(0, 30).map((r) => ({
         id: r.id,
         date: r.date,
+        batch_id: r.batch_id || null,
         startTime: r.startTime,
         status: r.status,
         progressText: r.progressText,
@@ -1769,15 +1808,48 @@ window.SimulationTab = {
     }
   },
 
-  async openBatchReport(batchId = "__all__") {
+  resetBatchViewFilters() {
+    this.batchSelectedTrack = "__portfolio__";
+    this.batchRegimeFilter = "ALL";
+    this.batchWindowFilter = "ALL";
+
+    const winSel = document.getElementById("br-window-select");
+    if (winSel) winSel.value = "ALL";
+    document.querySelectorAll(".br-regime-pill").forEach((pill) => {
+      pill.classList.toggle("active", pill.getAttribute("data-regime") === "ALL");
+    });
+    const trkSel = document.getElementById("br-chart-track-select");
+    if (trkSel) trkSel.value = "__portfolio__";
+  },
+
+  selectBatch(batchId, shouldFetch = true) {
+    const resolved = batchId || "__all__";
+    const changed = resolved !== this.currentBatchId;
+    this.currentBatchId = resolved;
+    const sel = document.getElementById("br-batch-select");
+    if (sel) sel.value = resolved;
+    if (changed) {
+      this.resetBatchViewFilters();
+    } else {
+      this.batchSelectedTrack = "__portfolio__";
+    }
+    if (shouldFetch) {
+      this.fetchAndRenderBatchReport();
+    }
+  },
+
+  async openBatchReport(batchId = null) {
     const navTab = document.getElementById("nav-tab-sim-results");
     if (navTab) navTab.style.display = "inline-flex";
     window.App.switchTab("sim-results");
     this.toggleResultsSubview("batch");
-    if (batchId) {
+    if (batchId && batchId !== this.currentBatchId) {
+      this.resetBatchViewFilters();
+    }
+    if (batchId !== null && batchId !== undefined) {
       this.currentBatchId = batchId;
     }
-    await this.loadBatchList(this.currentBatchId);
+    await this.loadBatchList(batchId);
     await this.fetchAndRenderBatchReport();
   },
 
@@ -1791,7 +1863,7 @@ window.SimulationTab = {
       this.renderMultiBatchComparison(data.comparison || []);
 
       if (sel) {
-        sel.innerHTML = `<option value="__all__">All Completed Runs (${data.completed_runs_count || 0})</option>`;
+        sel.innerHTML = `<option value="__all__">All Runs (Latest Per Date — ${data.completed_runs_count || 0})</option>`;
         this.batchesList.forEach((b) => {
           const opt = document.createElement("option");
           opt.value = b.batch_id;
@@ -1799,9 +1871,20 @@ window.SimulationTab = {
           sel.appendChild(opt);
         });
 
-        const candidate = preferredId || this.currentBatchId || "__all__";
-        const exists = Array.from(sel.options).some((o) => o.value === candidate);
-        this.currentBatchId = exists ? candidate : "__all__";
+        const hasOpt = (val) => !!val && Array.from(sel.options).some((o) => o.value === val);
+        const latestBatchId = this.batchesList.length > 0 ? this.batchesList[this.batchesList.length - 1].batch_id : null;
+        let nextId = "__all__";
+        if (hasOpt(preferredId)) {
+          nextId = preferredId;
+        } else if (this.currentBatchId && this.currentBatchId !== "__all__" && hasOpt(this.currentBatchId)) {
+          nextId = this.currentBatchId;
+        } else if (hasOpt(latestBatchId)) {
+          nextId = latestBatchId;
+        }
+        if (nextId !== this.currentBatchId) {
+          this.resetBatchViewFilters();
+        }
+        this.currentBatchId = nextId;
         sel.value = this.currentBatchId;
       }
     } catch (e) {
@@ -1810,22 +1893,33 @@ window.SimulationTab = {
   },
 
   async snapshotCurrentRunsAsBatch() {
-    const completedIds = this.runs.filter((r) => r.status === "completed").map((r) => r.id);
-    if (completedIds.length === 0) {
+    const completedRuns = this.runs.filter((r) => r.status === "completed");
+    const unbatchedRuns = completedRuns.filter((r) => !r.batch_id);
+    const targetRuns = unbatchedRuns.length > 0 ? unbatchedRuns : completedRuns;
+    const targetIds = targetRuns.map((r) => r.id);
+    if (targetIds.length === 0) {
       window.App.showToast("No completed runs available to snapshot.", "error");
       return;
     }
-    const label = prompt("Enter a label for this Batch Snapshot (e.g. V3 Gate Tuning):", `Snapshot (${completedIds.length} runs)`);
+    const defaultLabel = unbatchedRuns.length > 0
+      ? `Single Runs Snapshot (${targetIds.length} runs)`
+      : `Combined Snapshot (${targetIds.length} runs)`;
+    const label = prompt("Enter a label for this Batch Snapshot (e.g. V3 Gate Tuning):", defaultLabel);
     if (label === null) return;
     try {
       const res = await fetch("/api/sim/batches", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ label: label.trim() || `Snapshot (${completedIds.length})`, run_ids: completedIds }),
+        body: JSON.stringify({ label: label.trim() || defaultLabel, run_ids: targetIds }),
       });
       if (res.ok) {
         const data = await res.json();
         const bid = data.batch?.batch_id;
+        this.runs.forEach((r) => {
+          if (targetIds.includes(r.id) && !r.batch_id) r.batch_id = bid;
+        });
+        this.saveRunsToStorage();
+        this.resetBatchViewFilters();
         window.App.showToast(`Saved batch '${data.batch?.label || bid}'`, "success");
         await this.loadBatchList(bid);
         await this.fetchAndRenderBatchReport();
@@ -1836,30 +1930,71 @@ window.SimulationTab = {
   },
 
   async fetchAndRenderBatchReport() {
-    const bid = encodeURIComponent(this.currentBatchId || "__all__");
+    const targetBatchId = this.currentBatchId || "__all__";
+    const bid = encodeURIComponent(targetBatchId);
     const params = new URLSearchParams({
       regime: this.batchRegimeFilter || "ALL",
       window: this.batchWindowFilter || "ALL",
       rank_by: this.batchRankBy || "net_pnl",
     });
 
+    this._batchFetchSeq = (this._batchFetchSeq || 0) + 1;
+    const reqSeq = this._batchFetchSeq;
+
     try {
       const res = await fetch(`/api/sim/batch/${bid}?${params.toString()}`);
+      if (reqSeq !== this._batchFetchSeq || targetBatchId !== (this.currentBatchId || "__all__")) {
+        return;
+      }
       if (!res.ok) {
+        this.currentBatchReport = null;
         this.renderEmptyBatchReport();
         return;
       }
       const data = await res.json();
+      if (reqSeq !== this._batchFetchSeq || targetBatchId !== (this.currentBatchId || "__all__")) {
+        return;
+      }
       if (data.report) {
         this.currentBatchReport = data.report;
         this.renderBatchReport(data.report);
+      } else {
+        this.currentBatchReport = null;
+        this.renderEmptyBatchReport();
       }
     } catch (e) {
-      console.warn("Error fetching batch report:", e);
+      if (reqSeq === this._batchFetchSeq) {
+        console.warn("Error fetching batch report:", e);
+      }
     }
   },
 
   renderEmptyBatchReport() {
+    const setText = (id, txt) => {
+      const el = document.getElementById(id);
+      if (el) el.innerText = txt;
+    };
+    setText("br-stat-sessions", "0 / 0");
+    setText("br-stat-daterange", "-");
+    setText("br-stat-net-pnl", "₹0.00");
+    setText("br-stat-gross-pnl", "Gross: ₹0.00");
+    setText("br-stat-max-dd", "0.00%");
+    setText("br-stat-max-dd-inr", "₹0.00");
+    setText("br-stat-daily-wr", "0.0%");
+    setText("br-stat-green-days", "0 / 0 Green Days");
+    setText("br-stat-tracks", "0");
+    setText("br-stat-modes", "-");
+
+    ["br-spotlights-grid", "br-regime-breakdown", "br-intraday-windows-bar", "br-winners-legend"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = "";
+    });
+    setText("br-winners-subtitle", "0 Unique Winners");
+    setText("br-chart-subtitle", "Portfolio Equal-Weighted");
+
+    const trkSel = document.getElementById("br-chart-track-select");
+    if (trkSel) trkSel.innerHTML = `<option value="__portfolio__">Equal-Weighted Portfolio Avg</option>`;
+
     const lb = document.getElementById("br-leaderboard-tbody");
     if (lb) {
       lb.innerHTML = `<tr><td colspan="16" class="text-center" style="padding:24px; color:var(--text-dim);">No completed batch runs found yet. Run a Single or Batch simulation first!</td></tr>`;
@@ -1901,10 +2036,7 @@ window.SimulationTab = {
         <td class="font-mono">${c.best_calmar_track} (${c.best_calmar.toFixed(2)}x)</td>
       `;
       tr.addEventListener("click", () => {
-        this.currentBatchId = c.batch_id;
-        const sel = document.getElementById("br-batch-select");
-        if (sel) sel.value = c.batch_id;
-        this.fetchAndRenderBatchReport();
+        this.selectBatch(c.batch_id, true);
       });
       tbody.appendChild(tr);
     });
@@ -2263,10 +2395,37 @@ window.SimulationTab = {
             <span class="${topCls}" style="margin-left:4px;">(${window.App.formatINR(s.top_track_pnl || 0)})</span>
           </td>
         `;
-        tr.addEventListener("click", () => {
-          const found = this.runs.find((r) => r.id === s.run_id) || this.runs.find((r) => r.date === s.date);
+        tr.addEventListener("click", async () => {
+          let found = this.runs.find((r) => r.id === s.run_id);
+          if (!found && s.run_id) {
+            try {
+              const res = await fetch(`/api/sim/run/${encodeURIComponent(s.run_id)}`);
+              if (res.ok) {
+                const data = await res.json();
+                if (data.run && data.run.results) {
+                  found = {
+                    id: data.run.id,
+                    date: data.run.date,
+                    batch_id: data.run.batch_id || null,
+                    startTime: data.run.timestamp || "-",
+                    status: "completed",
+                    runtime: data.run.runtime || 0,
+                    params: data.run.params || {},
+                    results: data.run.results,
+                  };
+                  this.runs.unshift(found);
+                  this.populateRunSelect();
+                  this.renderRunsList();
+                }
+              }
+            } catch (e) {
+              console.warn("Could not hydrate run from batch session click:", e);
+            }
+          }
           if (found) {
             this.showRunResults(found);
+          } else {
+            window.App.showToast(`Run '${s.run_id}' is no longer in server memory.`, "error");
           }
         });
         sessTbody.appendChild(tr);

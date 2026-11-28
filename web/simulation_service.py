@@ -991,9 +991,18 @@ class SimulationService:
         """Create or update a batch record from explicit or currently stored completed runs."""
         resolved_id = (batch_id or "").strip() or f"BATCH-{len(self.batches_history) + 1}"
         if run_ids is None:
-            candidate_ids = list(self.runs_history.keys())
+            unbatched_ids = [
+                rid for rid, r in self.runs_history.items()
+                if r.get("results") and not r.get("batch_id")
+            ]
+            candidate_ids = unbatched_ids if unbatched_ids else [
+                rid for rid, r in self.runs_history.items() if r.get("results")
+            ]
         else:
-            candidate_ids = [rid for rid in run_ids if rid in self.runs_history]
+            candidate_ids = [
+                rid for rid in run_ids
+                if rid in self.runs_history and self.runs_history[rid].get("results")
+            ]
 
         batch = {
             "batch_id": resolved_id,
