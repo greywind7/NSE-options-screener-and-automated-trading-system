@@ -374,7 +374,9 @@ class AdminService:
             else:
                 continue
 
-            log_path = os.path.join(self.logs_dir, f"{svc}.log")
+            exec_logs_dir = os.path.join(self.logs_dir, "exec_logs")
+            os.makedirs(exec_logs_dir, exist_ok=True)
+            log_path = os.path.join(exec_logs_dir, f"{svc}.log")
             proc = spawn_process(cmd, svc, log_file=log_path, tier="CORE", pids_file=self.pids_file)
             _logger.info(f"Launched Core service '{svc}' (PID={proc.pid})")
             spawned.append({"role": svc, "pid": proc.pid, "log_file": log_path})
@@ -387,13 +389,21 @@ class AdminService:
         return {"status": "ok", "spawned": spawned, "skipped": skipped, "audit": audit}
 
     def stop_core(self, services: Optional[List[str]] = None) -> Dict[str, Any]:
+        from core.candles.shm_layout import SHM_NAME, SHM_SIGNAL_DETACH, signal_shm_consumers, unlink_shm
         pids = load_pids(self.pids_file)
         if services:
             targets = [s for s in services if s in pids]
         else:
             core_ids = {s["id"] for s in CORE_SERVICES}
             targets = [r for r, inf in pids.items() if r in core_ids or inf.get("tier") == "CORE"]
+        stopping_candle = "candle_manager" in targets or (not services and "candle_manager" in pids)
+        if stopping_candle:
+            signaled = signal_shm_consumers(SHM_SIGNAL_DETACH, pids_file=self.pids_file)
+            if signaled:
+                _logger.info(f"Signaled SHM consumers {signaled} to detach before stopping candle_manager.")
         killed = kill_roles(targets, pids_file=self.pids_file) if targets else 0
+        if stopping_candle or (not services):
+            unlink_shm(SHM_NAME)
         audit = self._append_audit("stop_core", "ok", {"targets": targets, "killed": killed})
         return {"status": "ok", "targets": targets, "killed": killed, "audit": audit}
 
@@ -442,13 +452,16 @@ class AdminService:
         spawned: List[Dict[str, Any]] = []
         skipped: List[Dict[str, Any]] = []
 
+        exec_logs_dir = os.path.join(self.logs_dir, "exec_logs")
+        os.makedirs(exec_logs_dir, exist_ok=True)
+
         # 1. Scoring Engine
         if spawn_scoring:
             sc_info = pids.get("scoring_engine")
             if sc_info and sc_info.get("pid") and is_pid_alive(int(sc_info["pid"])):
                 skipped.append({"role": "scoring_engine", "pid": sc_info["pid"], "reason": "already_running"})
             else:
-                sc_log = os.path.join(self.logs_dir, "scoring_engine.log")
+                sc_log = os.path.join(exec_logs_dir, "scoring_engine.log")
                 p_sc = spawn_process(
                     [py_bin, "-m", "strategies.momentum.scoring_engine"],
                     "scoring_engine",
@@ -461,7 +474,7 @@ class AdminService:
         # 2. RMS: Attach to Core RMS if alive, otherwise optional fallback
         attached_rms = is_core_rms_running(self.pids_file)
         if not attached_rms and allow_fallback_rms:
-            rms_log = os.path.join(self.logs_dir, "rms_service.log")
+            rms_log = os.path.join(exec_logs_dir, "rms_service.log")
             p_rms = spawn_process(
                 [py_bin, "-m", "core.rms.rms_service"],
                 "rms_service",
@@ -499,7 +512,7 @@ class AdminService:
                     f"s = {cls_name}(track_names=[{repr(tr)}], continue_state={bool(continue_state)}{extra_kwargs}); "
                     f"s.start()"
                 )
-                log_path = os.path.join(self.logs_dir, f"{role}.log")
+                log_path = os.path.join(exec_logs_dir, f"{role}.log")
                 p_ex = spawn_process([py_bin, "-c", exec_code], role, log_file=log_path, tier="EXECUTION", pids_file=self.pids_file)
                 spawned.append({"role": role, "mode": m, "track": tr, "pid": p_ex.pid, "log_file": log_path})
 

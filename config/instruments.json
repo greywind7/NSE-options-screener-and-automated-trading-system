@@ -7,8 +7,8 @@
     "paths": {
       "instrument_master_csv": "data/instrument.csv",
       "filtered_universe_csv": "data/filtered.csv",
-      "volume_index_json": "data/index.json",
-      "subscription_manifest_json": "data/subscription_manifest.json"
+      "volume_index_json": "data/index/index.json",
+      "subscription_manifest_json": "data/manifest/subscription_manifest.json"
     },
     "options_subscription": {
       "mode": "hybrid",

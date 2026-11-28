@@ -173,15 +173,28 @@ class LiveService:
         if not os.path.exists(session_dir):
             return {"date": date_str, "modes": {}, "overall": self._empty_overall()}
 
-        # Check file mtimes in session_dir
+        scan_dirs: List[str] = []
+        journal_sub = os.path.join(session_dir, "journal")
+        if os.path.isdir(journal_sub):
+            scan_dirs.append(journal_sub)
+        scan_dirs.append(session_dir)
+
+        # Check file mtimes across journal subdir & legacy session_dir
         current_mtimes: Dict[str, float] = {}
-        for fname in sorted(os.listdir(session_dir)):
-            if fname.startswith("journal_") and fname.endswith(".jsonl"):
-                fpath = os.path.join(session_dir, fname)
-                try:
-                    current_mtimes[fname] = os.path.getmtime(fpath)
-                except OSError:
-                    pass
+        discovered_files: List[Tuple[str, str]] = []
+        seen_names: Set[str] = set()
+        for sdir in scan_dirs:
+            for fname in sorted(os.listdir(sdir)):
+                if fname in seen_names:
+                    continue
+                if fname.startswith("journal_") and fname.endswith(".jsonl"):
+                    seen_names.add(fname)
+                    fpath = os.path.join(sdir, fname)
+                    discovered_files.append((fname, fpath))
+                    try:
+                        current_mtimes[fname] = os.path.getmtime(fpath)
+                    except OSError:
+                        pass
 
         # If cache exists and mtimes haven't changed and date matches, reuse cached parsed trades
         if (
@@ -198,32 +211,30 @@ class LiveService:
         trades_by_mode_track: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         all_open_tokens: Set[str] = set()
 
-        # Read journal files in session_dir
-        for fname in sorted(os.listdir(session_dir)):
-            if fname.startswith("journal_") and fname.endswith(".jsonl"):
-                stem = fname[len("journal_"):-len(".jsonl")]
-                matched_mode = None
-                matched_track = None
-                for cand in sorted(modes, key=len, reverse=True):
-                    if stem.startswith(cand + "_"):
-                        matched_mode = cand
-                        matched_track = stem[len(cand) + 1:]
-                        break
+        # Read journal files in resolved directories
+        for fname, fpath in discovered_files:
+            stem = fname[len("journal_"):-len(".jsonl")]
+            matched_mode = None
+            matched_track = None
+            for cand in sorted(modes, key=len, reverse=True):
+                if stem.startswith(cand + "_"):
+                    matched_mode = cand
+                    matched_track = stem[len(cand) + 1:]
+                    break
 
-                if not matched_mode:
-                    matched_mode = "paper"
-                    matched_track = stem
+            if not matched_mode:
+                matched_mode = "paper"
+                matched_track = stem
 
-                fpath = os.path.join(session_dir, fname)
-                trades = self._read_journal_trades(fpath, matched_mode, matched_track)
-                key = (matched_mode, matched_track)
-                trades_by_mode_track[key] = trades
+            trades = self._read_journal_trades(fpath, matched_mode, matched_track)
+            key = (matched_mode, matched_track)
+            trades_by_mode_track[key] = trades
 
-                for tr in trades:
-                    if tr.get("status") == "OPEN":
-                        tok = normalize_instrument_token(tr.get("token", ""))
-                        if tok:
-                            all_open_tokens.add(tok)
+            for tr in trades:
+                if tr.get("status") == "OPEN":
+                    tok = normalize_instrument_token(tr.get("token", ""))
+                    if tok:
+                        all_open_tokens.add(tok)
 
         self.active_open_tokens = all_open_tokens
         self._cached_trades_by_mode_track = trades_by_mode_track

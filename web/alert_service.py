@@ -89,6 +89,8 @@ class AlertService:
                 canonical_date = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:8]}"
 
         raw_candidates = [
+            os.path.join(self.logs_dir, "alerts", f"alerts_{canonical_date}.jsonl"),
+            os.path.join(self.logs_dir, "alerts", f"alerts_{canonical_date.replace('-', '')}.jsonl"),
             os.path.join(self.logs_dir, f"alerts_{canonical_date}.jsonl"),
             os.path.join(self.logs_dir, f"alerts_{canonical_date.replace('-', '')}.jsonl"),
         ]

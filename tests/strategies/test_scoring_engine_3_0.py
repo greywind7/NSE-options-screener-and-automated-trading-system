@@ -43,7 +43,7 @@ class TestScoringEngine3(unittest.TestCase):
         self.candles = None
         self.shm.close()
         unlink_shm(self.shm_name)
-        for p in ["logs/alerts_2026-11-15.jsonl"]:
+        for p in ["logs/alerts_2026-11-15.jsonl", "logs/alerts/alerts_2026-11-15.jsonl"]:
             if os.path.exists(p):
                 try:
                     os.remove(p)

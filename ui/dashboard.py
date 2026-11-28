@@ -88,21 +88,32 @@ class TerminalDashboard:
         if not os.path.exists(session_dir):
             return
 
-        for filename in sorted(os.listdir(session_dir)):
-            if filename.startswith("journal_") and filename.endswith(".jsonl"):
-                stem = filename[len("journal_"):-len(".jsonl")]
-                matched_mode = None
-                matched_track = None
-                # Check candidate modes in descending order of length so "paper_delayed" matches before "paper"
-                for candidate in sorted(self.modes, key=len, reverse=True):
-                    if stem.startswith(candidate + "_"):
-                        matched_mode = candidate
-                        matched_track = stem[len(candidate) + 1:]
-                        break
+        scan_dirs = []
+        journal_dir = os.path.join(session_dir, "journal")
+        if os.path.isdir(journal_dir):
+            scan_dirs.append(journal_dir)
+        scan_dirs.append(session_dir)
 
-                if matched_mode and matched_mode in self.modes and matched_track:
-                    if matched_track in self.tracks:
-                        self._parse_journal_file(os.path.join(session_dir, filename), matched_mode, matched_track)
+        seen_files = set()
+        for sdir in scan_dirs:
+            for filename in sorted(os.listdir(sdir)):
+                if filename in seen_files:
+                    continue
+                if filename.startswith("journal_") and filename.endswith(".jsonl"):
+                    seen_files.add(filename)
+                    stem = filename[len("journal_"):-len(".jsonl")]
+                    matched_mode = None
+                    matched_track = None
+                    # Check candidate modes in descending order of length so "paper_delayed" matches before "paper"
+                    for candidate in sorted(self.modes, key=len, reverse=True):
+                        if stem.startswith(candidate + "_"):
+                            matched_mode = candidate
+                            matched_track = stem[len(candidate) + 1:]
+                            break
+
+                    if matched_mode and matched_mode in self.modes and matched_track:
+                        if matched_track in self.tracks:
+                            self._parse_journal_file(os.path.join(sdir, filename), matched_mode, matched_track)
 
     def _parse_journal_file(self, filepath: str, mode: str, track: str) -> None:
         """Read and compute trade stats for a given mode and track."""

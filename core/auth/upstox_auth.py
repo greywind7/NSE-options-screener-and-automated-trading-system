@@ -62,7 +62,7 @@ _debug_log_counter = 0
 
 
 def prune_debug_log(
-    debug_file: str = "logs/debug.log",
+    debug_file: str = "logs/exec_logs/debug.log",
     max_bytes: int = 20 * 1024 * 1024,   # 20 MB max
     retain_bytes: int = 2 * 1024 * 1024,  # retain last 2 MB
 ) -> bool:
@@ -93,7 +93,7 @@ def prune_debug_log(
         return False
 
 
-def log_debug(message: str, debug_file: Optional[str] = "logs/debug.log") -> None:
+def log_debug(message: str, debug_file: Optional[str] = "logs/exec_logs/debug.log") -> None:
     """Append a debug message with timestamp to log file with periodic auto-pruning."""
     global _debug_log_counter
     if not debug_file:

@@ -24,8 +24,12 @@ from core.candles.shm_layout import (
     NUM_SYMBOLS,
     NUM_BARS,
     SHM_NAME,
+    SHM_SIGNAL_DETACH,
+    SHM_SIGNAL_REATTACH,
     create_or_attach_shm,
     get_shm_views,
+    shm_exists,
+    signal_shm_consumers,
     unlink_shm,
 )
 from core.common.logging_utils import get_logger
@@ -44,9 +48,11 @@ class CandleManager:
         sub_ipc: Optional[str] = None,
         shm_name: str = SHM_NAME,
         universe_csv: str = "data/filtered.csv",
-        baseline_file: str = "data/index.json",
+        baseline_file: str = "data/index/index.json",
         exchange: str = "NSE",
         enable_zmq: bool = True,
+        pids_file: str = os.path.join("logs", "pids.json"),
+        manage_consumer_signals: bool = True,
     ):
         from core.config.config_loader import get_config_manager
         cfg = get_config_manager()
@@ -58,6 +64,8 @@ class CandleManager:
         self.schedule = get_trading_schedule(exchange)
         self.running = False
         self.enable_zmq = enable_zmq
+        self.pids_file = pids_file
+        self.manage_consumer_signals = bool(manage_consumer_signals)
 
         # Load 221 Universe symbols
         self.symbol_to_index: Dict[str, int] = {}
@@ -68,6 +76,18 @@ class CandleManager:
         self.volume_baseline = np.zeros((NUM_SYMBOLS, 375), dtype=np.float64)
         self._load_volume_baseline()
 
+        # Handle existing stale/active SHM cleanly: notify consumers -> unlink -> create fresh -> reattach
+        had_existing_shm = shm_exists(self.shm_name)
+        if had_existing_shm:
+            if self.manage_consumer_signals:
+                detached_pids = signal_shm_consumers(SHM_SIGNAL_DETACH, pids_file=self.pids_file)
+                if detached_pids:
+                    logger.warning(
+                        f"Existing SHM '{self.shm_name}' detected on startup; signaled consumers {detached_pids} to detach."
+                    )
+                    time.sleep(0.05)
+            unlink_shm(self.shm_name)
+
         # Allocate and own Shared Memory (Single Writer)
         logger.info(f"Initializing Shared Memory segment '{self.shm_name}' (777 KB)...")
         self.shm = create_or_attach_shm(name=self.shm_name, create=True)
@@ -76,6 +96,13 @@ class CandleManager:
         # Initialize memory with zeros
         self.headers[:] = 0
         self.candles[:] = 0
+
+        if self.manage_consumer_signals:
+            reattached_pids = signal_shm_consumers(SHM_SIGNAL_REATTACH, pids_file=self.pids_file)
+            if reattached_pids:
+                logger.info(
+                    f"Signaled SHM consumers {reattached_pids} to reattach to fresh SHM '{self.shm_name}'."
+                )
 
         # In-memory incremental calculation state per symbol
         self.atr14 = np.zeros(NUM_SYMBOLS, dtype=np.float64)
@@ -159,10 +186,13 @@ class CandleManager:
                 logger.info(f"Loaded 30-day volume baseline from {npy_path}")
                 return
 
-        # 2. Parse data/index.json if present
-        if os.path.exists(self.baseline_file):
+        # 2. Parse data/index/index.json if present (fallback to legacy flat path)
+        b_path = self.baseline_file
+        if not os.path.exists(b_path) and b_path == "data/index/index.json" and os.path.exists("data/index.json"):
+            b_path = "data/index.json"
+        if os.path.exists(b_path):
             try:
-                with open(self.baseline_file, "r", encoding="utf-8") as f:
+                with open(b_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     loaded_count = 0
                     for inst_key, rec in data.items():
@@ -413,6 +443,12 @@ class CandleManager:
 
     def stop(self) -> None:
         self.running = False
+        if self.manage_consumer_signals:
+            detached_pids = signal_shm_consumers(SHM_SIGNAL_DETACH, pids_file=self.pids_file)
+            if detached_pids:
+                logger.info(
+                    f"Signaled SHM consumers {detached_pids} to detach before stopping SHM '{self.shm_name}'."
+                )
         if self.sub:
             try:
                 self.sub.close(linger=0)
@@ -428,6 +464,8 @@ class CandleManager:
                 self.shm.close()
             except Exception:
                 pass
+            self.shm = None
+        unlink_shm(self.shm_name)
         logger.info("Stopped cleanly.")
 
 

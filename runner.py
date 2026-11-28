@@ -131,32 +131,34 @@ def cmd_core(args: argparse.Namespace) -> int:
     py_bin = get_python_binary()
     procs = []
 
+    os.makedirs(os.path.join("logs", "exec_logs"), exist_ok=True)
+
     # 1. Feed Handler
     if feed_flag:
         feed_mode = getattr(args, "mode", "ws")
         feed_cmd = [py_bin, "-m", "core.feed.feed_handler", "--mode", feed_mode]
-        p_feed = spawn_process(feed_cmd, "feed_handler", "logs/feed_handler.log", tier="CORE")
+        p_feed = spawn_process(feed_cmd, "feed_handler", "logs/exec_logs/feed_handler.log", tier="CORE")
         procs.append(p_feed)
         print(f"  • Feed Handler      : Spawned (PID: {p_feed.pid}, Mode: {feed_mode})")
 
     # 2. Candle Manager
     if candle_flag:
         candle_cmd = [py_bin, "-m", "core.candles.candle_manager"]
-        p_candle = spawn_process(candle_cmd, "candle_manager", "logs/candle_manager.log", tier="CORE")
+        p_candle = spawn_process(candle_cmd, "candle_manager", "logs/exec_logs/candle_manager.log", tier="CORE")
         procs.append(p_candle)
         print(f"  • Candle Manager    : Spawned (PID: {p_candle.pid})")
 
     # 3. Quotes Broker
     if quotes_flag:
         quotes_cmd = [py_bin, "-m", "core.quotes.quotes_broker"]
-        p_quotes = spawn_process(quotes_cmd, "quotes_broker", "logs/quotes_broker.log", tier="CORE")
+        p_quotes = spawn_process(quotes_cmd, "quotes_broker", "logs/exec_logs/quotes_broker.log", tier="CORE")
         procs.append(p_quotes)
         print(f"  • Quotes Broker     : Spawned (PID: {p_quotes.pid})")
 
     # 4. Decoupled RMS & Strikes Service (Core Tier)
     if rms_flag:
         rms_cmd = [py_bin, "-m", "core.rms.rms_service"]
-        p_rms = spawn_process(rms_cmd, "rms_service", "logs/rms_service.log", tier="CORE")
+        p_rms = spawn_process(rms_cmd, "rms_service", "logs/exec_logs/rms_service.log", tier="CORE")
         procs.append(p_rms)
         print(f"  • RMS & Strikes     : Spawned (PID: {p_rms.pid})")
 
@@ -165,7 +167,7 @@ def cmd_core(args: argparse.Namespace) -> int:
         rec_cmd = [py_bin, "-m", "core.recorder.market_recorder"]
         if getattr(args, "debug", False):
             rec_cmd.append("--debug")
-        p_rec = spawn_process(rec_cmd, "market_recorder", "logs/market_recorder.log", tier="CORE")
+        p_rec = spawn_process(rec_cmd, "market_recorder", "logs/exec_logs/market_recorder.log", tier="CORE")
         procs.append(p_rec)
         print(f"  • Market Recorder   : Spawned (PID: {p_rec.pid})")
 
@@ -182,12 +184,12 @@ def cmd_feed(args: argparse.Namespace) -> int:
     procs = []
 
     if getattr(args, "candles", False):
-        p_candle = spawn_process([py_bin, "-m", "core.candles.candle_manager"], "candle_manager", "logs/candle_manager.log")
+        p_candle = spawn_process([py_bin, "-m", "core.candles.candle_manager"], "candle_manager", "logs/exec_logs/candle_manager.log")
         procs.append(p_candle)
         print(f"  • Candle Manager    : Spawned (PID: {p_candle.pid})")
 
     if getattr(args, "record", False):
-        p_rec = spawn_process([py_bin, "-m", "core.recorder.market_recorder"], "market_recorder", "logs/market_recorder.log")
+        p_rec = spawn_process([py_bin, "-m", "core.recorder.market_recorder"], "market_recorder", "logs/exec_logs/market_recorder.log")
         procs.append(p_rec)
         print(f"  • Market Recorder   : Spawned (PID: {p_rec.pid})")
 
@@ -220,7 +222,7 @@ def cmd_rmsservice(args: argparse.Namespace) -> int:
     """Launch decoupled Core RMS & Strike Selection service independently."""
     py_bin = get_python_binary()
     cmd = [py_bin, "-m", "core.rms.rms_service"]
-    p = spawn_process(cmd, "rms_service", "logs/rms_service.log", tier="CORE")
+    p = spawn_process(cmd, "rms_service", "logs/exec_logs/rms_service.log", tier="CORE")
     print(f"  • RMS Service       : Spawned (PID: {p.pid})")
     return supervise_processes([p])
 
@@ -326,7 +328,7 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
     procs = []
 
     # 1. Scoring Engine 3.0 (Momentum Strategy)
-    p_score = spawn_process([py_bin, "-m", "strategies.momentum.scoring_engine"], "scoring_engine", "logs/scoring_engine.log", tier="STRATEGY")
+    p_score = spawn_process([py_bin, "-m", "strategies.momentum.scoring_engine"], "scoring_engine", "logs/exec_logs/scoring_engine.log", tier="STRATEGY")
     procs.append(p_score)
     print(f"  • Scoring Engine 3.0 : Spawned (PID: {p_score.pid})")
 
@@ -336,7 +338,7 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
         reason = "--no-rms requested" if no_rms else "Core RMS service already running"
         print(f"  • RMS & Strikes      : Attaching to decoupled Core RMS ({reason})")
     else:
-        p_rms = spawn_process([py_bin, "-m", "core.rms.rms_service"], "rms_service", "logs/rms_service.log", tier="CORE")
+        p_rms = spawn_process([py_bin, "-m", "core.rms.rms_service"], "rms_service", "logs/exec_logs/rms_service.log", tier="CORE")
         procs.append(p_rms)
         print(f"  • RMS & Strikes      : Spawned fallback (PID: {p_rms.pid})")
 
@@ -365,7 +367,7 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
                 f"s = {cls_name}(track_names=['{tr}'], continue_state={is_continue}{extra_kwargs}); "
                 f"s.start()"
             )
-            p_exec = spawn_process([py_bin, "-c", exec_code], f"exec_{m}_{tr}", f"logs/exec_{m}_{tr}.log", tier="EXECUTION")
+            p_exec = spawn_process([py_bin, "-c", exec_code], f"exec_{m}_{tr}", f"logs/exec_logs/exec_{m}_{tr}.log", tier="EXECUTION")
             procs.append(p_exec)
             print(f"  • Track Process      : {m.upper()} [{tr}] (PID: {p_exec.pid}) {'[CONTINUE STATE]' if is_continue else ''}")
 
@@ -374,7 +376,7 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
         rec_cmd = [py_bin, "-m", "core.recorder.market_recorder"]
         if getattr(args, "debug", False):
             rec_cmd.append("--debug")
-        p_rec = spawn_process(rec_cmd, "market_recorder", "logs/market_recorder.log")
+        p_rec = spawn_process(rec_cmd, "market_recorder", "logs/exec_logs/market_recorder.log")
         procs.append(p_rec)
         print(f"  • Market Recorder   : Spawned (PID: {p_rec.pid})")
 
@@ -541,13 +543,25 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         print("  ✓ No active background processes registered.")
 
-    # 2. Shared Memory Status
-    from core.candles.shm_layout import SHM_NAME
+    # 2. Shared Memory Status (strictly active only when CandleManager is running)
+    from core.candles.shm_layout import SHM_NAME, SHM_SIGNAL_DETACH, shm_exists, signal_shm_consumers, unlink_shm
     shm_path = f"/tmp/{SHM_NAME}.shm"
-    shm_exists = os.path.exists(shm_path)
+    cm_info = pids.get("candle_manager") or {}
+    cm_alive = bool(cm_info.get("pid") and is_pid_alive(int(cm_info["pid"])))
+    has_shm = shm_exists(SHM_NAME)
+    if has_shm and not cm_alive:
+        signal_shm_consumers(SHM_SIGNAL_DETACH)
+        unlink_shm(SHM_NAME)
+        shm_state_str = "INACTIVE (stale SHM cleared; CandleManager offline)"
+    elif cm_alive and has_shm:
+        shm_state_str = "ACTIVE"
+    elif cm_alive:
+        shm_state_str = "STARTING (CandleManager alive; SHM not mounted)"
+    else:
+        shm_state_str = "INACTIVE (CandleManager offline)"
     print(f"\nShared Memory Status:")
     print(f"  • Segment Name      : {SHM_NAME}")
-    print(f"  • SHM File          : {shm_path} ({'ACTIVE' if shm_exists else 'NOT ALLOCATED'})")
+    print(f"  • SHM File          : {shm_path} ({shm_state_str})")
 
     sys_cfg = load_json_config("config/system.json")
     ipc = sys_cfg.get("system", {}).get("ipc", {})
@@ -566,13 +580,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         ("data/instrument.csv", "Canonical Master"),
         (f"data/filtered_{today_tag}.csv", f"Dated F&O Universe ({today_tag})"),
         ("data/filtered.csv", "Canonical F&O Universe"),
-        (f"data/index_{today_tag}.json", f"Dated Volume Index ({today_tag})"),
-        ("data/index.json", "Canonical Volume Index"),
-        (f"data/subscription_manifest_{today_tag}.json", f"Dated Manifest ({today_tag})"),
-        ("data/subscription_manifest.json", "Canonical Manifest"),
-        (f"recordings/{today_tag}/paper_trades.csv" if os.path.exists(f"recordings/{today_tag}/paper_trades.csv") else "logs/paper_trades.csv", "Paper Trading Journal"),
-        (f"recordings/{today_tag}/paper_delayed_trades.csv" if os.path.exists(f"recordings/{today_tag}/paper_delayed_trades.csv") else "logs/paper_delayed_trades.csv", "Paper Delayed Trading Journal"),
-        (f"recordings/{today_tag}/live_trades.csv" if os.path.exists(f"recordings/{today_tag}/live_trades.csv") else "logs/live_trades.csv", "Live Trading Journal"),
+        (f"data/index/index_{today_tag}.json", f"Dated Volume Index ({today_tag})"),
+        ("data/index/index.json", "Canonical Volume Index"),
+        (f"data/manifest/subscription_manifest_{today_tag}.json", f"Dated Manifest ({today_tag})"),
+        ("data/manifest/subscription_manifest.json", "Canonical Manifest"),
+        (f"recordings/{today_tag}/journal/paper_trades.csv" if os.path.exists(f"recordings/{today_tag}/journal/paper_trades.csv") else "logs/trade_journals/paper_trades.csv", "Paper Trading Journal"),
+        (f"recordings/{today_tag}/journal/paper_delayed_trades.csv" if os.path.exists(f"recordings/{today_tag}/journal/paper_delayed_trades.csv") else "logs/trade_journals/paper_delayed_trades.csv", "Paper Delayed Trading Journal"),
+        (f"recordings/{today_tag}/journal/live_trades.csv" if os.path.exists(f"recordings/{today_tag}/journal/live_trades.csv") else "logs/trade_journals/live_trades.csv", "Live Trading Journal"),
         ("logs/live_positions_state.json", "Live Positions State (Persistence)"),
         ("logs/active_positions.json", "Active Protected Positions"),
     ]:
@@ -669,10 +683,11 @@ def cmd_stop(args: argparse.Namespace) -> int:
             except Exception:
                 pass
 
-    # Clean up simulation shared memory and temporary files
+    # Clean up simulation and live shared memory + notify any lingering consumers
     try:
-        from core.candles.shm_layout import unlink_shm
-        for shm_name in ["shm_sim_ohlc", "shm_scoring_ohlc"]:
+        from core.candles.shm_layout import SHM_NAME, SHM_SIGNAL_DETACH, signal_shm_consumers, unlink_shm
+        signal_shm_consumers(SHM_SIGNAL_DETACH)
+        for shm_name in [SHM_NAME, "shm_sim_ohlc", "shm_scoring_ohlc"]:
             unlink_shm(shm_name)
     except Exception:
         pass
@@ -714,20 +729,22 @@ def cmd_report(args: argparse.Namespace) -> int:
     journal_files = []
     seen = set()
     for rec_dir in cands:
-        if os.path.exists(rec_dir) and os.path.isdir(rec_dir):
-            for f in os.listdir(rec_dir):
-                if f.endswith(".jsonl"):
-                    full_p = os.path.join(rec_dir, f)
-                    if full_p not in seen:
-                        seen.add(full_p)
-                        journal_files.append(full_p)
+        for scan_d in [os.path.join(rec_dir, "journal"), rec_dir]:
+            if os.path.exists(scan_d) and os.path.isdir(scan_d):
+                for f in os.listdir(scan_d):
+                    if f.endswith(".jsonl") and f.startswith("journal_"):
+                        full_p = os.path.join(scan_d, f)
+                        if full_p not in seen:
+                            seen.add(full_p)
+                            journal_files.append(full_p)
 
-    for f in os.listdir("logs") if os.path.exists("logs") else []:
-        if session_date in f and f.endswith(".jsonl"):
-            full_p = os.path.join("logs", f)
-            if full_p not in seen:
-                seen.add(full_p)
-                journal_files.append(full_p)
+    for ldir in [os.path.join("logs", "trade_journals"), "logs"]:
+        for f in os.listdir(ldir) if os.path.exists(ldir) else []:
+            if session_date in f and f.endswith(".jsonl"):
+                full_p = os.path.join(ldir, f)
+                if full_p not in seen:
+                    seen.add(full_p)
+                    journal_files.append(full_p)
 
     print("=" * 80)
     print(f"📊 END-OF-DAY TRADE JOURNAL & P&L REPORT (Date: {session_date})")

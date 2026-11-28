@@ -97,7 +97,10 @@ class RMSService:
         self.rms_pub_ipc = rms_pub_ipc or ipc.get("rms_strike_ipc", DEFAULT_RMS_PUB_IPC)
         self.quotes_router_ipc = quotes_router_ipc or ipc.get("quotes_router_ipc", DEFAULT_QUOTES_ROUTER_IPC)
         self.universe_csv = universe_csv or inst_paths.get("filtered_universe_csv", "data/filtered.csv")
-        self.manifest_path = kwargs.get("manifest_path") or inst_paths.get("subscription_manifest_json", "data/subscription_manifest.json")
+        manifest_raw = kwargs.get("manifest_path") or inst_paths.get("subscription_manifest_json", "data/manifest/subscription_manifest.json")
+        if not os.path.exists(manifest_raw) and manifest_raw == "data/manifest/subscription_manifest.json" and os.path.exists("data/subscription_manifest.json"):
+            manifest_raw = "data/subscription_manifest.json"
+        self.manifest_path = manifest_raw
         spread_gate_cfg = risk_cfg.get("spread_gate", {})
         self.spread_gate = {
             "max_spread_pct": float(

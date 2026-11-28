@@ -120,7 +120,7 @@ class TestOriginTrackDeterminismAndQuarantine(unittest.TestCase):
             self.assertEqual(comp_track.active_trades["TRD_VALID_1"].sub_track_rule, "FastMomentumTrack")
             # Ambiguous trade must NOT silently pollute sub_tracks[0]
             self.assertNotIn("TRD_AMBIGUOUS_LEGACY", comp_track.active_trades)
-            quarantine_file = os.path.join(session_dir, "quarantined_legacy_trades.jsonl")
+            quarantine_file = os.path.join(session_dir, "journal", "quarantined_legacy_trades.jsonl")
             self.assertTrue(os.path.exists(quarantine_file))
             with open(quarantine_file, "r", encoding="utf-8") as qf:
                 q_lines = [json.loads(line) for line in qf if line.strip()]
@@ -392,7 +392,7 @@ class TestAdminAndHealthAPIs(unittest.IsolatedAsyncioTestCase):
         self.assertIn("nav-health-badge", resp_idx.text)
         self.assertIn("Origin / Rule", resp_idx.text)
 
-        # 6. SHM mmap backing detection (/tmp/<name>.shm from shm_layout.py MmapSharedMemoryAdapter)
+        # 6. SHM mmap backing detection strictly gated by CandleManager liveness
         from web.health_service import HealthService
         shm_test_name = "test_health_probe_shm"
         shm_test_path = os.path.join("/tmp", f"{shm_test_name}.shm")
@@ -406,9 +406,17 @@ class TestAdminAndHealthAPIs(unittest.IsolatedAsyncioTestCase):
                 shm_name=shm_test_name,
                 skip_system_probes=False,
             )
-            probe = hs._probe_ipc_and_shm()
-            self.assertTrue(probe["shm"]["active"])
-            self.assertEqual(probe["shm"]["backend"], "mmap_tmp")
+            # When CandleManager is inactive, stale SHM must be reported inactive and cleaned
+            probe_offline = hs._probe_ipc_and_shm(candle_manager_alive=False)
+            self.assertFalse(probe_offline["shm"]["active"])
+            self.assertEqual(probe_offline["shm"]["backend"], "stale_cleared")
+
+            # Recreate backing file and verify active status when CandleManager is alive
+            with open(shm_test_path, "wb") as sf:
+                sf.write(b"\x00" * 1024)
+            probe_live = hs._probe_ipc_and_shm(candle_manager_alive=True)
+            self.assertTrue(probe_live["shm"]["active"])
+            self.assertEqual(probe_live["shm"]["backend"], "mmap_tmp")
         finally:
             if os.path.exists(shm_test_path):
                 os.remove(shm_test_path)

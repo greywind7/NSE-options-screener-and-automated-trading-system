@@ -278,6 +278,7 @@ class ColumnarSimEngine:
         """Load option contract metadata and canonical strike ladder from subscription manifest."""
         manifest_candidates = [
             os.path.join(self.data_path, "subscription_manifest.json"),
+            "data/manifest/subscription_manifest.json",
             "data/subscription_manifest.json",
         ]
         date_hint = self.session_date
@@ -288,6 +289,7 @@ class ColumnarSimEngine:
         if date_hint:
             d_nodash = date_hint.replace("-", "")
             manifest_candidates.insert(0, f"data/subscription_manifest_{d_nodash}.json")
+            manifest_candidates.insert(0, f"data/manifest/subscription_manifest_{d_nodash}.json")
 
         m_path = None
         for p in manifest_candidates:
@@ -1487,8 +1489,9 @@ class ColumnarSimEngine:
             else:
                 rec_dir = "recordings"
 
-            os.makedirs(rec_dir, exist_ok=True)
-            journal_path = os.path.join(rec_dir, f"journal_{m}_sim.jsonl")
+            journal_dir = os.path.join(rec_dir, "journal")
+            os.makedirs(journal_dir, exist_ok=True)
+            journal_path = os.path.join(journal_dir, f"journal_{m}_sim.jsonl")
             try:
                 import json
                 with open(journal_path, "w", encoding="utf-8") as jf:

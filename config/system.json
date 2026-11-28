@@ -40,13 +40,13 @@
       "split_option_depth": true,
       "preserve_full_depth": true,
       "debug": false,
-      "debug_log_path": "logs/recorder_ticks.log"
+      "debug_log_path": "logs/exec_logs/recorder_ticks.log"
     },
     "logging": {
       "level": "INFO",
       "log_dir": "logs",
-      "main_log": "logs/runner.log",
-      "debug_log": "logs/debug.log"
+      "main_log": "logs/exec_logs/runner.log",
+      "debug_log": "logs/exec_logs/debug.log"
     }
   }
 }

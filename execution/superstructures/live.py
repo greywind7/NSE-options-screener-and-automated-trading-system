@@ -70,10 +70,10 @@ class LiveSuperstructure(BaseSuperstructure):
         access_token: Optional[str] = None,
         api_key: Optional[str] = None,
         groww_client: Optional[Any] = None,
-        output_csv: str = "logs/live_trades.csv",
+        output_csv: str = "logs/trade_journals/live_trades.csv",
         state_file: Optional[str] = None,
         brokerage_per_order: Optional[float] = None,
-        debug_log: Optional[str] = "logs/debug.log",
+        debug_log: Optional[str] = "logs/exec_logs/debug.log",
         live_confirmed: bool = False,
         initial_capital: Optional[float] = None,
         enable_polling: bool = True,
@@ -124,7 +124,12 @@ class LiveSuperstructure(BaseSuperstructure):
         self.access_token = access_token or os.environ.get("GROWW_ACCESS_TOKEN") or os.environ.get("GROWW_API_KEY") or self._cfg.get_groww_api_key()
         self.api_key = api_key or os.environ.get("GROWW_API_KEY")
         self.output_csv = output_csv
-        self.state_file = state_file or os.path.join(os.path.dirname(os.path.abspath(self.output_csv)), "live_positions_state.json")
+        if state_file:
+            self.state_file = state_file
+        elif output_csv == "logs/trade_journals/live_trades.csv":
+            self.state_file = os.path.join("logs", "live_positions_state.json")
+        else:
+            self.state_file = os.path.join(os.path.dirname(os.path.abspath(self.output_csv)), "live_positions_state.json")
         self.brokerage_per_order = eff_brok
         self.debug_log = debug_log
         self.live_confirmed = bool(live_confirmed)

@@ -71,7 +71,7 @@ class MarketRecorder:
         self.batch_size = int(batch_size or rec_cfg.get("batch_size", 5000))
         self.flush_interval_sec = float(flush_interval_sec or rec_cfg.get("flush_interval_sec", 300.0))
         self.debug = debug if debug is not None else rec_cfg.get("debug", False)
-        self.debug_log_path = debug_log_path or rec_cfg.get("debug_log_path", "logs/recorder_ticks.log")
+        self.debug_log_path = debug_log_path or rec_cfg.get("debug_log_path", "logs/exec_logs/recorder_ticks.log")
         self._debug_file = None
         if self.debug:
             os.makedirs(os.path.dirname(self.debug_log_path) or ".", exist_ok=True)

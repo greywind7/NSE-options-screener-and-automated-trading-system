@@ -88,8 +88,9 @@ class OpportunityPool:
         if self.persist_alerts:
             try:
                 today_str = datetime.fromtimestamp(now, tz=IST).strftime("%Y-%m-%d")
-                os.makedirs("logs", exist_ok=True)
-                alert_path = os.path.join("logs", f"alerts_{today_str}.jsonl")
+                alerts_dir = os.path.join("logs", "alerts")
+                os.makedirs(alerts_dir, exist_ok=True)
+                alert_path = os.path.join(alerts_dir, f"alerts_{today_str}.jsonl")
                 with open(alert_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(alert.to_dict()) + "\n")
             except Exception:

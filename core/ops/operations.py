@@ -292,6 +292,13 @@ def run_prepare_steps(
     sys_cfg = load_json_config("config/system.json")
     inst_cfg = load_json_config("config/instruments.json")
 
+    index_dir = os.path.join(data_dir, "index")
+    manifest_dir = os.path.join(data_dir, "manifest")
+    exec_logs_dir = os.path.join(logs_dir, "exec_logs")
+    os.makedirs(index_dir, exist_ok=True)
+    os.makedirs(manifest_dir, exist_ok=True)
+    os.makedirs(exec_logs_dir, exist_ok=True)
+
     dated_master = os.path.join(data_dir, f"instrument_{target_date}.csv")
     canonical_master = (
         inst_cfg.get("instruments", {}).get("paths", {}).get("instrument_master_csv")
@@ -301,15 +308,15 @@ def run_prepare_steps(
 
     if is_mcx:
         dated_filtered = os.path.join(data_dir, f"filtered_mcx_{target_date}.csv")
-        dated_index = os.path.join(data_dir, f"index_mcx_{target_date}.json")
-        dated_manifest = os.path.join(data_dir, f"subscription_manifest_mcx_{target_date}.json")
+        dated_index = os.path.join(index_dir, f"index_mcx_{target_date}.json")
+        dated_manifest = os.path.join(manifest_dir, f"subscription_manifest_mcx_{target_date}.json")
         canonical_filtered = os.path.join(data_dir, "filtered_mcx.csv")
-        canonical_index = os.path.join(data_dir, "index_mcx.json")
-        canonical_manifest = os.path.join(data_dir, "subscription_manifest_mcx.json")
+        canonical_index = os.path.join(index_dir, "index_mcx.json")
+        canonical_manifest = os.path.join(manifest_dir, "subscription_manifest_mcx.json")
     else:
         dated_filtered = os.path.join(data_dir, f"filtered_{target_date}.csv")
-        dated_index = os.path.join(data_dir, f"index_{target_date}.json")
-        dated_manifest = os.path.join(data_dir, f"subscription_manifest_{target_date}.json")
+        dated_index = os.path.join(index_dir, f"index_{target_date}.json")
+        dated_manifest = os.path.join(manifest_dir, f"subscription_manifest_{target_date}.json")
         canonical_filtered = (
             inst_cfg.get("instruments", {}).get("paths", {}).get("filtered_universe_csv")
             if data_dir == "data"
@@ -319,15 +326,16 @@ def run_prepare_steps(
             inst_cfg.get("instruments", {}).get("paths", {}).get("volume_index_json")
             if data_dir == "data"
             else None
-        ) or os.path.join(data_dir, "index.json")
+        ) or os.path.join(index_dir, "index.json")
         canonical_manifest = (
             inst_cfg.get("instruments", {}).get("paths", {}).get("subscription_manifest_json")
             if data_dir == "data"
             else None
-        ) or os.path.join(data_dir, "subscription_manifest.json")
+        ) or os.path.join(manifest_dir, "subscription_manifest.json")
 
     def sync_copy(src: str, dst: str) -> None:
         if os.path.exists(src) and os.path.abspath(src) != os.path.abspath(dst):
+            os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
             shutil.copy2(src, dst)
 
     def resolve_existing_or_canonical(dated_p: str, canon_p: str, min_bytes: int = 1) -> Optional[str]:
@@ -433,7 +441,7 @@ def run_prepare_steps(
     if "cleanup" in selected:
         try:
             pruned = prune_old_preparation_files(keep_session_date=target_date, data_dir=data_dir)
-            prune_debug_log(os.path.join(logs_dir, "debug.log"))
+            prune_debug_log(os.path.join(exec_logs_dir, "debug.log"))
             step_results["cleanup"] = {
                 "status": "ok",
                 "pruned_count": len(pruned),
@@ -573,7 +581,10 @@ def run_post_market(
 
     if "rotate_logs" in selected:
         try:
-            prune_debug_log(os.path.join(logs_dir, "debug.log"))
+            dbg_path = os.path.join(logs_dir, "exec_logs", "debug.log")
+            if not os.path.exists(dbg_path) and os.path.exists(os.path.join(logs_dir, "debug.log")):
+                dbg_path = os.path.join(logs_dir, "debug.log")
+            prune_debug_log(dbg_path)
             action_results["rotate_logs"] = {"status": "ok"}
         except Exception as e:
             _logger.warning(f"Log rotation failed: {e}")

@@ -77,10 +77,10 @@ class TestPreMarketPipeline(unittest.TestCase):
 
     def test_04_subscription_manifest(self):
         """Verify subscription manifest correctly partitions underlyings, popular options, and background polling."""
-        out_json = "data/subscription_manifest.json"
+        out_json = "data/manifest/subscription_manifest.json"
         res = run_manifest_generator(
             filtered_csv="data/filtered.csv",
-            volume_index_json="data/index.json",
+            volume_index_json="data/index/index.json",
             master_csv="data/instrument.csv",
             output_json=out_json,
             popular_strikes=3,
@@ -126,14 +126,14 @@ class TestPreMarketPipeline(unittest.TestCase):
         # Verify dated files exist
         self.assertTrue(os.path.exists(f"data/instrument_{today_tag}.csv"))
         self.assertTrue(os.path.exists(f"data/filtered_{today_tag}.csv"))
-        self.assertTrue(os.path.exists(f"data/index_{today_tag}.json"))
-        self.assertTrue(os.path.exists(f"data/subscription_manifest_{today_tag}.json"))
+        self.assertTrue(os.path.exists(f"data/index/index_{today_tag}.json"))
+        self.assertTrue(os.path.exists(f"data/manifest/subscription_manifest_{today_tag}.json"))
 
         # Verify canonical files exist and match
         self.assertTrue(os.path.exists("data/instrument.csv"))
         self.assertTrue(os.path.exists("data/filtered.csv"))
-        self.assertTrue(os.path.exists("data/index.json"))
-        self.assertTrue(os.path.exists("data/subscription_manifest.json"))
+        self.assertTrue(os.path.exists("data/index/index.json"))
+        self.assertTrue(os.path.exists("data/manifest/subscription_manifest.json"))
 
     def test_06_mcx_flagship_benchmark_selection(self):
         """Verify MCX commodity filtering prioritizes flagship benchmark contracts over mini/micro/petal."""

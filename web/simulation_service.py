@@ -29,6 +29,12 @@ from web.batch_analytics import (
 )
 from web.candle_service import CandleService
 from web.regime_classifier import SessionRegimeClassifier
+from web.sim_disk_cache import (
+    SimDiskCache,
+    build_params_subset_for_tracks,
+    resolve_track_cache_specs,
+    strip_chart_data_from_details,
+)
 
 
 def _safe_format_ts(ts: Optional[float]) -> str:
@@ -45,13 +51,15 @@ def _simulation_worker_process(
     queue: Any,
     result_file: str,
     target_date: str,
-    params: Dict[str, Any],
+    worker_plan: Any,
     recordings_dir: str,
+    precompute_candles: bool = False,
 ) -> None:
     """
     Independent worker process entrypoint.
     Executes in a separate OS process with its own memory space and GIL.
-    Ensures web server event loop remains completely responsive.
+    Accepts either a single params dict (legacy) or a list of {modes, params} plan steps,
+    loading parquet recordings only once per date.
     """
     try:
         def progress_cb(status: str) -> None:
@@ -61,11 +69,20 @@ def _simulation_worker_process(
                 pass
 
         sim_svc = SimulationService(recordings_dir=recordings_dir)
-        results = sim_svc._execute_simulation_sync(
-            target_date=target_date,
-            params=params,
-            progress_cb=progress_cb,
-        )
+        if isinstance(worker_plan, list):
+            results = sim_svc._execute_worker_plan(
+                target_date=target_date,
+                worker_plan=worker_plan,
+                progress_cb=progress_cb,
+                precompute_candles=precompute_candles,
+            )
+        else:
+            results = sim_svc._execute_simulation_sync(
+                target_date=target_date,
+                params=worker_plan,
+                progress_cb=progress_cb,
+                precompute_candles=precompute_candles,
+            )
 
         with open(result_file, "wb") as f:
             pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -86,8 +103,10 @@ def _simulation_worker_process(
 
 
 class SimulationService:
-    def __init__(self, recordings_dir: str = "recordings"):
+    def __init__(self, recordings_dir: str = "recordings", cache_dir: str = "cache/simulations"):
         self.recordings_dir = recordings_dir
+        self.cache_dir = cache_dir
+        self.disk_cache = SimDiskCache(cache_dir=cache_dir)
         self.executor = ThreadPoolExecutor(max_workers=2)
         self._current_process: Optional[mp.Process] = None
         self._current_task: Optional[asyncio.Task] = None
@@ -469,9 +488,14 @@ class SimulationService:
             self.progress_status = "Initializing simulation..."
             start_ts = time.time()
             param_hash = self.compute_param_hash(target_date, params)
+            glob = params.get("global_settings") or {}
+            raw_cold = params.get("cold_run_modes") or glob.get("cold_run_modes") or []
+            cold_modes = {str(m).strip() for m in raw_cold if str(m).strip()}
+            precompute_candles = bool(params.get("precompute_candles", glob.get("precompute_candles", False)))
 
-            # Check parameter-hash deduplication cache
-            if param_hash in self.cache_by_param_hash:
+            # Fast in-memory cache hit when identical full parameter set was already run in this session
+            # and no mode was marked for Cold Run refresh
+            if not cold_modes and param_hash in self.cache_by_param_hash:
                 cached_res = self.cache_by_param_hash[param_hash]
                 self.latest_results = cached_res
                 self.latest_params = params
@@ -495,6 +519,99 @@ class SimulationService:
                     )
                 return cached_res
 
+            # Decompose request into per-(mode, track_name) cache specs & query disk cache
+            full_strategy_cfg = self._build_custom_strategy_cfg(params)
+            specs = resolve_track_cache_specs(
+                target_date=target_date,
+                params=params,
+                strategy_cfg=full_strategy_cfg,
+                recordings_dir=self.recordings_dir,
+            )
+
+            cached_records: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            missed_specs_by_mode: Dict[str, List[Dict[str, Any]]] = {}
+            hit_tracks: List[str] = []
+            ran_tracks: List[str] = []
+            cold_tracks: List[str] = []
+
+            for sp in specs:
+                m = sp["mode"]
+                tr = sp["track_name"]
+                if m not in cold_modes:
+                    disk_rec = self.disk_cache.get(target_date, sp["cache_key"])
+                    if disk_rec is not None:
+                        cached_records[(m, tr)] = disk_rec
+                        hit_tracks.append(f"{m}:{tr}")
+                        continue
+                missed_specs_by_mode.setdefault(m, []).append(sp)
+                ran_tracks.append(f"{m}:{tr}")
+                if m in cold_modes:
+                    cold_tracks.append(f"{m}:{tr}")
+
+            if not missed_specs_by_mode and specs:
+                # 100% Disk Cache Hit: assemble in deterministic canonical order without spawning worker
+                results = self._assemble_cached_results(
+                    target_date=target_date,
+                    specs=specs,
+                    records_by_key=cached_records,
+                    cache_stats={
+                        "hits": len(hit_tracks),
+                        "misses": 0,
+                        "cold_runs": 0,
+                        "hit_tracks": hit_tracks,
+                        "ran_tracks": [],
+                        "cold_run_modes": sorted(cold_modes),
+                    },
+                    fully_cached=True,
+                )
+                self.cache_by_param_hash[param_hash] = results
+                self.latest_results = results
+                self.latest_params = params
+                self.last_run_time = round(time.time() - start_ts, 4)
+                self.progress_status = f"Completed (Cached {len(hit_tracks)} track runs)"
+                self.runs_history[job_id] = {
+                    "id": job_id,
+                    "date": target_date,
+                    "batch_id": batch_id,
+                    "params": params,
+                    "results": results,
+                    "runtime": round(self.last_run_time, 3),
+                    "cached": True,
+                    "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
+                }
+                if batch_id:
+                    self._register_run_in_batch(
+                        batch_id=str(batch_id),
+                        run_id=job_id,
+                        label=batch_label,
+                    )
+                _logger.info(
+                    f"Sim job {job_id} ({target_date}) 100% disk cache hit | "
+                    f"Hits={len(hit_tracks)} | Runtime={self.last_run_time:.3f}s"
+                )
+                return results
+
+            # Build minimal worker execution plan grouped by identical missed-track sets per mode
+            if specs:
+                plan_groups: Dict[Tuple[str, ...], List[str]] = {}
+                for m, m_specs in missed_specs_by_mode.items():
+                    t_tuple = tuple(sp["track_name"] for sp in m_specs)
+                    plan_groups.setdefault(t_tuple, []).append(m)
+
+                worker_plan: Any = []
+                for t_tuple, group_modes in plan_groups.items():
+                    sub_params = build_params_subset_for_tracks(params, group_modes[0], list(t_tuple))
+                    sub_params["global_settings"]["modes"] = list(group_modes)
+                    worker_plan.append({"modes": list(group_modes), "params": sub_params})
+            else:
+                worker_plan = params
+
+            self.progress_status = (
+                f"Running {len(ran_tracks)} track(s) (reusing {len(hit_tracks)} cached) for {target_date}..."
+                if hit_tracks
+                else f"Executing simulation for {target_date}..."
+            )
+
             temp_fd, result_file = tempfile.mkstemp(prefix=f"sim_res_{job_id}_", suffix=".pkl")
             os.close(temp_fd)
 
@@ -503,13 +620,13 @@ class SimulationService:
 
             process = ctx.Process(
                 target=_simulation_worker_process,
-                args=(queue, result_file, target_date, params, self.recordings_dir),
+                args=(queue, result_file, target_date, worker_plan, self.recordings_dir, precompute_candles),
                 daemon=True,
             )
             self._current_process = process
             process.start()
 
-            results = None
+            fresh_results = None
             while process.is_alive() or not queue.empty():
                 while True:
                     try:
@@ -527,32 +644,80 @@ class SimulationService:
                         res_path = msg.get("file", result_file)
                         if os.path.exists(res_path):
                             with open(res_path, "rb") as f:
-                                results = pickle.load(f)
+                                fresh_results = pickle.load(f)
                             try:
                                 os.remove(res_path)
                             except Exception:
                                 pass
 
-                if results is not None:
+                if fresh_results is not None:
                     break
 
                 if not process.is_alive():
-                    if process.exitcode != 0 and results is None:
+                    if process.exitcode != 0 and fresh_results is None:
                         raise RuntimeError(f"Simulation worker process crashed with exit code {process.exitcode}")
                     break
 
                 await asyncio.sleep(0.1)
 
-            if results is None and result_file and os.path.exists(result_file):
+            if fresh_results is None and result_file and os.path.exists(result_file):
                 try:
                     with open(result_file, "rb") as f:
-                        results = pickle.load(f)
+                        fresh_results = pickle.load(f)
                     os.remove(result_file)
                 except Exception:
                     pass
 
-            if results is None:
+            if fresh_results is None:
                 raise RuntimeError("Simulation finished without producing results.")
+
+            # Persist newly simulated (mode, track_name) records to append-only fixed-slot disk cache
+            if specs:
+                fresh_matrix = fresh_results.get("matrix") or {}
+                fresh_details = fresh_results.get("details") or {}
+                for m, m_specs in missed_specs_by_mode.items():
+                    m_mat = fresh_matrix.get(m, {})
+                    m_det = fresh_details.get(m, {})
+                    is_cold = m in cold_modes
+                    for sp in m_specs:
+                        tr = sp["track_name"]
+                        t_mat = m_mat.get(tr) or {
+                            "trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+                            "gross_pnl": 0.0, "brokerage": 0.0, "net_pnl": 0.0,
+                            "max_dd": 0.0, "max_dd_pct": 0.0, "profit_factor": 0.0,
+                        }
+                        t_det = m_det.get(tr) or {"trades": [], "curve": []}
+                        self.disk_cache.put(
+                            target_date=target_date,
+                            cache_key=sp["cache_key"],
+                            mode=m,
+                            track_name=tr,
+                            matrix_stats=t_mat,
+                            details=t_det,
+                            is_cold_run=is_cold,
+                            track_config=sp.get("track_config"),
+                        )
+                        cached_records[(m, tr)] = {
+                            "matrix": t_mat,
+                            "details": t_det if precompute_candles else strip_chart_data_from_details(t_det),
+                        }
+
+                results = self._assemble_cached_results(
+                    target_date=target_date,
+                    specs=specs,
+                    records_by_key=cached_records,
+                    cache_stats={
+                        "hits": len(hit_tracks),
+                        "misses": len(ran_tracks) - len(cold_tracks),
+                        "cold_runs": len(cold_tracks),
+                        "hit_tracks": hit_tracks,
+                        "ran_tracks": ran_tracks,
+                        "cold_run_modes": sorted(cold_modes),
+                    },
+                    fully_cached=False,
+                )
+            else:
+                results = fresh_results
 
             # Store in deduplication cache
             self.cache_by_param_hash[param_hash] = results
@@ -570,6 +735,7 @@ class SimulationService:
                 "params": params,
                 "results": results,
                 "runtime": round(self.last_run_time, 2),
+                "cached": False,
                 "timestamp": datetime.now(IST).strftime("%H:%M:%S"),
             }
             if batch_id:
@@ -578,6 +744,10 @@ class SimulationService:
                     run_id=job_id,
                     label=batch_label,
                 )
+            _logger.info(
+                f"Sim job {job_id} ({target_date}) finished in {self.last_run_time:.2f}s | "
+                f"DiskHits={len(hit_tracks)} | Executed={len(ran_tracks)} | ColdModes={sorted(cold_modes)}"
+            )
             return results
 
         except Exception as e:
@@ -610,11 +780,89 @@ class SimulationService:
             if self._current_task is cur_task:
                 self._current_task = None
 
+    def _assemble_cached_results(
+        self,
+        target_date: str,
+        specs: List[Dict[str, Any]],
+        records_by_key: Dict[Tuple[str, str], Dict[str, Any]],
+        cache_stats: Optional[Dict[str, Any]] = None,
+        fully_cached: bool = False,
+    ) -> Dict[str, Any]:
+        """Assemble merged matrix & trade details in canonical spec order per mode."""
+        merged_matrix: Dict[str, Dict[str, Any]] = {}
+        merged_details: Dict[str, Dict[str, Any]] = {}
+        empty_stats = {
+            "trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+            "gross_pnl": 0.0, "brokerage": 0.0, "net_pnl": 0.0,
+            "max_dd": 0.0, "max_dd_pct": 0.0, "profit_factor": 0.0,
+        }
+        for sp in specs:
+            m = sp["mode"]
+            tr = sp["track_name"]
+            merged_matrix.setdefault(m, {})
+            merged_details.setdefault(m, {})
+            rec = records_by_key.get((m, tr)) or {}
+            merged_matrix[m][tr] = dict(rec.get("matrix") or empty_stats)
+            det = rec.get("details") or {"trades": [], "curve": []}
+            merged_details[m][tr] = {
+                "trades": list(det.get("trades") or []),
+                "curve": list(det.get("curve") or []),
+            }
+        out: Dict[str, Any] = {
+            "date": target_date,
+            "cached": bool(fully_cached),
+            "matrix": merged_matrix,
+            "details": merged_details,
+        }
+        if cache_stats is not None:
+            out["cache_stats"] = cache_stats
+        return out
+
+    def _execute_worker_plan(
+        self,
+        target_date: str,
+        worker_plan: List[Dict[str, Any]],
+        progress_cb: Optional[Callable[[str], None]] = None,
+        precompute_candles: bool = False,
+    ) -> Dict[str, Any]:
+        """Execute one or more trimmed (modes, params) batches sequentially, loading parquet once."""
+        if progress_cb:
+            progress_cb(f"Ingesting market dataset once for {target_date}...")
+        self._ensure_cache(target_date)
+
+        combined_matrix: Dict[str, Dict[str, Any]] = {}
+        combined_details: Dict[str, Dict[str, Any]] = {}
+        for idx, step in enumerate(worker_plan):
+            step_modes = step.get("modes") or ["paper", "paper_delayed"]
+            step_params = step.get("params") or {}
+            if progress_cb:
+                progress_cb(
+                    f"Simulating {','.join(step_modes)} subset ({idx + 1}/{len(worker_plan)}) for {target_date}..."
+                )
+            res = self._execute_simulation_sync(
+                target_date=target_date,
+                params=step_params,
+                progress_cb=progress_cb,
+                precompute_candles=precompute_candles,
+            )
+            for m, tmap in (res.get("matrix") or {}).items():
+                combined_matrix.setdefault(m, {}).update(tmap)
+            for m, dmap in (res.get("details") or {}).items():
+                combined_details.setdefault(m, {}).update(dmap)
+
+        return {
+            "date": target_date,
+            "cached": False,
+            "matrix": combined_matrix,
+            "details": combined_details,
+        }
+
     def _execute_simulation_sync(
         self,
         target_date: str,
         params: Dict[str, Any],
         progress_cb: Optional[Callable[[str], None]] = None,
+        precompute_candles: bool = False,
     ) -> Dict[str, Any]:
         """Synchronous execution inside dedicated worker process."""
         if progress_cb:
@@ -663,54 +911,53 @@ class SimulationService:
             from core.candles.shm_layout import unlink_shm
             unlink_shm(engine.shm_name)
 
-        if progress_cb:
-            progress_cb("Precomputing chart candles for closed trades...")
-
-        # Precompute candles ONCE for unique underlyings and options across all closed trades
-        unique_underlyings = set()
-        unique_options = set()
-        for m in modes:
-            for tr_obj in engine.closed_trades.get(m, []):
-                tr_dict = tr_obj.to_dict() if hasattr(tr_obj, "to_dict") else tr_obj
-                tr_sym = str(tr_dict.get("symbol", "")).strip()
-                tr_tok = str(tr_dict.get("token", "")).strip()
-                meta = tr_dict.get("metadata") or {}
-                u_tok = str(meta.get("underlying_token", "") or f"NSE:{tr_sym}").strip()
-                opt_sym = str(meta.get("option_symbol", "") or tr_sym).strip()
-                if tr_sym:
-                    unique_underlyings.add((u_tok, tr_sym))
-                if tr_tok:
-                    unique_options.add((tr_tok, opt_sym))
-
-        candle_svc = CandleService(recordings_dir=self.recordings_dir)
-
+        # Precompute candles ONLY when explicitly requested (lazy-loaded on click in UI via /api/chart/candles)
         precomputed_underlyings: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        for u_tok, tr_sym in unique_underlyings:
-            try:
-                precomputed_underlyings[(u_tok, tr_sym)] = candle_svc.get_candles(
-                    target_date=target_date,
-                    token=u_tok,
-                    symbol=tr_sym,
-                    is_option=False,
-                    interval_minutes=5,
-                    source_df=self.cached_equity_df,
-                )
-            except Exception:
-                precomputed_underlyings[(u_tok, tr_sym)] = []
-
         precomputed_options: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        for tr_tok, opt_sym in unique_options:
-            try:
-                precomputed_options[(tr_tok, opt_sym)] = candle_svc.get_candles(
-                    target_date=target_date,
-                    token=tr_tok,
-                    symbol=opt_sym,
-                    is_option=True,
-                    interval_minutes=5,
-                    source_df=self.cached_options_df,
-                )
-            except Exception:
-                precomputed_options[(tr_tok, opt_sym)] = []
+        if precompute_candles:
+            if progress_cb:
+                progress_cb("Precomputing chart candles for closed trades...")
+            unique_underlyings = set()
+            unique_options = set()
+            for m in modes:
+                for tr_obj in engine.closed_trades.get(m, []):
+                    tr_dict = tr_obj.to_dict() if hasattr(tr_obj, "to_dict") else tr_obj
+                    tr_sym = str(tr_dict.get("symbol", "")).strip()
+                    tr_tok = str(tr_dict.get("token", "")).strip()
+                    meta = tr_dict.get("metadata") or {}
+                    u_tok = str(meta.get("underlying_token", "") or f"NSE:{tr_sym}").strip()
+                    opt_sym = str(meta.get("option_symbol", "") or tr_sym).strip()
+                    if tr_sym:
+                        unique_underlyings.add((u_tok, tr_sym))
+                    if tr_tok:
+                        unique_options.add((tr_tok, opt_sym))
+
+            candle_svc = CandleService(recordings_dir=self.recordings_dir)
+            for u_tok, tr_sym in unique_underlyings:
+                try:
+                    precomputed_underlyings[(u_tok, tr_sym)] = candle_svc.get_candles(
+                        target_date=target_date,
+                        token=u_tok,
+                        symbol=tr_sym,
+                        is_option=False,
+                        interval_minutes=5,
+                        source_df=self.cached_equity_df,
+                    )
+                except Exception:
+                    precomputed_underlyings[(u_tok, tr_sym)] = []
+
+            for tr_tok, opt_sym in unique_options:
+                try:
+                    precomputed_options[(tr_tok, opt_sym)] = candle_svc.get_candles(
+                        target_date=target_date,
+                        token=tr_tok,
+                        symbol=opt_sym,
+                        is_option=True,
+                        interval_minutes=5,
+                        source_df=self.cached_options_df,
+                    )
+                except Exception:
+                    precomputed_options[(tr_tok, opt_sym)] = []
 
         # Format closed trades & curves per mode & track
         trade_details_by_mode: Dict[str, Dict[str, Any]] = {}
@@ -780,14 +1027,14 @@ class SimulationService:
                     tr_copy["raw_entry_reason"] = str(raw_entry)
                     tr_copy["trigger"] = disp_entry
 
-                    # Attach pre-built 5-minute candles
-                    tr_sym = str(tr.get("symbol", "")).strip()
-                    tr_tok = str(tr.get("token", "")).strip()
-                    u_tok = str(tr_meta.get("underlying_token", "") or f"NSE:{tr_sym}").strip()
-                    opt_sym = str(tr_meta.get("option_symbol", "") or tr_sym).strip()
+                    if precompute_candles:
+                        tr_sym = str(tr.get("symbol", "")).strip()
+                        tr_tok = str(tr.get("token", "")).strip()
+                        u_tok = str(tr_meta.get("underlying_token", "") or f"NSE:{tr_sym}").strip()
+                        opt_sym = str(tr_meta.get("option_symbol", "") or tr_sym).strip()
 
-                    tr_copy["underlying_candles"] = precomputed_underlyings.get((u_tok, tr_sym), [])
-                    tr_copy["option_candles"] = precomputed_options.get((tr_tok, opt_sym), [])
+                        tr_copy["underlying_candles"] = precomputed_underlyings.get((u_tok, tr_sym), [])
+                        tr_copy["option_candles"] = precomputed_options.get((tr_tok, opt_sym), [])
 
                     formatted_trades.append(tr_copy)
 
@@ -813,21 +1060,18 @@ class SimulationService:
         enabled_spec: List[Dict[str, Any]] = []
         track_params_dict: Dict[str, Any] = {}
 
-        # 1. Base tracks
+        # 1. Base tracks (retain sub-track parameters in track_params_dict even when standalone track is disabled/cached)
         for base_name, b_cfg in base_tracks.items():
-            if not b_cfg.get("enabled", True):
-                continue
-            modes = b_cfg.get("modes", ["ATM"])
-            enabled_spec.append({
-                "type": "base",
-                "name": base_name,
-                "modes": modes,
-            })
-            # Clean copy of numeric params
             p = dict(b_cfg)
-            p.pop("modes", None)
-            p.pop("enabled", None)
+            modes = p.pop("modes", ["ATM"])
+            enabled_flag = p.pop("enabled", True)
             track_params_dict[base_name] = p
+            if enabled_flag and modes:
+                enabled_spec.append({
+                    "type": "base",
+                    "name": base_name,
+                    "modes": modes,
+                })
 
         # 2. Custom tracks (composed by user)
         for c in custom_tracks:

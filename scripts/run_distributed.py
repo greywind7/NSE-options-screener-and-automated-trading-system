@@ -58,7 +58,7 @@ def register_process(
     pids[role] = {
         "pid": pid,
         "cmd": cmd,
-        "log_file": log_file or f"logs/{role}.log",
+        "log_file": log_file or os.path.join("logs", "exec_logs", f"{role}.log"),
         "tier": tier or infer_process_tier(role),
         "started_at": datetime_now_iso(),
     }

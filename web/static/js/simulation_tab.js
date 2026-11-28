@@ -717,6 +717,10 @@ window.SimulationTab = {
     if (document.getElementById("sim-mode-paper").checked) modes.push("paper");
     if (document.getElementById("sim-mode-delayed").checked) modes.push("paper_delayed");
 
+    const cold_run_modes = [];
+    if (document.getElementById("sim-cold-paper")?.checked) cold_run_modes.push("paper");
+    if (document.getElementById("sim-cold-delayed")?.checked) cold_run_modes.push("paper_delayed");
+
     const global_settings = {
       capital: parseFloat(document.getElementById("sim-capital").value),
       min_delay_ms: parseFloat(document.getElementById("sim-min-delay").value),
@@ -726,6 +730,7 @@ window.SimulationTab = {
       entry_freeze_time: document.getElementById("sim-freeze-time").value,
       eod_squareoff_time: document.getElementById("sim-squareoff-time").value,
       modes: modes,
+      cold_run_modes: cold_run_modes,
     };
 
     const base_tracks = {};
@@ -757,6 +762,7 @@ window.SimulationTab = {
       run_id: runId,
       date: date,
       track_profile: selProfile,
+      cold_run_modes: cold_run_modes,
       global_settings: global_settings,
       base_tracks: base_tracks,
       custom_tracks: JSON.parse(JSON.stringify(this.customTracks)),
@@ -1185,7 +1191,7 @@ window.SimulationTab = {
         runtime: r.runtime,
         error: r.error,
         results: r.results
-          ? { date: r.results.date, cached: r.results.cached, matrix: r.results.matrix }
+          ? { date: r.results.date, cached: r.results.cached, cache_stats: r.results.cache_stats, matrix: r.results.matrix }
           : null,
       }));
       localStorage.setItem("sim_runs", JSON.stringify(compact));
@@ -1222,7 +1228,16 @@ window.SimulationTab = {
       if (r.status === "in_progress") {
         badgeHtml = `<span class="badge" style="background:rgba(0,240,255,0.15); color:var(--accent-cyan); border:1px solid rgba(0,240,255,0.3);"><span class="spinner" style="width:8px; height:8px;"></span> RUNNING</span>`;
       } else if (r.status === "completed") {
-        badgeHtml = `<span class="badge badge-win">COMPLETE</span>`;
+        const cs = r.results?.cache_stats;
+        if (cs && cs.cold_runs > 0) {
+          badgeHtml = `<span class="badge badge-win" title="Disk Cache Hits: ${cs.hits}, Fresh/Cold: ${cs.cold_runs + (cs.misses || 0)}">COLD REFRESH</span>`;
+        } else if (r.results?.cached || (cs && cs.hits > 0 && cs.misses === 0)) {
+          badgeHtml = `<span class="badge" style="background:rgba(16,185,129,0.18); color:#34d399; border:1px solid rgba(16,185,129,0.35);" title="Reused ${cs ? cs.hits : 'all'} track result(s) from disk cache">DISK CACHE</span>`;
+        } else if (cs && cs.hits > 0) {
+          badgeHtml = `<span class="badge badge-win" title="${cs.hits} cached + ${cs.misses || 0} simulated">${cs.hits} CACHED / ${cs.misses || 0} RAN</span>`;
+        } else {
+          badgeHtml = `<span class="badge badge-win">COMPLETE</span>`;
+        }
       } else {
         badgeHtml = `<span class="badge badge-loss">FAILED</span>`;
       }

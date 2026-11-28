@@ -149,8 +149,13 @@ class BaseSuperstructure(ExecutionContext, ABC):
 
         for tr_name, track in self.tracks.items():
             filename = f"journal_{self.mode}_{tr_name}.jsonl"
-            filepath = os.path.join(session_dir, filename)
-            if not os.path.exists(filepath):
+            journal_subpath = os.path.join(session_dir, "journal", filename)
+            legacy_path = os.path.join(session_dir, filename)
+            if os.path.exists(journal_subpath) and os.path.getsize(journal_subpath) > 0:
+                filepath = journal_subpath
+            elif os.path.exists(legacy_path) and os.path.getsize(legacy_path) > 0:
+                filepath = legacy_path
+            else:
                 continue
 
             trades_map: Dict[str, Dict[str, Any]] = {}
@@ -261,9 +266,10 @@ class BaseSuperstructure(ExecutionContext, ABC):
                     if hasattr(track, "add_recovered_trade"):
                         rec_ok = track.add_recovered_trade(trade, is_filled=is_filled)
                         if rec_ok is False:
-                            quarantine_path = os.path.join(session_dir, "quarantined_legacy_trades.jsonl")
+                            jdir = os.path.join(session_dir, "journal")
+                            quarantine_path = os.path.join(jdir, "quarantined_legacy_trades.jsonl")
                             try:
-                                os.makedirs(session_dir, exist_ok=True)
+                                os.makedirs(jdir, exist_ok=True)
                                 with open(quarantine_path, "a", encoding="utf-8") as qf:
                                     qf.write(json.dumps({
                                         "timestamp": time.time(),
@@ -392,13 +398,13 @@ class BaseSuperstructure(ExecutionContext, ABC):
     def _init_journals(self) -> None:
         """Gap 3: Initialize dedicated single-owner JSONL files per track."""
         today_str = get_market_date_str()
-        session_dir = os.path.join(self.recordings_dir, today_str)
-        os.makedirs(session_dir, exist_ok=True)
+        journal_dir = os.path.join(self.recordings_dir, today_str, "journal")
+        os.makedirs(journal_dir, exist_ok=True)
 
         all_track_keys = set(self.tracks.keys()) | set(self.track_names or [])
         for tr in all_track_keys:
             filename = f"journal_{self.mode}_{tr}.jsonl"
-            filepath = os.path.join(session_dir, filename)
+            filepath = os.path.join(journal_dir, filename)
             f = open(filepath, "a", encoding="utf-8", buffering=1)  # Line buffered
             self._journal_files[tr] = f
 

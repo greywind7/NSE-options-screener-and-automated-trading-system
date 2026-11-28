@@ -31,7 +31,7 @@ class TestOpportunityPool(unittest.TestCase):
         self.sub.close(linger=0)
         self.pool.stop()
         self.ctx.destroy(linger=0)
-        for p in ["logs/alerts_1970-01-01.jsonl"]:
+        for p in ["logs/alerts_1970-01-01.jsonl", "logs/alerts/alerts_1970-01-01.jsonl"]:
             if os.path.exists(p):
                 try:
                     os.remove(p)

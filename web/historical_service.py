@@ -49,25 +49,30 @@ class HistoricalService:
                     }
                 date_map[canonical_date]["raw_dirs"].append(entry_path)
 
-                # Check contents
+                # Check contents (session_dir + session_dir/journal/)
                 try:
-                    files = os.listdir(entry_path)
-                    for f in files:
-                        fp = os.path.join(entry_path, f)
-                        if f.endswith(".parquet") and os.path.getsize(fp) > 0:
-                            date_map[canonical_date]["has_parquet"] = True
-                        if (f.startswith("journal_") or "trade" in f.lower()) and os.path.getsize(fp) > 0:
-                            date_map[canonical_date]["has_journals"] = True
+                    for sub_dir in [entry_path, os.path.join(entry_path, "journal")]:
+                        if not os.path.isdir(sub_dir):
+                            continue
+                        for f in os.listdir(sub_dir):
+                            fp = os.path.join(sub_dir, f)
+                            if not os.path.isfile(fp):
+                                continue
+                            if f.endswith(".parquet") and os.path.getsize(fp) > 0:
+                                date_map[canonical_date]["has_parquet"] = True
+                            if (f.startswith("journal_") or "trade" in f.lower()) and os.path.getsize(fp) > 0:
+                                date_map[canonical_date]["has_journals"] = True
                 except Exception:
                     pass
 
-        # Also check logs dir
-        if os.path.exists(self.logs_dir):
-            for f in os.listdir(self.logs_dir):
-                if f.endswith(".jsonl") or f.endswith(".csv"):
-                    for d in date_map:
-                        if d in f or d.replace("-", "") in f:
-                            date_map[d]["has_journals"] = True
+        # Also check logs dir & logs/trade_journals/
+        for ldir in [self.logs_dir, os.path.join(self.logs_dir, "trade_journals")]:
+            if os.path.exists(ldir):
+                for f in os.listdir(ldir):
+                    if f.endswith(".jsonl") or f.endswith(".csv"):
+                        for d in date_map:
+                            if d in f or d.replace("-", "") in f:
+                                date_map[d]["has_journals"] = True
 
         dates_sorted = sorted(date_map.values(), key=lambda x: x["date"], reverse=False)
         return dates_sorted
@@ -217,19 +222,27 @@ class HistoricalService:
             return self._date_cache[canonical_date]
 
         cand_dirs = [
+            os.path.join(self.recordings_dir, canonical_date, "journal"),
             os.path.join(self.recordings_dir, canonical_date),
+            os.path.join(self.recordings_dir, canonical_date.replace("-", ""), "journal"),
             os.path.join(self.recordings_dir, canonical_date.replace("-", "")),
         ]
 
         trades_by_mode_track: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         modes = ["paper", "paper_delayed", "live", "sim"]
+        seen_filenames: Set[str] = set()
 
         for c_dir in cand_dirs:
             if not os.path.exists(c_dir):
                 continue
             for fname in sorted(os.listdir(c_dir)):
+                if fname in seen_filenames:
+                    continue
                 fpath = os.path.join(c_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
                 if fname.startswith("journal_") and fname.endswith(".jsonl"):
+                    seen_filenames.add(fname)
                     stem = fname[len("journal_"):-len(".jsonl")]
                     matched_mode = None
                     matched_track = None

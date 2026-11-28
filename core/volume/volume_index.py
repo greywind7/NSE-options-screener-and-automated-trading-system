@@ -178,7 +178,7 @@ def fetch_historical_candles(
 
 def run_volume_indexer(
     instruments_csv: str = "data/filtered.csv",
-    output_json: str = "data/index.json",
+    output_json: str = "data/index/index.json",
     days: int = 30,
     skip_if_exists: bool = True,
 ) -> Optional[str]:
@@ -220,11 +220,11 @@ def run_volume_indexer(
         _logger.error(f"No instruments found in {instruments_csv}")
         return None
 
-    failure_log_path = os.path.join("logs", "volume_index_failures.log")
+    failure_log_path = os.path.join("logs", "exec_logs", "volume_index_failures.log")
     token = get_access_token()
     if not token:
         _logger.error("Cannot build volume index: UPSTOX_ACCESS_TOKEN not set in environment or .env")
-        os.makedirs("logs", exist_ok=True)
+        os.makedirs(os.path.dirname(failure_log_path), exist_ok=True)
         with open(failure_log_path, "a", encoding="utf-8") as lf:
             lf.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [ABORT] Volume index build aborted: UPSTOX_ACCESS_TOKEN missing\n")
         return None
@@ -286,7 +286,7 @@ def run_volume_indexer(
 def main():
     parser = argparse.ArgumentParser(description="Build 30-Day RVOL Historical Profile Index")
     parser.add_argument("--input", default="data/filtered.csv", help="Filtered instruments CSV")
-    parser.add_argument("--output", default="data/index.json", help="Output volume index JSON")
+    parser.add_argument("--output", default="data/index/index.json", help="Output volume index JSON")
     parser.add_argument("--days", type=int, default=30, help="Number of days to index")
     parser.add_argument("--force", action="store_true", help="Force rebuild even if index exists")
     args = parser.parse_args()

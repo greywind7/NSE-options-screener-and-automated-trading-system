@@ -592,7 +592,7 @@ def build_day_bundle(date_str: str) -> str:
     data_dir = os.path.join("recordings", date_str)
     eq_files = sorted(glob.glob(os.path.join(data_dir, "*equity_ticks*.parquet")))
     opt_files = sorted(glob.glob(os.path.join(data_dir, "*option_depth*.parquet")))
-    baseline_file = f"data/index_{d_nodash}.json" if os.path.exists(f"data/index_{d_nodash}.json") else "data/index.json"
+    baseline_file = f"data/index/index_{d_nodash}.json" if os.path.exists(f"data/index/index_{d_nodash}.json") else "data/index/index.json"
     universe_csv = f"data/filtered_{d_nodash}.csv" if os.path.exists(f"data/filtered_{d_nodash}.csv") else "data/filtered.csv"
 
     print(f"[PHASE1_START] {date_str} | baseline={baseline_file}", flush=True)
@@ -610,7 +610,12 @@ def build_day_bundle(date_str: str) -> str:
     # Load manifest & lot sizes (seed full canonical strike grid from manifest options_map)
     token_map: Dict[str, Tuple[str, float, str]] = {}
     catalog_by_key: Dict[Tuple[str, str, float], str] = {}
-    for mp in [f"data/subscription_manifest_{d_nodash}.json", "data/subscription_manifest.json"]:
+    for mp in [
+        f"data/manifest/subscription_manifest_{d_nodash}.json",
+        "data/manifest/subscription_manifest.json",
+        f"data/subscription_manifest_{d_nodash}.json",
+        "data/subscription_manifest.json",
+    ]:
         if os.path.exists(mp):
             with open(mp, "r", encoding="utf-8") as f:
                 mdata = json.load(f)

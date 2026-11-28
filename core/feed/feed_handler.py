@@ -118,12 +118,14 @@ class FeedHandler:
             self.max_stream_contracts = max(1, int(max_stream_contracts))
         self.silent = bool(silent)
         self.allow_rest_fallback = bool(allow_rest_fallback)
-        self.debug_log = "logs/debug.log"
+        self.debug_log = "logs/exec_logs/debug.log"
 
         if manifest_path:
             self.manifest_path = manifest_path
         else:
-            self.manifest_path = "data/subscription_manifest_mcx.json" if self.exchange == "MCX" else "data/subscription_manifest.json"
+            canon_m = "data/manifest/subscription_manifest_mcx.json" if self.exchange == "MCX" else "data/manifest/subscription_manifest.json"
+            legacy_m = "data/subscription_manifest_mcx.json" if self.exchange == "MCX" else "data/subscription_manifest.json"
+            self.manifest_path = canon_m if os.path.exists(canon_m) or not os.path.exists(legacy_m) else legacy_m
 
         if filtered_csv:
             self.filtered_csv = filtered_csv

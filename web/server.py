@@ -706,7 +706,7 @@ class AnalyticsWebServer:
 
     def run(self) -> None:
         """Run web server synchronously."""
-        get_logger("WEB_SERVER", log_file="logs/web_server.log")
+        get_logger("WEB_SERVER", log_file="logs/exec_logs/web_server.log")
         _logger.info(f"ANTIGRAVITY ANALYTICS & SIMULATION WEB UI listening at http://localhost:{self.port} (http://{self.host}:{self.port})")
 
         def _sig_handler(sig, frame):
@@ -714,9 +714,21 @@ class AnalyticsWebServer:
             self.teardown()
             sys.exit(0)
 
+        def _shm_detach_handler(sig, frame):
+            _logger.info("Received SHM detach signal; releasing cached AlertService SHM handle.")
+            self.alert_service.close()
+
+        def _shm_reattach_handler(sig, frame):
+            _logger.info("Received SHM reattach signal; resetting AlertService SHM handle for fresh attachment.")
+            self.alert_service.close()
+
         try:
             signal.signal(signal.SIGINT, _sig_handler)
             signal.signal(signal.SIGTERM, _sig_handler)
+            if hasattr(signal, "SIGUSR1"):
+                signal.signal(signal.SIGUSR1, _shm_detach_handler)
+            if hasattr(signal, "SIGUSR2"):
+                signal.signal(signal.SIGUSR2, _shm_reattach_handler)
         except Exception:
             pass
 

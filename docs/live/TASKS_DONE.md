@@ -4,6 +4,23 @@ Chronological log of all completed engineering tasks, refactors, fixes, and feat
 
 ---
 
+## 2026-11-28 — SHM Signal-Driven Lifecycle, Health Liveness Consistency & Persistent Fixed-Slot Simulation Cache
+
+- **SHM Detach/Reattach Signals & System Health Consistency ([`core/candles/shm_layout.py`](file:///Users/yorha/Documents/Trading%20Stuff/core/candles/shm_layout.py), [`core/candles/candle_manager.py`](file:///Users/yorha/Documents/Trading%20Stuff/core/candles/candle_manager.py), [`strategies/momentum/scoring_engine.py`](file:///Users/yorha/Documents/Trading%20Stuff/strategies/momentum/scoring_engine.py), [`web/health_service.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/health_service.py), [`web/admin_service.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/admin_service.py))**:
+  - `CandleManager` now checks for pre-existing `shm_ohlc_221` on startup/restart, signals registered SHM consumer processes (`scoring_engine`, `web_server`) with `SHM_SIGNAL_DETACH` (`SIGUSR1`), unlinks the old segment, creates a fresh SHM segment, and sends `SHM_SIGNAL_REATTACH` (`SIGUSR2`) so consumers cleanly rebind.
+  - On shutdown/stop (`CandleManager.stop()`, `AdminService.stop_core`, `runner.py stop`), consumers are signaled with `SHM_SIGNAL_DETACH` and `shm_ohlc_221` is unlinked.
+  - `HealthService._probe_ipc_and_shm()` requires `candle_manager` to be alive before marking SHM active; when `candle_manager` is inactive, any orphaned SHM segment triggers consumer detach signaling + unlink and reports SHM inactive cleanly.
+- **Append-Only Fixed-Slot Per-Track Disk Cache ([`web/sim_disk_cache.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/sim_disk_cache.py), [`web/simulation_service.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/simulation_service.py), [`web/static/js/simulation_tab.js`](file:///Users/yorha/Documents/Trading%20Stuff/web/static/js/simulation_tab.js))**:
+  - Caches both `paper` and `paper_delayed` simulations keyed by canonical `(date, mode, track_name, param_hash)` inside per-date fixed-slot `.dat` files (`256B` standardized binary header + `SLOT_BYTES` frame + CRC32) indexed by `.idx.json` under `cache/simulations/`.
+  - Enables subset-of-tracks reuse and partial cache hits (launching `ColumnarSimEngine` only for modified/missed `(mode, track)` pairs while loading Parquet once), adds **Cold: Paper** and **Cold: Paper Delayed** checkboxes in Simulation Lab to overwrite existing slots safely in place, and skips heavy candle precomputation on initial runs (charts lazy-load via `/api/chart/candles`).
+- **Directory Reorganization & File Migration (`507` files migrated)**:
+  - `data/` -> `data/index/` (volume baselines) and `data/manifest/` (subscription manifests).
+  - `logs/` -> `logs/alerts/` (`alerts_*.jsonl`), `logs/exec_logs/` (`*.log`), and `logs/trade_journals/` (`trade_journal_*.jsonl`, `*_trades*.csv`).
+  - `recordings/<date>/` -> `recordings/<date>/journal/` (`journal_*.jsonl`, `quarantined_legacy_trades.jsonl`).
+  - Updated all configs, core services, execution superstructures, simulation engine, web services, runner CLI commands, scripts, tests, and documentation with backwards-compatible fallbacks where appropriate.
+
+---
+
 ## 2026-11-28 — Admin Ops UI, System Health Monitor, Standardized IST Logging, Core RMS Decoupling & `origin_track` Determinism (`IMPROVEMENTS Part 1 #1, #2, #7`)
 
 - **Standardized IST Logging ([`core/common/logging_utils.py`](file:///Users/yorha/Documents/Trading%20Stuff/core/common/logging_utils.py), [`scripts/run_distributed.py`](file:///Users/yorha/Documents/Trading%20Stuff/scripts/run_distributed.py))**: Unified service output across `core/`, `strategies/`, `execution/`, and `web/` using `[YYYY-MM-DD HH:MM:SS.mmm IST] [LEVEL] [LOGGER]` (`WARNING` → `WARN`), `PYTHONUNBUFFERED=1`, and PID/tier registry metadata in `logs/pids.json`.

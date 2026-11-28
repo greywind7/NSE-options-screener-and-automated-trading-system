@@ -33,9 +33,9 @@ _logger = get_logger("PREMARKET.MANIFEST")
 
 def run_manifest_generator(
     filtered_csv: str = "data/filtered.csv",
-    volume_index_json: str = "data/index.json",
+    volume_index_json: str = "data/index/index.json",
     master_csv: str = "data/instrument.csv",
-    output_json: str = "data/subscription_manifest.json",
+    output_json: str = "data/manifest/subscription_manifest.json",
     popular_strikes: int = 3,
     max_stream_underlyings_with_options: Optional[int] = None,
     skip_if_exists: bool = False,
@@ -347,9 +347,9 @@ def run_manifest_generator(
 def main():
     parser = argparse.ArgumentParser(description="Generate Multi-Stream Subscription Manifest")
     parser.add_argument("--filtered", default="data/filtered.csv", help="Filtered equities CSV")
-    parser.add_argument("--index", default="data/index.json", help="Volume index JSON")
+    parser.add_argument("--index", default="data/index/index.json", help="Volume index JSON")
     parser.add_argument("--master", default="data/instrument.csv", help="Master instruments CSV")
-    parser.add_argument("--output", default="data/subscription_manifest.json", help="Output manifest JSON")
+    parser.add_argument("--output", default="data/manifest/subscription_manifest.json", help="Output manifest JSON")
     parser.add_argument("--strikes", type=int, default=3, help="Popular strikes above/below ATM (default: 3)")
     parser.add_argument("--max-options-underlyings", type=int, default=None, help="Top N liquid underlyings to stream options for (default from system.json or 110)")
     args = parser.parse_args()

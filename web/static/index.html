@@ -488,7 +488,7 @@
               </div>
             </div>
 
-            <!-- Execution Modes -->
+            <!-- Execution Modes & Cold Run Cache Controls -->
             <div class="form-group">
               <label class="form-label">Execution Modes</label>
               <div class="checkbox-group">
@@ -497,6 +497,18 @@
                 </label>
                 <label class="checkbox-label">
                   <input type="checkbox" id="sim-mode-delayed" checked /> Paper Delayed
+                </label>
+              </div>
+            </div>
+
+            <div class="form-group" style="margin-top:-4px;">
+              <label class="form-label" title="Bypass on-disk simulation cache for checked modes and overwrite stored slot results">Cold Run (Overwrite Disk Cache)</label>
+              <div class="checkbox-group">
+                <label class="checkbox-label" title="Force fresh Paper simulation and overwrite cached entries on disk">
+                  <input type="checkbox" id="sim-cold-paper" /> Cold: Paper
+                </label>
+                <label class="checkbox-label" title="Force fresh Paper Delayed simulation and overwrite cached entries on disk">
+                  <input type="checkbox" id="sim-cold-delayed" /> Cold: Paper Delayed
                 </label>
               </div>
             </div>

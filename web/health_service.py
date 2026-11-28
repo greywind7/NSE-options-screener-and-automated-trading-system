@@ -202,10 +202,21 @@ class HealthService:
     def _list_log_files(self) -> List[str]:
         if not os.path.exists(self.logs_dir):
             return []
-        files = sorted(glob.glob(os.path.join(self.logs_dir, "*.log")))
-        return [f for f in files if os.path.isfile(f)]
+        files: List[str] = []
+        seen_names = set()
+        for pat in [
+            os.path.join(self.logs_dir, "exec_logs", "*.log"),
+            os.path.join(self.logs_dir, "*.log"),
+        ]:
+            for f in sorted(glob.glob(pat)):
+                if os.path.isfile(f):
+                    b = os.path.basename(f)
+                    if b not in seen_names:
+                        seen_names.add(b)
+                        files.append(f)
+        return sorted(files, key=lambda p: os.path.basename(p))
 
-    def _probe_ipc_and_shm(self) -> Dict[str, Any]:
+    def _probe_ipc_and_shm(self, candle_manager_alive: Optional[bool] = None) -> Dict[str, Any]:
         if self.skip_system_probes:
             return {
                 "ipc_sockets": [],
@@ -229,16 +240,54 @@ class HealthService:
 
         shm_active = False
         backend = "offline"
-        reason = "CandleManager offline (market not live or Core tier not started)"
         clean_name = self.shm_name.lstrip("/")
         mmap_path = os.path.join("/tmp", f"{clean_name}.shm")
+
+        if candle_manager_alive is None:
+            pids = load_pids(self.pids_file)
+            cm_info = pids.get("candle_manager") or {}
+            cm_pid = int(cm_info.get("pid") or 0)
+            candle_manager_alive = bool(cm_pid > 0 and is_pid_alive(cm_pid))
+
+        if not candle_manager_alive:
+            reason = "CandleManager inactive (market offline or Core tier stopped)"
+            try:
+                from core.candles.shm_layout import (
+                    SHM_SIGNAL_DETACH,
+                    shm_exists,
+                    signal_shm_consumers,
+                    unlink_shm,
+                )
+                if shm_exists(self.shm_name):
+                    signaled = signal_shm_consumers(SHM_SIGNAL_DETACH, pids_file=self.pids_file)
+                    unlink_shm(self.shm_name)
+                    backend = "stale_cleared"
+                    reason = (
+                        f"CandleManager inactive; cleared stale SHM '{self.shm_name}'"
+                        + (f" & signaled consumers {signaled} to detach" if signaled else "")
+                    )
+            except Exception:
+                pass
+            return {
+                "ipc_sockets": ipc_list,
+                "shm": {
+                    "name": self.shm_name,
+                    "path": mmap_path,
+                    "active": False,
+                    "backend": backend,
+                    "reason": reason,
+                    "skipped": False,
+                },
+            }
+
+        reason = f"CandleManager running, but SHM '{self.shm_name}' is not mounted yet"
 
         # 1. Check mmap backing file (default runtime mechanism on macOS/Linux via shm_layout.py)
         try:
             if os.path.exists(mmap_path) and os.path.getsize(mmap_path) > 0:
                 shm_active = True
                 backend = "mmap_tmp"
-                reason = f"Active mmap backing at {mmap_path}"
+                reason = f"Active mmap backing at {mmap_path} (CandleManager PID alive)"
         except Exception:
             pass
 
@@ -250,7 +299,7 @@ class HealthService:
                 if shm.size > 0:
                     shm_active = True
                     backend = "posix_shm"
-                    reason = f"Active POSIX SharedMemory '{self.shm_name}'"
+                    reason = f"Active POSIX SharedMemory '{self.shm_name}' (CandleManager PID alive)"
                 shm.close()
             except Exception:
                 pass
@@ -362,7 +411,7 @@ class HealthService:
             reasons.append("All active processes healthy and zero errors logged today")
 
         recent_errors_sorted = sorted(recent_errors, key=lambda x: x.get("time", ""), reverse=True)[:15]
-        infra = self._probe_ipc_and_shm()
+        infra = self._probe_ipc_and_shm(candle_manager_alive=alive_map.get("candle_manager", False))
 
         return {
             "date": today_str,
@@ -402,9 +451,13 @@ class HealthService:
         target_files: List[str] = []
         if file and file.upper() != "ALL":
             safe_name = os.path.basename(file)
-            cand = os.path.join(self.logs_dir, safe_name)
-            if os.path.exists(cand) and os.path.isfile(cand):
-                target_files.append(cand)
+            for cand in [
+                os.path.join(self.logs_dir, "exec_logs", safe_name),
+                os.path.join(self.logs_dir, safe_name),
+            ]:
+                if os.path.exists(cand) and os.path.isfile(cand):
+                    target_files.append(cand)
+                    break
         else:
             target_files = self._list_log_files()
 

@@ -6,8 +6,10 @@ Implements Seqlock memory synchronization for lock-free multi-process reading.
 Provides unified interface supporting both POSIX SharedMemory and /tmp mmap fallback
 (providing identical microsecond latency while guaranteeing compatibility across macOS/Linux/sandboxes).
 """
+import json
 import mmap
 import os
+import signal
 import sys
 from multiprocessing.shared_memory import SharedMemory
 from typing import Dict, List, Optional, Tuple, Union
@@ -16,6 +18,10 @@ import numpy as np
 SHM_NAME = "shm_ohlc_221"
 NUM_SYMBOLS = 221
 NUM_BARS = 75  # 5-minute bars from 09:15 to 15:30 IST
+
+SHM_SIGNAL_DETACH = getattr(signal, "SIGUSR1", 10)
+SHM_SIGNAL_REATTACH = getattr(signal, "SIGUSR2", 12)
+SHM_CONSUMER_ROLES = {"scoring_engine", "web_server"}
 
 # Exact 48-byte struct layout adhering to LOW_LEVEL_DESIGN_2_0 (Section 3.1)
 CANDLE_DTYPE = np.dtype(
@@ -154,3 +160,78 @@ def unlink_shm(name: str = SHM_NAME) -> None:
             os.remove(path)
     except Exception:
         pass
+
+
+def shm_exists(name: str = SHM_NAME) -> bool:
+    """Return True if an mmap backing file or POSIX SharedMemory exists for `name`."""
+    clean_name = name.lstrip("/")
+    path = os.path.join("/tmp", f"{clean_name}.shm")
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return True
+    except OSError:
+        pass
+
+    try:
+        s = SharedMemory(name=name, create=False)
+        exists = s.size > 0
+        s.close()
+        return exists
+    except Exception:
+        return False
+
+
+def find_shm_consumer_pids(
+    pids_file: str = os.path.join("logs", "pids.json"),
+) -> List[Tuple[str, int]]:
+    """Discover live registered processes that consume Shared Memory."""
+    if not pids_file or not os.path.exists(pids_file):
+        return []
+    try:
+        with open(pids_file, "r", encoding="utf-8") as f:
+            pids_data = json.load(f)
+        if not isinstance(pids_data, dict):
+            return []
+    except Exception:
+        return []
+
+    consumers: List[Tuple[str, int]] = []
+    self_pid = os.getpid()
+    for role, info in pids_data.items():
+        if not isinstance(info, dict):
+            continue
+        is_consumer = (
+            role in SHM_CONSUMER_ROLES
+            or role.startswith("scoring")
+            or role.startswith("strategy")
+            or bool(info.get("shm_consumer", False))
+        )
+        if not is_consumer:
+            continue
+        try:
+            pid = int(info.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid <= 0 or pid == self_pid:
+            continue
+        try:
+            os.kill(pid, 0)
+            consumers.append((role, pid))
+        except OSError:
+            continue
+    return consumers
+
+
+def signal_shm_consumers(
+    sig: int,
+    pids_file: str = os.path.join("logs", "pids.json"),
+) -> List[int]:
+    """Send POSIX signal `sig` (`SHM_SIGNAL_DETACH` / `SHM_SIGNAL_REATTACH`) to active SHM consumers."""
+    signaled: List[int] = []
+    for _role, pid in find_shm_consumer_pids(pids_file=pids_file):
+        try:
+            os.kill(pid, sig)
+            signaled.append(pid)
+        except OSError:
+            continue
+    return signaled

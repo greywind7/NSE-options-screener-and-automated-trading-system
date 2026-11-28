@@ -21,6 +21,8 @@ from core.candles.shm_layout import (
     NUM_SYMBOLS,
     NUM_BARS,
     SHM_NAME,
+    SHM_SIGNAL_DETACH,
+    SHM_SIGNAL_REATTACH,
     create_or_attach_shm,
     get_shm_views,
 )
@@ -139,14 +141,73 @@ class ScoringEngine3:
         self.index_to_symbol: List[str] = []
         self._load_universe()
 
-        # Attach to Shared Memory (Read-Only)
-        self.shm = create_or_attach_shm(name=self.shm_name, create=False)
-        self.headers, self.candles = get_shm_views(self.shm)
+        # Attach to Shared Memory (Read-Only, resilient to detach/reattach signals)
+        self.shm = None
+        self.headers = None
+        self.candles = None
+        self._shm_detached = True
+        self._detach_requested = False
+        self._reattach_requested = False
+        self._attach_shm(raise_if_missing=False)
 
         # Per-symbol state metadata
         self.meta: Dict[str, SymbolMetadata] = {
             sym: SymbolMetadata() for sym in self.index_to_symbol
         }
+
+    def _detach_shm(self) -> None:
+        """Close current Shared Memory mapping so CandleManager can cleanly remove/recreate it."""
+        self._shm_detached = True
+        self.headers = None
+        self.candles = None
+        if getattr(self, "shm", None) is not None:
+            try:
+                self.shm.close()
+            except Exception:
+                pass
+            self.shm = None
+
+    def _attach_shm(self, raise_if_missing: bool = False) -> bool:
+        """Attach (or reattach) to `self.shm_name` Shared Memory segment."""
+        self._detach_shm()
+        try:
+            self.shm = create_or_attach_shm(name=self.shm_name, create=False)
+            self.headers, self.candles = get_shm_views(self.shm)
+            self._shm_detached = False
+            return True
+        except FileNotFoundError:
+            self._shm_detached = True
+            if raise_if_missing:
+                raise
+            logger.warning(
+                f"Shared Memory '{self.shm_name}' currently inactive; awaiting CandleManager startup/reattach signal."
+            )
+            return False
+
+    def request_shm_detach(self) -> None:
+        """Signal callback: detach immediately or mark pending detach."""
+        self._detach_requested = True
+        self._reattach_requested = False
+
+    def request_shm_reattach(self) -> None:
+        """Signal callback: reattach to freshly recreated SHM."""
+        self._reattach_requested = True
+
+    def _process_shm_signals(self) -> None:
+        """Handle pending detach/reattach signal flags safely on the worker loop."""
+        if self._detach_requested:
+            self._detach_requested = False
+            self._detach_shm()
+            logger.info(f"Detached from SHM '{self.shm_name}' on SHM_SIGNAL_DETACH.")
+        if self._reattach_requested:
+            self._reattach_requested = False
+            if self._attach_shm(raise_if_missing=False):
+                logger.info(f"Reattached to fresh SHM '{self.shm_name}' on SHM_SIGNAL_REATTACH.")
+
+    def install_shm_signal_handlers(self) -> None:
+        """Register OS handlers for SHM detach/reattach notifications."""
+        signal.signal(SHM_SIGNAL_DETACH, lambda _s, _f: self.request_shm_detach())
+        signal.signal(SHM_SIGNAL_REATTACH, lambda _s, _f: self.request_shm_reattach())
 
     def _load_universe(self) -> None:
         symbols = []
@@ -557,6 +618,10 @@ class ScoringEngine3:
         self, now_ts: Optional[float] = None, symbol_indices: Optional[Any] = None
     ) -> List[SetupAlert]:
         """Single spin-loop pass across monitored F&O equities (< 500 microseconds)."""
+        self._process_shm_signals()
+        if self._shm_detached or self.candles is None or self.headers is None:
+            return []
+
         now_ts = now_ts or time.time()
         bar_idx, _, _ = self._get_bar_index(now_ts)
         actionable: List[SetupAlert] = []
@@ -635,6 +700,10 @@ class ScoringEngine3:
 
         while self.running:
             try:
+                self._process_shm_signals()
+                if self._shm_detached or self.candles is None:
+                    time.sleep(0.05)
+                    continue
                 self.evaluate_universe()
                 time.sleep(0.005)  # 5ms yield to prevent 100% single-thread core burnout
             except Exception as e:
@@ -643,11 +712,7 @@ class ScoringEngine3:
     def stop(self) -> None:
         self.running = False
         try:
-            self.headers = None
-            self.candles = None
-            if hasattr(self, "shm") and self.shm is not None:
-                self.shm.close()
-                self.shm = None
+            self._detach_shm()
             if self._owns_pool and self.pool:
                 self.pool.stop()
         except Exception:
@@ -663,6 +728,7 @@ def main():
 
     pool = OpportunityPool(pub_ipc=args.alerts_ipc)
     engine = ScoringEngine3(shm_name=args.shm_name, pool=pool)
+    engine.install_shm_signal_handlers()
 
     def sig_handler(sig, frame):
         engine.stop()

@@ -22,7 +22,7 @@
       "max_lots_per_trade": 1,
       "max_capital_per_trade_pct": 0.50,
       "brokerage_per_order": 30.0,
-      "journal_pattern": "recordings/{date}/journal_paper_{track}.jsonl",
+      "journal_pattern": "recordings/{date}/journal/journal_paper_{track}.jsonl",
       "fill_at_spread": true
     },
     "paper_delayed": {
@@ -33,7 +33,7 @@
       "min_delay_ms": 200,
       "max_delay_ms": 500,
       "delay_sec": 60.0,
-      "journal_pattern": "recordings/{date}/journal_paper_delayed_{track}.jsonl",
+      "journal_pattern": "recordings/{date}/journal/journal_paper_delayed_{track}.jsonl",
       "fill_at_spread": true
     },
     "sim": {
@@ -48,7 +48,7 @@
     },
     "live": {
       "broker_type": "groww",
-      "journal_pattern": "recordings/{date}/journal_live_{track}.jsonl",
+      "journal_pattern": "recordings/{date}/journal/journal_live_{track}.jsonl",
       "starting_capital_per_sim": 250000.0,
       "max_capital_limit_inr": 250000.0,
       "max_capital_per_trade_pct": 0.50,

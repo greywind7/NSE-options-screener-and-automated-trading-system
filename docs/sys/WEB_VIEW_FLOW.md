@@ -129,9 +129,11 @@ Responsible for managing backtest parameter configurations, caching heavy datase
 1. **Process-Level Isolation & GIL Bypass**:
    - Simulations run inside an independent OS process (`multiprocessing.Process` invoking `_simulation_worker_process`).
    - Completely avoids Python Global Interpreter Lock (GIL) thrashing, guaranteeing that the web server event loop, WebSocket telemetry, and chart rendering remain fully responsive.
-2. **Lossless Parquet Dataset Caching**:
-   - Caches parsed Polars DataFrames (`cached_equity_df`, `cached_options_df`) for the selected date.
-   - Re-running simulations with modified parameters on the same date executes in **$< 1\text{ second}$** by skipping disk reads.
+2. **Lossless Parquet Dataset & Persistent Fixed-Slot Disk Caching ([`web/sim_disk_cache.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/sim_disk_cache.py))**:
+   - Caches parsed Polars DataFrames (`cached_equity_df`, `cached_options_df`) once per session worker process.
+   - Persists per-`(date, mode, track_name, config_hash)` simulation results for both `paper` and `paper_delayed` inside append-only fixed-slot binary files (`cache/simulations/<YYYY-MM-DD>.dat`, 256-byte standardized header + fixed `SLOT_BYTES` NUL-padded zlib payload frames) indexed by `<YYYY-MM-DD>.idx.json`.
+   - Partial cache hits (running a subset of cached tracks, or modifying parameters on a subset of tracks) reuse every unchanged `(mode, track)` from disk and run `ColumnarSimEngine` only for missed or **Cold Run** items (`cold_run_modes`: `Cold: Paper` / `Cold: Paper Delayed` checkboxes in Simulation Lab overwrite matching slots safely in place without corrupting surrounding records).
+   - Heavy per-trade candle arrays (`underlying_candles`, `option_candles`) are omitted from disk records and initial runs; charts lazy-load via `/api/chart/candles`.
 3. **Batch Mode Queue Orchestration**:
    - Supports queuing multiple simulation dates or parameter configurations.
    - Jobs execute sequentially via process queues.

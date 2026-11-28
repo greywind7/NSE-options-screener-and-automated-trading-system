@@ -21,7 +21,7 @@ class MarketDataListener(FeedHandler):
         poll_interval: float = 1.0,
         manifest_path: str = None,
         filtered_csv: str = None,
-        debug_log: str = "logs/debug.log",
+        debug_log: str = "logs/exec_logs/debug.log",
         enable_socket: bool = True,
         max_stream_contracts: int = 1800,
         silent: bool = False,
