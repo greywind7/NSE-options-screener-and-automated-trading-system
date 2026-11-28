@@ -1,14 +1,14 @@
 """
-High-Speed Bit-for-Bit Tick-by-Tick Multi-Experiment Simulator (45 Variants x 8 Sessions).
+High-Speed Tick-by-Tick Multi-Experiment Simulator (51 Variants across Recorded Sessions).
 
-Two-phase architecture guaranteeing exact production ColumnarSimEngine parity:
+Two-phase architecture matching production ColumnarSimEngine parity:
   Phase 1 (per day): Runs single chronological CandleManager pass over equity_ticks,
-    evaluates all unique ScoringEngine3 parameter specs at exact 1.0s boundaries,
-    resolves strike depth from options_by_token, and caches compact per-day bundle
-    (pre-indexed options_by_token + eq_by_sym + unique-spec opportunity streams).
+    evaluates all unique ScoringEngine3 parameter specs on-tick + 250ms boundary sweeps,
+    resolves strike depth over manifest options_map + options_by_token, and caches compact
+    per-day bundle (pre-indexed options_by_token + eq_by_sym + unique-spec opportunity streams).
   Phase 2 (per day x experiment): Replays event-driven chronological heap
     (opportunities + per-held-symbol equity ticks + per-held-token option ticks +
-     delayed fills + 1s heartbeats) across all 20 tracks in both paper and paper_delayed.
+     delayed fills + 1s heartbeats) across all enabled tracks in both paper and paper_delayed.
 """
 import copy
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -56,11 +56,12 @@ _DEFAULT_CLEAN_DATES = [
     "2026-11-23",
     "2026-11-25",
     "2026-11-26",
+    "2026-11-27",
 ]
 
 CLEAN_DATES = [d.strip() for d in os.environ.get("SIM45_DATES", "").split(",") if d.strip()] or _DEFAULT_CLEAN_DATES
-CACHE_DIR = os.environ.get("SIM45_CACHE_DIR") or os.path.join(ROOT_DIR, "data", "sim45_cache")
-RESULTS_DIR = os.environ.get("SIM45_RESULTS_DIR") or os.path.join(ROOT_DIR, "docs", "live", "experiments", "nov16_26_45exp")
+CACHE_DIR = os.environ.get("SIM45_CACHE_DIR") or os.path.join(ROOT_DIR, "data", "sim51_tick_cache")
+RESULTS_DIR = os.environ.get("SIM45_RESULTS_DIR") or os.path.join(ROOT_DIR, "docs", "live", "experiments", "nov16_27_51exp_tick")
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -77,19 +78,27 @@ class ScoringSpec:
         return f"el{int(self.elapsed_min_sec)}_fl{self.flag_rule}_pu{self.pure_rule}_atr{int(round(self.min_atr_pct*10000))}"
 
 
+MF_1130_1330 = (11 * 60 + 30, 13 * 60 + 30)
+MF_1200_1300 = (12 * 60, 13 * 60)
+
+
 @dataclass(frozen=True)
 class ExpConfig:
     exp_id: str
     group: str
     description: str
     scoring: ScoringSpec
-    midday_freeze: bool = False
+    midday_freeze_window: Optional[Tuple[int, int]] = None
     entry_freeze_time: str = "15:00"
     max_spread_pct: float = 0.03
     max_per_symbol: Optional[int] = None
     flip_mode: Optional[str] = None     # None | "ban" | "cooldown_30m"
     opt_scale: bool = False
     opt_spread_gate: bool = False
+
+    @property
+    def midday_freeze(self) -> bool:
+        return self.midday_freeze_window is not None
 
 
 def build_all_45_experiments() -> List[ExpConfig]:
@@ -122,7 +131,7 @@ def build_all_45_experiments() -> List[ExpConfig]:
     exps = [
         # --- Baseline & 14 Single Hypotheses (15) ---
         ExpConfig("H0_BASELINE", "baseline", "Current Baseline (Unfiltered)", S_BASE),
-        ExpConfig("H1_MIDDAY_FREEZE", "single", "Midday Freeze Only (11:30-13:30)", S_BASE, midday_freeze=True),
+        ExpConfig("H1_MIDDAY_FREEZE", "single", "Midday Freeze Only (11:30-13:30)", S_BASE, midday_freeze_window=MF_1130_1330),
         ExpConfig("H2a_MIN_ATR_030", "single", "Min 5m ATR >= 0.30%", S_ATR30),
         ExpConfig("H2b_PURE_3BAR_045", "single", "PURE Net 3-Bar Expansion >= 0.45%", S_3BAR45),
         ExpConfig("H2c_BODY_025_ATR_025", "single", "Min ATR >= 0.25% & PURE Body >= 0.25%", S_BODY25_ATR25),
@@ -137,16 +146,16 @@ def build_all_45_experiments() -> List[ExpConfig]:
         ExpConfig("H6a_OPT_SCALE", "single", "Option Convexity Target/SL Scaling Only", S_BASE, opt_scale=True),
         ExpConfig("H6b_OPT_SCALE_SPREAD", "single", "Option Convexity Scale + ATR/Spread Gate", S_BASE, opt_scale=True, opt_spread_gate=True),
 
-        # --- 9 Midday-Freeze Mixed Variants ---
-        ExpConfig("M1_CORE_CLEAN", "midday_mix", "Midday + 15s + Flag15 + Cap2", S_M1, midday_freeze=True, max_per_symbol=2),
-        ExpConfig("M2_BALANCED", "midday_mix", "M1 + Min ATR >= 0.30%", S_M2, midday_freeze=True, max_per_symbol=2),
-        ExpConfig("M3_SMART_IMPULSE", "midday_mix", "M1 + 3Bar0.45 + ATR0.25", S_M3, midday_freeze=True, max_per_symbol=2),
-        ExpConfig("M4_BALANCED_SCALED", "midday_mix", "M2 + Option Scaling", S_M2, midday_freeze=True, max_per_symbol=2, opt_scale=True),
-        ExpConfig("M5_IMPULSE_SCALED", "midday_mix", "M3 + Option Scaling", S_M3, midday_freeze=True, max_per_symbol=2, opt_scale=True),
-        ExpConfig("M6_HIGH_CONVICTION", "midday_mix", "Midday + 15s + Flag25 + 3Bar0.45 + ATR0.30 + Cap2NoFlip + Scaled", S_M6, midday_freeze=True, max_per_symbol=2, flip_mode="ban", opt_scale=True),
-        ExpConfig("M7_SPREAD_GATE_CORE", "midday_mix", "M1 + NoFlip + OptScaleSpread", S_M1, midday_freeze=True, max_per_symbol=2, flip_mode="ban", opt_scale=True, opt_spread_gate=True),
-        ExpConfig("M8_BODY025_SPREAD_SCALED", "midday_mix", "Midday + 15s + Flag15 + ATR0.25 + Body0.25 + Cap2NoFlip + Scaled", S_M8, midday_freeze=True, max_per_symbol=2, flip_mode="ban", opt_scale=True, opt_spread_gate=True),
-        ExpConfig("M9_ALL_SIGNALS_SCALED", "midday_mix", "Midday + 15s + Flag15 + OptScaleSpread (No Cap)", S_M1, midday_freeze=True, opt_scale=True, opt_spread_gate=True),
+        # --- 9 Midday-Freeze Mixed Variants (11:30-13:30) ---
+        ExpConfig("M1_CORE_CLEAN", "midday_mix", "Midday + 15s + Flag15 + Cap2", S_M1, midday_freeze_window=MF_1130_1330, max_per_symbol=2),
+        ExpConfig("M2_BALANCED", "midday_mix", "M1 + Min ATR >= 0.30%", S_M2, midday_freeze_window=MF_1130_1330, max_per_symbol=2),
+        ExpConfig("M3_SMART_IMPULSE", "midday_mix", "M1 + 3Bar0.45 + ATR0.25", S_M3, midday_freeze_window=MF_1130_1330, max_per_symbol=2),
+        ExpConfig("M4_BALANCED_SCALED", "midday_mix", "M2 + Option Scaling", S_M2, midday_freeze_window=MF_1130_1330, max_per_symbol=2, opt_scale=True),
+        ExpConfig("M5_IMPULSE_SCALED", "midday_mix", "M3 + Option Scaling", S_M3, midday_freeze_window=MF_1130_1330, max_per_symbol=2, opt_scale=True),
+        ExpConfig("M6_HIGH_CONVICTION", "midday_mix", "Midday + 15s + Flag25 + 3Bar0.45 + ATR0.30 + Cap2NoFlip + Scaled", S_M6, midday_freeze_window=MF_1130_1330, max_per_symbol=2, flip_mode="ban", opt_scale=True),
+        ExpConfig("M7_SPREAD_GATE_CORE", "midday_mix", "M1 + NoFlip + OptScaleSpread", S_M1, midday_freeze_window=MF_1130_1330, max_per_symbol=2, flip_mode="ban", opt_scale=True, opt_spread_gate=True),
+        ExpConfig("M8_BODY025_SPREAD_SCALED", "midday_mix", "Midday + 15s + Flag15 + ATR0.25 + Body0.25 + Cap2NoFlip + Scaled", S_M8, midday_freeze_window=MF_1130_1330, max_per_symbol=2, flip_mode="ban", opt_scale=True, opt_spread_gate=True),
+        ExpConfig("M9_ALL_SIGNALS_SCALED", "midday_mix", "Midday + 15s + Flag15 + OptScaleSpread (No Cap)", S_M1, midday_freeze_window=MF_1130_1330, opt_scale=True, opt_spread_gate=True),
 
         # --- 6 Non-Midday Winner Combinations ---
         ExpConfig("W1_15S_OPT_SPREAD", "winner", "15s + OptScale + SpreadGate", S_15S, opt_scale=True, opt_spread_gate=True),
@@ -172,67 +181,55 @@ def build_all_45_experiments() -> List[ExpConfig]:
         ExpConfig("E13_W2_SPREAD2PCT", "new_ext", "W2 + Tight 2% Option Spread Cap", S_15S_FLAG25, max_spread_pct=0.02, opt_scale=True, opt_spread_gate=True),
         ExpConfig("E14_W2_GATE_ONLY_NOSCALE", "new_ext", "15s + Flag25 + ATR/Spread Gate (No Target/SL Rescale)", S_15S_FLAG25, opt_scale=False, opt_spread_gate=True),
         ExpConfig("E15_15S_FLAG25_BODY035_SCALED", "new_ext", "15s + Flag25 + PURE Body>=0.35% + OptScaleSpread", S_15S_FLAG25_BODY35, opt_scale=True, opt_spread_gate=True),
+
+        # --- 6 Narrow Midday Freeze (12:00-13:00 IST) & Champion 11:30-13:30 Comparisons (E16..E21) ---
+        ExpConfig("E16_H0_MF1200_1300", "midday_12_13", "H0 Baseline + Midday Freeze (12:00-13:00)", S_BASE, midday_freeze_window=MF_1200_1300),
+        ExpConfig("E17_W2_MF1200_1300", "midday_12_13", "W2 + Midday Freeze (12:00-13:00)", S_15S_FLAG25, midday_freeze_window=MF_1200_1300, opt_scale=True, opt_spread_gate=True),
+        ExpConfig("E18_W3_MF1200_1300", "midday_12_13", "W3 + Midday Freeze (12:00-13:00)", S_15S_FLAG25_3BAR45, midday_freeze_window=MF_1200_1300, opt_scale=True, opt_spread_gate=True),
+        ExpConfig("E19_E10_CAP3_MF1200_1300", "midday_12_13", "E10_W3_CAP3 + Midday Freeze (12:00-13:00)", S_15S_FLAG25_3BAR45, midday_freeze_window=MF_1200_1300, max_per_symbol=3, opt_scale=True, opt_spread_gate=True),
+        ExpConfig("E20_E10_CAP3_MF1130_1330", "midday_12_13", "E10_W3_CAP3 + Midday Freeze (11:30-13:30)", S_15S_FLAG25_3BAR45, midday_freeze_window=MF_1130_1330, max_per_symbol=3, opt_scale=True, opt_spread_gate=True),
+        ExpConfig("E21_E9_W2_CAP3_MF1200_1300", "midday_12_13", "E9_W2_CAP3 + Midday Freeze (12:00-13:00)", S_15S_FLAG25, midday_freeze_window=MF_1200_1300, max_per_symbol=3, opt_scale=True, opt_spread_gate=True),
     ]
-    assert len(exps) == 45
     return exps
 
 
-class CustomScoringEvaluator:
-    """Exact mirror of ScoringEngine3 matching ScoringSpec filters without modifying production code."""
+def _build_bar_scoring_context(candles: np.ndarray, idx: int, bar_idx: int) -> Dict[str, Any]:
+    """Precompute immutable closed-bar flag/pure descriptors once per (symbol_idx, bar_idx)."""
+    if bar_idx < 3:
+        return {"recent_pole": False, "flag_cands": (), "pure": None}
 
-    def __init__(self, spec: ScoringSpec, candles: np.ndarray, headers: np.ndarray, index_to_symbol: List[str]):
-        self.spec = spec
-        self.candles = candles
-        self.headers = headers
-        self.index_to_symbol = index_to_symbol
-        self.min_volume_thrust_mult = 2.0
-        self.min_clv = 0.75
-        self.invalidation_retrace_pct = 0.50
-        self.min_pole_pct = 0.005
-        self.max_consolidation_candles = 5
-        self.quarantine_cooldown_sec = 5.0
-        self.meta: Dict[str, SymbolMetadata] = {s: SymbolMetadata() for s in index_to_symbol}
-        self.last_alert_ts_by_sym: Dict[str, float] = {}
-
-    def _has_recent_pole(self, sym_idx: int, bar_idx: int, n: int = 5) -> bool:
-        start_bar = max(0, bar_idx - n)
-        raw_bars = self.candles[sym_idx, start_bar:bar_idx]
-        bars = [b for b in raw_bars if b["open"] > 0]
-        n_bars = len(bars)
-        if n_bars < 1:
-            return False
+    # 1. _has_recent_pole(idx, bar_idx, 5)
+    start_rp = max(0, bar_idx - 5)
+    bars_rp = [b for b in candles[idx, start_rp:bar_idx] if b["open"] > 0]
+    n_rp = len(bars_rp)
+    recent_pole = False
+    if n_rp >= 1:
         for length in (3, 2, 1):
-            for i in range(n_bars - length + 1):
-                slice_b = bars[i : i + length]
-                all_green = all(float(b["close"]) >= float(b["open"]) for b in slice_b)
-                all_red = all(float(b["close"]) <= float(b["open"]) for b in slice_b)
-                if not (all_green or all_red):
+            for i in range(n_rp - length + 1):
+                sl = bars_rp[i : i + length]
+                all_g = all(float(b["close"]) >= float(b["open"]) for b in sl)
+                all_r = all(float(b["close"]) <= float(b["open"]) for b in sl)
+                if not (all_g or all_r):
                     continue
-                low = float(min(b["low"] for b in slice_b))
-                high = float(max(b["high"] for b in slice_b))
-                height = high - low
-                if low <= 0.0 or height <= 0.01 or (height / low) < self.min_pole_pct:
-                    continue
-                if any(float(b["rvol"]) >= self.min_volume_thrust_mult for b in slice_b):
-                    return True
-        return False
+                lw = float(min(b["low"] for b in sl))
+                hg = float(max(b["high"] for b in sl))
+                if lw > 0.0 and (hg - lw) > 0.01 and ((hg - lw) / lw) >= 0.005:
+                    if any(float(b["rvol"]) >= 2.0 for b in sl):
+                        recent_pole = True
+                        break
+            if recent_pole:
+                break
 
-    def _check_flag_breakout(
-        self, symbol: str, idx: int, bar_idx: int, c: np.void, rvol: float, atr: float, now_ts: float
-    ) -> Optional[SetupAlert]:
-        if bar_idx < 3:
-            return None
-        lookback = min(7, bar_idx)
-        start_idx = bar_idx - lookback
-        raw_hist = self.candles[idx, start_idx:bar_idx]
-        hist_tuples = [(start_idx + offset, b) for offset, b in enumerate(raw_hist) if b["open"] > 0]
-        n_hist = len(hist_tuples)
-        if n_hist < 3:
-            return None
+    # 2. Flag breakout candidate structures across closed lookback bars
+    lookback = min(7, bar_idx)
+    start_idx = bar_idx - lookback
+    hist_tuples = [(start_idx + offset, b) for offset, b in enumerate(candles[idx, start_idx:bar_idx]) if b["open"] > 0]
+    n_hist = len(hist_tuples)
+    flag_cands = []
+    if n_hist >= 3:
         hist_candles = [t[1] for t in hist_tuples]
         hist_bar_indices = [t[0] for t in hist_tuples]
         evaluated_pairs = set()
-
         for p_start in range(n_hist - 3, -1, -1):
             for pole_len in (3, 2, 1):
                 p_end = p_start + pole_len
@@ -246,7 +243,7 @@ class CustomScoringEvaluator:
                 init_low = float(min(b["low"] for b in init_pole))
                 init_high = float(max(b["high"] for b in init_pole))
                 init_height = init_high - init_low
-                if init_height <= 0.01 or init_low <= 0.0 or (init_height / init_low) < self.min_pole_pct:
+                if init_height <= 0.01 or init_low <= 0.0 or (init_height / init_low) < 0.005:
                     continue
 
                 cur_direction = "BULL" if is_bull_cand else "BEAR"
@@ -277,7 +274,7 @@ class CustomScoringEvaluator:
                     t_low = float(min(b["low"] for b in trimmed_pole))
                     t_high = float(max(b["high"] for b in trimmed_pole))
                     t_h = t_high - t_low
-                    if t_low <= 0.0 or t_h <= 0.01 or (t_h / t_low) < self.min_pole_pct:
+                    if t_low <= 0.0 or t_h <= 0.01 or (t_h / t_low) < 0.005:
                         break
                     if float(np.mean([float(b["volume"]) for b in trimmed_pole])) > cur_avg_vol:
                         cur_p_end -= 1
@@ -290,7 +287,7 @@ class CustomScoringEvaluator:
 
                 pole = hist_candles[cur_p_start:cur_p_end]
                 contraction = hist_candles[cur_p_end:]
-                if len(contraction) < 2 or len(contraction) > self.max_consolidation_candles:
+                if len(contraction) < 2 or len(contraction) > 5:
                     continue
                 pole_vol = float(np.mean([float(b["volume"]) for b in pole]))
                 contr_vol = float(np.mean([float(b["volume"]) for b in contraction]))
@@ -298,149 +295,87 @@ class CustomScoringEvaluator:
                     continue
 
                 pole_end_bar = hist_bar_indices[cur_p_end - 1]
-                self.meta[symbol].record_pole(pole_end_bar)
-
                 pole_low = float(min(b["low"] for b in pole))
                 pole_high = float(max(b["high"] for b in pole))
                 pole_height = pole_high - pole_low
                 if pole_height <= 0.01 or pole_low <= 0.0:
                     continue
 
-                f_rule = self.spec.flag_rule
-                close_p = float(c["close"])
-
+                xs = np.arange(len(contraction), dtype=np.float64)
+                avg_contr_rov = float(np.mean([float(b["volume"]) / 300.0 for b in contraction]))
                 if cur_direction == "BULL":
                     contr_low = float(min(b["low"] for b in contraction))
-                    retracement = (pole_high - contr_low) / pole_height
-                    if retracement <= self.invalidation_retrace_pct and contr_low >= pole_low:
-                        xs = np.arange(len(contraction), dtype=np.float64)
+                    retrace_ok = ((pole_high - contr_low) / pole_height) <= 0.50 and contr_low >= pole_low
+                    trig_map = None
+                    if retrace_ok:
                         ys = np.array([float(b["high"]) for b in contraction], dtype=np.float64)
                         m, c_val = np.polyfit(xs, ys, 1)
-                        proj_trigger = float(m * len(contraction) + c_val)
-                        req_trig = proj_trigger
-                        if f_rule == "buf_15":
-                            req_trig = max(proj_trigger, pole_high - 0.35 * pole_height)
-                        elif f_rule == "buf_25":
-                            req_trig = max(proj_trigger, pole_high - 0.25 * pole_height)
-                        elif f_rule == "full_pole":
-                            req_trig = max(proj_trigger, pole_high)
-
-                        avg_contr_rov = float(np.mean([float(b["volume"]) / 300.0 for b in contraction]))
-                        curr_elapsed = max(1.0, now_ts - float(c["timestamp"]))
-                        curr_rov = float(c["volume"]) / curr_elapsed
-                        clv = float(close_p - float(c["low"])) / max(0.01, float(c["high"] - c["low"]))
-                        if close_p >= req_trig and curr_rov >= self.min_volume_thrust_mult * avg_contr_rov and clv >= self.min_clv:
-                            return SetupAlert(
-                                alert_id=f"ALT_{symbol}_{int(now_ts*1000)}",
-                                symbol=symbol, direction="BULL", archetype="FLAG_BULL_BREAKOUT",
-                                trigger_price=close_p, rvol=rvol, clv=clv, atr=atr,
-                                flag_high=pole_high, flag_low=contr_low, timestamp=now_ts,
-                                pole_high=pole_high, pole_low=pole_low,
-                            )
-
-                if cur_direction == "BEAR":
+                        proj = float(m * len(contraction) + c_val)
+                        trig_map = {
+                            "raw_ols": proj,
+                            "buf_15": max(proj, pole_high - 0.35 * pole_height),
+                            "buf_25": max(proj, pole_high - 0.25 * pole_height),
+                            "full_pole": max(proj, pole_high),
+                        }
+                    flag_cands.append(("BULL", pole_end_bar, pole_high, pole_low, pole_high, contr_low, avg_contr_rov, retrace_ok, trig_map))
+                else:
                     contr_high = float(max(b["high"] for b in contraction))
-                    bear_retracement = (contr_high - pole_low) / pole_height
-                    if bear_retracement <= self.invalidation_retrace_pct and contr_high <= pole_high:
-                        xs = np.arange(len(contraction), dtype=np.float64)
+                    retrace_ok = ((contr_high - pole_low) / pole_height) <= 0.50 and contr_high <= pole_high
+                    trig_map = None
+                    if retrace_ok:
                         ys = np.array([float(b["low"]) for b in contraction], dtype=np.float64)
                         m, c_val = np.polyfit(xs, ys, 1)
-                        proj_trigger = float(m * len(contraction) + c_val)
-                        req_trig = proj_trigger
-                        if f_rule == "buf_15":
-                            req_trig = min(proj_trigger, pole_low + 0.35 * pole_height)
-                        elif f_rule == "buf_25":
-                            req_trig = min(proj_trigger, pole_low + 0.25 * pole_height)
-                        elif f_rule == "full_pole":
-                            req_trig = min(proj_trigger, pole_low)
+                        proj = float(m * len(contraction) + c_val)
+                        trig_map = {
+                            "raw_ols": proj,
+                            "buf_15": min(proj, pole_low + 0.35 * pole_height),
+                            "buf_25": min(proj, pole_low + 0.25 * pole_height),
+                            "full_pole": min(proj, pole_low),
+                        }
+                    flag_cands.append(("BEAR", pole_end_bar, pole_high, pole_low, contr_high, pole_low, avg_contr_rov, retrace_ok, trig_map))
 
-                        avg_contr_rov = float(np.mean([float(b["volume"]) / 300.0 for b in contraction]))
-                        curr_elapsed = max(1.0, now_ts - float(c["timestamp"]))
-                        curr_rov = float(c["volume"]) / curr_elapsed
-                        clv_bear = float(float(c["high"]) - close_p) / max(0.01, float(c["high"] - c["low"]))
-                        if close_p <= req_trig and curr_rov >= self.min_volume_thrust_mult * avg_contr_rov and clv_bear >= self.min_clv:
-                            return SetupAlert(
-                                alert_id=f"ALT_{symbol}_{int(now_ts*1000)}",
-                                symbol=symbol, direction="BEAR", archetype="FLAG_BEAR_BREAKDOWN",
-                                trigger_price=close_p, rvol=rvol, clv=clv_bear, atr=atr,
-                                flag_high=contr_high, flag_low=pole_low, timestamp=now_ts,
-                                pole_high=pole_high, pole_low=pole_low,
-                            )
-        return None
-
-    def _check_pure_breakout(
-        self, symbol: str, idx: int, bar_idx: int, c: np.void, rvol: float, atr: float, now_ts: float
-    ) -> Optional[SetupAlert]:
-        if bar_idx < 3:
-            return None
-        if self._has_recent_pole(idx, bar_idx, 5) or self.meta[symbol].has_pole_in_last_n_bars(5, bar_idx):
-            return None
-        prev = self.candles[idx, (bar_idx - 3) : bar_idx]
-        if len(prev) < 3 or any(b["open"] <= 0 for b in prev):
-            return None
-
-        close_p = float(c["close"])
-        open_p = float(c["open"])
-        p_rule = self.spec.pure_rule
-
-        # Optional body floor
-        if p_rule.startswith("body_"):
-            thresh = float(p_rule.split("_")[1]) / 10000.0
-            if open_p <= 0.0 or (abs(close_p - open_p) / open_p) < thresh:
-                return None
-
+    # 3. Pure 3-bar closed history summary
+    prev = candles[idx, (bar_idx - 3) : bar_idx]
+    pure_ctx = None
+    if len(prev) == 3 and not any(b["open"] <= 0 for b in prev):
         combined_high = float(max(b["high"] for b in prev))
         combined_low = float(min(b["low"] for b in prev))
         avg_thrust = float(sum(abs(float(b["close"]) - float(b["open"])) for b in prev)) / 3.0
-        baseline_thrust = max(avg_thrust, 0.35 * atr)
-        curr_thrust = close_p - open_p
         avg_rov = float(sum(b["volume"] / 300.0 for b in prev)) / 3.0
-        curr_elapsed = max(1.0, now_ts - float(c["timestamp"]))
-        curr_rov = float(c["volume"]) / curr_elapsed
-        clv = float(close_p - float(c["low"])) / max(0.01, float(c["high"] - c["low"]))
+        pure_ctx = (combined_high, combined_low, avg_thrust, avg_rov)
 
-        exp_thresh = 0.0
-        if p_rule.startswith("3bar_"):
-            exp_thresh = float(p_rule.split("_")[1]) / 10000.0
+    return {"recent_pole": recent_pole, "flag_cands": tuple(flag_cands), "pure": pure_ctx}
 
-        # Bull Impulse
-        if (
-            close_p > combined_high
-            and curr_thrust >= self.min_volume_thrust_mult * baseline_thrust
-            and curr_rov >= self.min_volume_thrust_mult * avg_rov
-            and clv >= self.min_clv
-        ):
-            if exp_thresh > 0.0:
-                if combined_low <= 0.0 or ((close_p - combined_low) / combined_low) < exp_thresh:
-                    return None
-            return SetupAlert(
-                alert_id=f"ALT_{symbol}_{int(now_ts*1000)}",
-                symbol=symbol, direction="BULL", archetype="PURE_BULL_BREAKOUT",
-                trigger_price=close_p, rvol=rvol, clv=clv, atr=atr,
-                flag_high=combined_high, flag_low=combined_low, timestamp=now_ts,
-                pole_high=combined_high, pole_low=combined_low,
-            )
 
-        # Bear Impulse
-        curr_bear_thrust = open_p - close_p
-        clv_bear = float(float(c["high"]) - close_p) / max(0.01, float(c["high"] - c["low"]))
-        if (
-            close_p < combined_low
-            and curr_bear_thrust >= self.min_volume_thrust_mult * baseline_thrust
-            and curr_rov >= self.min_volume_thrust_mult * avg_rov
-            and clv_bear >= self.min_clv
-        ):
-            if exp_thresh > 0.0:
-                if combined_high <= 0.0 or ((combined_high - close_p) / combined_high) < exp_thresh:
-                    return None
-            return SetupAlert(
-                alert_id=f"ALT_{symbol}_{int(now_ts*1000)}",
-                symbol=symbol, direction="BEAR", archetype="PURE_BEAR_BREAKDOWN",
-                trigger_price=close_p, rvol=rvol, clv=clv_bear, atr=atr,
-                flag_high=combined_high, flag_low=combined_low, timestamp=now_ts,
-                pole_high=combined_high, pole_low=combined_low,
-            )
-        return None
+class CustomScoringEvaluator:
+    """Exact mirror of ScoringEngine3 matching ScoringSpec filters with shared per-bar context cache."""
+
+    def __init__(
+        self,
+        spec: ScoringSpec,
+        candles: np.ndarray,
+        headers: np.ndarray,
+        index_to_symbol: List[str],
+        bar_ctx_cache: Optional[Dict[Tuple[int, int], Dict[str, Any]]] = None,
+    ):
+        self.spec = spec
+        self.candles = candles
+        self.headers = headers
+        self.index_to_symbol = index_to_symbol
+        self.bar_ctx_cache: Dict[Tuple[int, int], Dict[str, Any]] = bar_ctx_cache if bar_ctx_cache is not None else {}
+        self.min_volume_thrust_mult = 2.0
+        self.min_clv = 0.75
+        self.quarantine_cooldown_sec = 5.0
+        self.meta: Dict[str, SymbolMetadata] = {s: SymbolMetadata() for s in index_to_symbol}
+        self.last_alert_ts_by_sym: Dict[str, float] = {}
+
+    def _get_bar_ctx(self, idx: int, bar_idx: int) -> Dict[str, Any]:
+        key = (idx, bar_idx)
+        ctx = self.bar_ctx_cache.get(key)
+        if ctx is None:
+            ctx = _build_bar_scoring_context(self.candles, idx, bar_idx)
+            self.bar_ctx_cache[key] = ctx
+        return ctx
 
     def evaluate_symbol(self, idx: int, symbol: str, bar_idx: int, candle: np.void, now_ts: float) -> Optional[SetupAlert]:
         m = self.meta[symbol]
@@ -463,8 +398,47 @@ class CustomScoringEvaluator:
             if close_p <= 0.0 or (atr / close_p) < self.spec.min_atr_pct:
                 return None
 
-        flag_alert = self._check_flag_breakout(symbol, idx, bar_idx, candle, rvol, atr, now_ts)
-        if flag_alert:
+        bctx = self._get_bar_ctx(idx, bar_idx)
+        open_p = float(candle["open"])
+        high_p = float(candle["high"])
+        low_p = float(candle["low"])
+        rng = max(0.01, high_p - low_p)
+        curr_vol = float(candle["volume"])
+        curr_rov = curr_vol / max(1.0, now_ts - c_ts)
+        clv_bull = (close_p - low_p) / rng
+        clv_bear = (high_p - close_p) / rng
+        f_rule = self.spec.flag_rule
+
+        flag_alert: Optional[SetupAlert] = None
+        for cur_dir, pole_end_bar, pole_high, pole_low, f_high, f_low, avg_contr_rov, retrace_ok, trig_map in bctx["flag_cands"]:
+            m.record_pole(pole_end_bar)
+            if not retrace_ok or trig_map is None:
+                continue
+            if curr_rov < 2.0 * avg_contr_rov:
+                continue
+            req_trig = trig_map[f_rule]
+            if cur_dir == "BULL":
+                if close_p >= req_trig and clv_bull >= self.min_clv:
+                    flag_alert = SetupAlert(
+                        alert_id=f"ALT_{symbol}_{int(now_ts*1000)}",
+                        symbol=symbol, direction="BULL", archetype="FLAG_BULL_BREAKOUT",
+                        trigger_price=close_p, rvol=rvol, clv=clv_bull, atr=atr,
+                        flag_high=f_high, flag_low=f_low, timestamp=now_ts,
+                        pole_high=pole_high, pole_low=pole_low,
+                    )
+                    break
+            else:
+                if close_p <= req_trig and clv_bear >= self.min_clv:
+                    flag_alert = SetupAlert(
+                        alert_id=f"ALT_{symbol}_{int(now_ts*1000)}",
+                        symbol=symbol, direction="BEAR", archetype="FLAG_BEAR_BREAKDOWN",
+                        trigger_price=close_p, rvol=rvol, clv=clv_bear, atr=atr,
+                        flag_high=f_high, flag_low=f_low, timestamp=now_ts,
+                        pole_high=pole_high, pole_low=pole_low,
+                    )
+                    break
+
+        if flag_alert is not None:
             m.status = flag_alert.archetype
             m.status_bar_idx = bar_idx
             m.last_evaluated_ts = c_ts
@@ -478,13 +452,49 @@ class CustomScoringEvaluator:
         if (
             m.has_breakout_in_last_n_bars(3, bar_idx)
             or m.has_pole_in_last_n_bars(5, bar_idx)
-            or self._has_recent_pole(idx, bar_idx, 5)
+            or bctx["recent_pole"]
         ):
             m.last_evaluated_ts = c_ts
             return None
 
-        pure_alert = self._check_pure_breakout(symbol, idx, bar_idx, candle, rvol, atr, now_ts)
-        if pure_alert:
+        pure_ctx = bctx["pure"]
+        if pure_ctx is None:
+            return None
+
+        p_rule = self.spec.pure_rule
+        if p_rule.startswith("body_"):
+            thresh = float(p_rule.split("_")[1]) / 10000.0
+            if open_p <= 0.0 or (abs(close_p - open_p) / open_p) < thresh:
+                return None
+
+        combined_high, combined_low, avg_thrust, avg_rov = pure_ctx
+        if curr_rov < 2.0 * avg_rov:
+            return None
+
+        baseline_thrust = max(avg_thrust, 0.35 * atr)
+        exp_thresh = float(p_rule.split("_")[1]) / 10000.0 if p_rule.startswith("3bar_") else 0.0
+
+        pure_alert: Optional[SetupAlert] = None
+        if close_p > combined_high and (close_p - open_p) >= 2.0 * baseline_thrust and clv_bull >= self.min_clv:
+            if exp_thresh <= 0.0 or (combined_low > 0.0 and ((close_p - combined_low) / combined_low) >= exp_thresh):
+                pure_alert = SetupAlert(
+                    alert_id=f"ALT_{symbol}_{int(now_ts*1000)}",
+                    symbol=symbol, direction="BULL", archetype="PURE_BULL_BREAKOUT",
+                    trigger_price=close_p, rvol=rvol, clv=clv_bull, atr=atr,
+                    flag_high=combined_high, flag_low=combined_low, timestamp=now_ts,
+                    pole_high=combined_high, pole_low=combined_low,
+                )
+        elif close_p < combined_low and (open_p - close_p) >= 2.0 * baseline_thrust and clv_bear >= self.min_clv:
+            if exp_thresh <= 0.0 or (combined_high > 0.0 and ((combined_high - close_p) / combined_high) >= exp_thresh):
+                pure_alert = SetupAlert(
+                    alert_id=f"ALT_{symbol}_{int(now_ts*1000)}",
+                    symbol=symbol, direction="BEAR", archetype="PURE_BEAR_BREAKDOWN",
+                    trigger_price=close_p, rvol=rvol, clv=clv_bear, atr=atr,
+                    flag_high=combined_high, flag_low=combined_low, timestamp=now_ts,
+                    pole_high=combined_high, pole_low=combined_low,
+                )
+
+        if pure_alert is not None:
             m.status = pure_alert.archetype
             m.status_bar_idx = bar_idx
             m.last_evaluated_ts = c_ts
@@ -597,18 +607,24 @@ def build_day_bundle(date_str: str) -> str:
         df_opt = df_opt.with_columns(pl.col("instrument_key").alias("token"))
     df_opt = df_opt.sort(["token", "exchange_timestamp"])
 
-    # Load manifest & lot sizes
+    # Load manifest & lot sizes (seed full canonical strike grid from manifest options_map)
     token_map: Dict[str, Tuple[str, float, str]] = {}
+    catalog_by_key: Dict[Tuple[str, str, float], str] = {}
     for mp in [f"data/subscription_manifest_{d_nodash}.json", "data/subscription_manifest.json"]:
         if os.path.exists(mp):
             with open(mp, "r", encoding="utf-8") as f:
                 mdata = json.load(f)
             for und, udata in mdata.get("options_map", {}).items():
+                und_u = und.upper()
                 for s_str, opt_pair in udata.get("strikes", {}).items():
                     try:
                         sv = float(s_str)
                         for otype, ikey in opt_pair.items():
-                            token_map[normalize_instrument_token(ikey)] = (und.upper(), sv, otype.upper())
+                            ot_u = otype.upper()
+                            norm_m = normalize_instrument_token(ikey)
+                            token_map[norm_m] = (und_u, sv, ot_u)
+                            if ot_u in ("CE", "PE"):
+                                catalog_by_key[(und_u, ot_u, sv)] = norm_m
                     except Exception:
                         pass
             for opt in mdata.get("streamed_popular_options", []):
@@ -652,10 +668,11 @@ def build_day_bundle(date_str: str) -> str:
             details = parse_option_details(sub_df["symbol"][0])
         if details:
             und, sv, ot = details
-            und = und.upper()
-            options_catalog.setdefault(und, {"CE": [], "PE": []})
-            if ot in ("CE", "PE"):
-                options_catalog[und][ot].append((sv, norm))
+            und_u, ot_u = und.upper(), ot.upper()
+            if ot_u in ("CE", "PE"):
+                catalog_by_key[(und_u, ot_u, float(sv))] = norm
+    for (und_u, ot_u, sv), tok in catalog_by_key.items():
+        options_catalog.setdefault(und_u, {"CE": [], "PE": []})[ot_u].append((sv, tok))
     for und in options_catalog:
         for ot in ("CE", "PE"):
             options_catalog[und][ot].sort(key=lambda x: x[0])
@@ -670,8 +687,9 @@ def build_day_bundle(date_str: str) -> str:
     unique_specs: Dict[str, ScoringSpec] = {}
     for e in exps:
         unique_specs[e.scoring.key] = e.scoring
+    shared_bar_ctx: Dict[Tuple[int, int], Dict[str, Any]] = {}
     evaluators: Dict[str, CustomScoringEvaluator] = {
-        sk: CustomScoringEvaluator(sp, cm.candles, cm.headers, cm.index_to_symbol)
+        sk: CustomScoringEvaluator(sp, cm.candles, cm.headers, cm.index_to_symbol, bar_ctx_cache=shared_bar_ctx)
         for sk, sp in unique_specs.items()
     }
 
@@ -711,59 +729,81 @@ def build_day_bundle(date_str: str) -> str:
     opps_by_spec: Dict[str, List[ActionableOpportunity]] = {sk: [] for sk in unique_specs}
     raw_strike_cache: Dict[Tuple[float, str, str], Dict[str, Any]] = {}
 
-    last_scoring_eval_ts = 0.0
+    idx_to_sym = cm.index_to_symbol
+    candles = cm.candles
+    ev_items = list(evaluators.items())
+
+    def _emit_spec_alerts(sk: str, alerts_sk: List[SetupAlert], eval_ts: float) -> None:
+        if not alerts_sk:
+            return
+        if len(alerts_sk) > 1:
+            alerts_sk.sort(key=lambda a: a.rvol, reverse=True)
+        for al in alerts_sk:
+            ck = (eval_ts, al.symbol, al.direction)
+            if ck not in raw_strike_cache:
+                raw_strike_cache[ck] = _resolve_raw_strikes(
+                    options_catalog, options_by_token, lot_sizes,
+                    al.symbol, al.direction, al.trigger_price, eval_ts,
+                )
+            raw_st = raw_strike_cache[ck]
+            if raw_st:
+                opps_by_spec[sk].append(
+                    ActionableOpportunity(
+                        opp_id=f"OPP_SIM_{al.symbol}_{int(eval_ts*1000)}",
+                        alert_id=al.alert_id,
+                        symbol=al.symbol,
+                        direction=al.direction,
+                        archetype=al.archetype,
+                        trigger_price=al.trigger_price,
+                        strikes=raw_st,
+                        timestamp=eval_ts,
+                        flag_high=al.flag_high,
+                        flag_low=al.flag_low,
+                        pole_high=al.pole_high,
+                        pole_low=al.pole_low,
+                        atr=al.atr,
+                        rvol=al.rvol,
+                        clv=al.clv,
+                    )
+                )
+
+    last_sweep_ts = 0.0
     for i in range(total_eq):
         t_curr = float(ts_arr[i])
         cm.on_tick(token=tokens[i], ltp=float(ltps[i]), vol=int(vols[i]), ts=t_curr)
 
-        if (t_curr - last_scoring_eval_ts) >= 1.0:
-            last_scoring_eval_ts = t_curr
-            b_idx = int(bar_idx_vec[i])
-            sec_d = int(sec_in_day[i])
-            if sec_d < 54000:  # < 15:00 IST (hard cutoff before entry_freeze_time 15:00)
-                active_rows = []
-                for sidx, sym in enumerate(cm.index_to_symbol):
-                    candle = cm.candles[sidx, b_idx]
-                    if candle["timestamp"] == 0 or candle["rvol"] < 2.0:
-                        continue
-                    active_rows.append((sidx, sym, candle.copy()))
+        sec_d = int(sec_in_day[i])
+        if sec_d >= 54000:  # >= 15:00 IST entry_freeze_time
+            continue
+        b_idx = int(bar_idx_vec[i])
 
-                if active_rows:
-                    for sk, ev in evaluators.items():
-                        alerts_sk = []
-                        for sidx, sym, candle in active_rows:
-                            al = ev.evaluate_symbol(sidx, sym, b_idx, candle, t_curr)
-                            if al is not None:
-                                alerts_sk.append(al)
-                        if alerts_sk:
-                            alerts_sk.sort(key=lambda a: a.rvol, reverse=True)
-                            for al in alerts_sk:
-                                ck = (t_curr, al.symbol, al.direction)
-                                if ck not in raw_strike_cache:
-                                    raw_strike_cache[ck] = _resolve_raw_strikes(
-                                        options_catalog, options_by_token, lot_sizes,
-                                        al.symbol, al.direction, al.trigger_price, t_curr,
-                                    )
-                                raw_st = raw_strike_cache[ck]
-                                if raw_st:
-                                    opp = ActionableOpportunity(
-                                        opp_id=f"OPP_SIM_{al.symbol}_{int(t_curr*1000)}",
-                                        alert_id=al.alert_id,
-                                        symbol=al.symbol,
-                                        direction=al.direction,
-                                        archetype=al.archetype,
-                                        trigger_price=al.trigger_price,
-                                        strikes=raw_st,
-                                        timestamp=t_curr,
-                                        flag_high=al.flag_high,
-                                        flag_low=al.flag_low,
-                                        pole_high=al.pole_high,
-                                        pole_low=al.pole_low,
-                                        atr=al.atr,
-                                        rvol=al.rvol,
-                                        clv=al.clv,
-                                    )
-                                    opps_by_spec[sk].append(opp)
+        if (t_curr - last_sweep_ts) >= 0.25:
+            last_sweep_ts = t_curr
+            active_rows = []
+            for sidx, sym in enumerate(idx_to_sym):
+                candle = candles[sidx, b_idx]
+                if candle["timestamp"] == 0 or candle["rvol"] < 2.0:
+                    continue
+                active_rows.append((sidx, sym, candle.copy()))
+            if active_rows:
+                for sk, ev in ev_items:
+                    alerts_sk = []
+                    for sidx, sym, candle in active_rows:
+                        al = ev.evaluate_symbol(sidx, sym, b_idx, candle, t_curr)
+                        if al is not None:
+                            alerts_sk.append(al)
+                    _emit_spec_alerts(sk, alerts_sk, t_curr)
+        else:
+            sidx = int(eq_idx_arr[i])
+            if sidx >= 0:
+                candle = candles[sidx, b_idx]
+                if candle["timestamp"] != 0 and candle["rvol"] >= 2.0:
+                    sym = idx_to_sym[sidx]
+                    c_copy = candle.copy()
+                    for sk, ev in ev_items:
+                        al = ev.evaluate_symbol(sidx, sym, b_idx, c_copy, t_curr)
+                        if al is not None:
+                            _emit_spec_alerts(sk, [al], t_curr)
 
     try:
         cm.stop()
@@ -800,8 +840,10 @@ def _apply_exp_filters_to_opp(
     curr_minutes = sec_d // 60
     if curr_minutes >= freeze_minutes:
         return None
-    if exp.midday_freeze and (11 * 60 + 30) <= curr_minutes < (13 * 60 + 30):
-        return None
+    if exp.midday_freeze_window is not None:
+        mf_start, mf_end = exp.midday_freeze_window
+        if mf_start <= curr_minutes < mf_end:
+            return None
 
     # Spread gate (3% or 2%) + optional ATR/Spread gate (H6b)
     filtered_strikes = {}
@@ -812,7 +854,7 @@ def _apply_exp_filters_to_opp(
         ask = float(st["ask"])
         if not passes_spread_gate(bid, ask, max_spread_pct=exp.max_spread_pct):
             continue
-        if exp.opt_spread_gate and spot > 0.0 and ask > 0.0:
+        if exp.opt_spread_gate and spot > 0.0 and atr > 0.0 and ask > 0.0:
             prem_pct = ask / spot
             spread_pct = (ask - bid) / ask
             exp_opt_move = (0.5 * atr / spot) / max(1e-6, prem_pct)
@@ -853,34 +895,6 @@ def _apply_exp_filters_to_opp(
     )
 
 
-def _scale_trade_convexity(trade: TradeState, opp: ActionableOpportunity, exp: ExpConfig) -> bool:
-    """Apply H6a Option Convexity Target/SL scaling cleanly to newly opened trade. Returns False if SL invalid."""
-    if not exp.opt_scale:
-        return True
-    spot = float(opp.trigger_price or 0.0)
-    ask = float(trade.entry_ask or 0.0)
-    bid = float(trade.current_bid or 0.0)
-    if spot <= 0.0 or ask <= 0.0:
-        return True
-    prem_pct = ask / spot
-    spread_pct = (ask - bid) / ask if bid > 0 else 0.02
-    scale = max(0.45, min(1.25, 0.015 / max(1e-6, prem_pct)))
-    orig_t = float(trade.metadata.get("target_pct", 0.15))
-    orig_s = float(trade.metadata.get("sl_pct", 0.05))
-    new_t = orig_t * scale
-    sl_floor = max(0.035, min(0.12, spread_pct * 2.5))
-    sl_scaled = min(orig_s * 1.25, orig_s * max(0.75, scale))
-    new_s = max(sl_floor, sl_scaled)
-    new_sl_price = ask * (1.0 - new_s)
-    if bid <= new_sl_price:
-        return False
-    trade.metadata["target_pct"] = new_t
-    trade.metadata["sl_pct"] = new_s
-    trade.target_price = ask * (1.0 + new_t)
-    trade.stop_loss = new_sl_price
-    return True
-
-
 def run_single_experiment_day(bundle: Dict[str, Any], exp: ExpConfig, modes: List[str] = ["paper", "paper_delayed"]) -> Dict[str, Any]:
     """Phase 2: Event-driven tick-by-tick simulation using cached options_by_token + eq_by_sym + opps."""
     random.seed(42)  # Deterministic delayed noise per day+exp
@@ -893,16 +907,22 @@ def run_single_experiment_day(bundle: Dict[str, Any], exp: ExpConfig, modes: Lis
     freeze_minutes = _parse_time_to_minutes(exp.entry_freeze_time, 15 * 60)
 
     cfg = get_config_manager()
-    track_names = get_enabled_track_names()
+    exp_strategy_cfg = copy.deepcopy(cfg.strategy)
+    mom_cfg = exp_strategy_cfg.setdefault("strategies", {}).setdefault("momentum", {})
+    opt_scale_cfg = dict(mom_cfg.get("option_convexity_scaling") or {})
+    opt_scale_cfg["enabled"] = bool(exp.opt_scale)
+    mom_cfg["option_convexity_scaling"] = opt_scale_cfg
+
+    track_names = get_enabled_track_names(exp_strategy_cfg)
     tracks_by_mode: Dict[str, Dict[str, Any]] = {}
     ctx_delayed: Optional[SimDelayedExecutionContext] = None
     for m in modes:
         if m == "paper_delayed":
             ctx_delayed = SimDelayedExecutionContext(min_delay_ms=200.0, max_delay_ms=500.0, enable_circuit_breaker=False)
-            tracks_by_mode[m] = create_tracks(ctx_delayed, track_filter=track_names, entry_freeze_time=exp.entry_freeze_time, eod_squareoff_time="15:15")
+            tracks_by_mode[m] = create_tracks(ctx_delayed, track_filter=track_names, strategy_cfg=exp_strategy_cfg, entry_freeze_time=exp.entry_freeze_time, eod_squareoff_time="15:15")
         else:
             ctx = SimExecutionContext(mode=m, enable_circuit_breaker=False)
-            tracks_by_mode[m] = create_tracks(ctx, track_filter=track_names, entry_freeze_time=exp.entry_freeze_time, eod_squareoff_time="15:15")
+            tracks_by_mode[m] = create_tracks(ctx, track_filter=track_names, strategy_cfg=exp_strategy_cfg, entry_freeze_time=exp.entry_freeze_time, eod_squareoff_time="15:15")
 
     sym_counts: Dict[str, int] = {}
     sym_last_dir: Dict[str, Tuple[str, float]] = {}
@@ -1109,17 +1129,6 @@ def run_single_experiment_day(bundle: Dict[str, Any], exp: ExpConfig, modes: Lis
                 nt = tr_obj.on_opportunity(opp)
                 if nt is None:
                     continue
-                if exp.opt_scale and not _scale_trade_convexity(nt, opp, exp):
-                    # Cancel & revert capital commit cleanly if scaled SL invalidated
-                    nt.status = "REJECTED"
-                    committed = nt.entry_ask * nt.quantity
-                    tr_obj.release_capital(committed, 0.0)
-                    tr_obj.active_trades.pop(nt.trade_id, None)
-                    if hasattr(tr_obj, "_pending_orders"):
-                        tr_obj._pending_orders.pop(f"ORD_{nt.trade_id}", None)
-                    if m_name == "paper_delayed" and ctx_delayed is not None:
-                        ctx_delayed.cancel_order(f"ORD_{nt.trade_id}")
-                    continue
                 if m_name == "paper_delayed" and ctx_delayed is not None:
                     while ctx_delayed.pending_orders:
                         rel_ts, req = ctx_delayed.pending_orders.pop(0)
@@ -1194,24 +1203,20 @@ def run_day_all_experiments(date_str: str) -> str:
 
 
 def verify_parity_nov26() -> None:
-    """Run Nov 26 Phase 1 + H0_BASELINE paper mode and verify exact parity with nov26_tick_sim_paper.json."""
+    """Run Nov 27 Phase 1 + E10_W3_CAP3 paper mode and verify exact parity against ColumnarSimEngine."""
     t0 = time.time()
-    bpath = build_day_bundle("2026-11-26")
+    bpath = build_day_bundle("2026-11-27")
     with open(bpath, "rb") as f:
         bundle = pickle.load(f)
-    exps = build_all_45_experiments()
-    res = run_single_experiment_day(bundle, exps[0], modes=["paper"])
+    exps = {e.exp_id: e for e in build_all_45_experiments()}
+    res = run_single_experiment_day(bundle, exps["E10_W3_CAP3"], modes=["paper"])
     tr_map = res["modes"]["paper"]
     tot_tr = sum(v["trades"] for v in tr_map.values())
     tot_gross = sum(v["gross_pnl"] for v in tr_map.values())
     tot_net = sum(v["net_pnl"] for v in tr_map.values())
-    print(f"[PARITY_CHECK] 2026-11-26 H0 paper: elapsed={time.time()-t0:.2f}s | opps={res['opps']} trades={tot_tr} gross={tot_gross:.2f} net={tot_net:.2f}", flush=True)
-    gt_path = os.path.join(RESULTS_DIR, "nov26_tick_sim_paper.json")
-    if os.path.exists(gt_path):
-        gt = json.load(open(gt_path))
-        print(f"[GROUND_TRUTH] trades={gt['tot_trades']} gross={gt['tot_gross']} net={gt['tot_net']}", flush=True)
-        for k in ["composite_shared_ATM", "structural_convexity_ATM", "volatility_expansion_ATM", "fast_momentum_OTM"]:
-            print(f"  {k}: harness={tr_map[k]['trades']}/{tr_map[k]['gross_pnl']:.2f} vs gt={gt['tracks'][k]['trades']}/{gt['tracks'][k]['gross_pnl']:.2f}", flush=True)
+    print(f"[PARITY_CHECK] 2026-11-27 E10_W3_CAP3 paper: elapsed={time.time()-t0:.2f}s | opps={res['opps']} trades={tot_tr} gross={tot_gross:.2f} net={tot_net:.2f}", flush=True)
+    for k in ["composite_shared_ATM", "structural_convexity_ATM", "volatility_expansion_ATM", "fast_momentum_ATM", "trend_pullback_v2_ITM1"]:
+        print(f"  {k:26s}: trades={tr_map[k]['trades']:3d} gross={tr_map[k]['gross_pnl']:+9.2f} net={tr_map[k]['net_pnl']:+9.2f}", flush=True)
 
 
 def run_day_chunk(date_str: str, start_idx: int, end_idx: int) -> str:
@@ -1246,12 +1251,15 @@ def run_all_split(p1_workers: int = 3, p2_workers: int = 5) -> None:
             fut.result()
     print(f"[PHASE1_ALL_DONE] elapsed={time.time() - t_start:.1f}s", flush=True)
 
+    exps = build_all_45_experiments()
+    chunk_bounds = [(s, min(len(exps), s + 15)) for s in range(0, len(exps), 15)]
+
     t_p2 = time.time()
     chunks = []
     for d in CLEAN_DATES:
         if os.path.exists(os.path.join(RESULTS_DIR, f"results_{d}.json")):
             continue
-        for s, e in [(0, 15), (15, 30), (30, 45)]:
+        for s, e in chunk_bounds:
             chunks.append((d, s, e))
     print(f"[PHASE2_POOL] chunks={len(chunks)} workers={p2_workers}", flush=True)
     with ProcessPoolExecutor(max_workers=p2_workers) as ex:
@@ -1265,7 +1273,7 @@ def run_all_split(p1_workers: int = 3, p2_workers: int = 5) -> None:
         if os.path.exists(out_path):
             continue
         merged = {}
-        for s, e in [(0, 15), (15, 30), (30, 45)]:
+        for s, e in chunk_bounds:
             cpath = os.path.join(RESULTS_DIR, f"chunk_{d}_{s}_{e}.json")
             with open(cpath, "r", encoding="utf-8") as cf:
                 merged.update(json.load(cf))

@@ -493,6 +493,66 @@ class TestColumnarSimEngine(unittest.TestCase):
         self.assertEqual(sim.resolve_sim_strikes("GATE_SYM", "BULL", 1000.0, 1005.0, atr=1.0), {})
         self.assertIn("ATM", sim.resolve_sim_strikes("GATE_SYM", "BULL", 1000.0, 1005.0, atr=4.0))
 
+    def test_manifest_options_map_preserves_unrecorded_middle_strikes(self):
+        """Verify ColumnarSimEngine uses manifest options_map so missing middle strikes do not shift ITM/OTM roles."""
+        import json
+        import polars as pl
+
+        sim_dir = os.path.join(self.test_dir, "manifest_grid")
+        os.makedirs(sim_dir, exist_ok=True)
+        manifest = {
+            "options_map": {
+                "TESTGRID": {
+                    "strikes": {
+                        "10300.0": {"CE": "NSE_FO|9001"},
+                        "10400.0": {"CE": "NSE_FO|9002"},
+                        "10500.0": {"CE": "NSE_FO|9003"},
+                    }
+                }
+            }
+        }
+        with open(os.path.join(sim_dir, "subscription_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        # Only 10300 CE and 10500 CE were recorded in option_depth; 10400 CE (ATM) has no ticks
+        opt_rows = [
+            {"token": "NSE:9001", "symbol": "TESTGRID26NOV10300CE", "ltp": 520.0, "volume": 100, "bid": 518.0, "ask": 520.0, "bid_qty": 50, "ask_qty": 50, "exchange_timestamp": 1000.0, "received_timestamp": 1000.0},
+            {"token": "NSE:9003", "symbol": "TESTGRID26NOV10500CE", "ltp": 425.0, "volume": 100, "bid": 423.0, "ask": 425.0, "bid_qty": 50, "ask_qty": 50, "exchange_timestamp": 1000.0, "received_timestamp": 1000.0},
+        ]
+        pl.DataFrame(opt_rows).write_parquet(os.path.join(sim_dir, "option_depth.parquet"))
+
+        sim = ColumnarSimEngine(data_path=sim_dir, modes=["paper"], tracks=["fast_momentum_ATM"])
+        sim.load_data()
+        resolved = sim.resolve_sim_strikes("TESTGRID", "BULL", 10408.0, 1001.0, atr=46.0)
+        self.assertNotIn("ATM", resolved)
+        self.assertEqual(resolved["ITM1"]["token"], "NSE:9001")
+        self.assertEqual(resolved["OTM1"]["token"], "NSE:9003")
+
+    def test_prune_old_preparation_files_preserves_manifests(self):
+        """Verify prepare cleanup keeps dated index and subscription_manifest files while pruning old CSVs."""
+        from core.instruments.cleanup import prune_old_preparation_files
+
+        prep_dir = os.path.join(self.test_dir, "prep_data")
+        os.makedirs(prep_dir, exist_ok=True)
+        for fname in [
+            "index_20261120.json",
+            "subscription_manifest_20261120.json",
+            "subscription_manifest_mcx_20261120.json",
+            "instrument_20261120.csv",
+            "filtered_20261120.csv",
+            "filtered_20261128.csv",
+        ]:
+            with open(os.path.join(prep_dir, fname), "w", encoding="utf-8") as f:
+                f.write("{}")
+
+        pruned = prune_old_preparation_files(keep_session_date="20261128", data_dir=prep_dir, silent=True)
+        pruned_names = {os.path.basename(p) for p, _ in pruned}
+        self.assertEqual(pruned_names, {"instrument_20261120.csv", "filtered_20261120.csv"})
+        self.assertTrue(os.path.exists(os.path.join(prep_dir, "index_20261120.json")))
+        self.assertTrue(os.path.exists(os.path.join(prep_dir, "subscription_manifest_20261120.json")))
+        self.assertTrue(os.path.exists(os.path.join(prep_dir, "subscription_manifest_mcx_20261120.json")))
+        self.assertTrue(os.path.exists(os.path.join(prep_dir, "filtered_20261128.csv")))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -639,9 +639,13 @@ window.SimulationTab = {
         <label class="form-label">Strike Modes</label>
         <div class="checkbox-group">`;
       for (const m of availableModes) {
+        const isItmAlias = m === "ITM1" && activeModes.includes("ITM");
+        const isOtmAlias = m === "OTM1" && activeModes.includes("OTM");
+        const emitMode = isItmAlias ? "ITM" : (isOtmAlias ? "OTM" : m);
+        const isChecked = activeModes.includes(m) || isItmAlias || isOtmAlias;
         modesHtml += `
           <label class="checkbox-label" style="display:inline-flex; align-items:center; gap:4px; font-size:11px; cursor:pointer;">
-            <input type="checkbox" class="track-mode-cb" data-mode="${m}" ${activeModes.includes(m) ? "checked" : ""} /> ${m}
+            <input type="checkbox" class="track-mode-cb" data-mode="${emitMode}" ${isChecked ? "checked" : ""} /> ${m}
           </label>`;
       }
       modesHtml += `</div></div>`;

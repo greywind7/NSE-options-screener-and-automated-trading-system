@@ -4,6 +4,24 @@ Chronological log of all completed engineering tasks, refactors, fixes, and feat
 
 ---
 
+## 2026-11-28 — Live vs. Sim Tick-Level Parity Fixes, Manifest Preservation & 51-Experiment Re-Run
+
+- **Root-Cause Diagnosis & Parity Fixes (`Nov 27` Live vs. Sim Discrepancy)**:
+  - **Per-Tick Scoring Parity**: Replaced the `1.0s` Phase-1 evaluation throttle in [`simulation/columnar_sim_engine.py`](file:///Users/yorha/Documents/Trading%20Stuff/simulation/columnar_sim_engine.py) (`run_simulation()`) with per-tick single-symbol evaluation via `evaluate_universe(now_ts=..., symbol_indices=(sym_idx,))` plus `250ms` boundary sweeps in [`strategies/momentum/scoring_engine.py`](file:///Users/yorha/Documents/Trading%20Stuff/strategies/momentum/scoring_engine.py) (`ScoringEngine3`). Also moved the `status_bar_idx` guard ahead of SHM reads and skipped Seqlock `.copy()` retries when `not self.enable_zmq`.
+  - **Manifest Strike-Ladder Parity & Preservation**: Seeded `_manifest_catalog_map` from `subscription_manifest_YYYYMMDD.json` `options_map` in [`simulation/columnar_sim_engine.py`](file:///Users/yorha/Documents/Trading%20Stuff/simulation/columnar_sim_engine.py) (merging recorded `df_options` tokens on top so unrecorded middle strikes never shift ATM/ITM/OTM offsets), and removed manifest deletion from [`core/instruments/cleanup.py`](file:///Users/yorha/Documents/Trading%20Stuff/core/instruments/cleanup.py) (`prune_old_preparation_files`) alongside index immunity. Added parity regression tests in [`tests/simulation/test_columnar_sim_engine.py`](file:///Users/yorha/Documents/Trading%20Stuff/tests/simulation/test_columnar_sim_engine.py).
+  - **Measured Parity on `2026-11-27`**: `ColumnarSimEngine` converged to `+₹14,557.03/track` Paper (`-2.7%` vs Live `+₹14,965.37`, `8` tracks exact `₹0.00` diff) and `+₹11,965.41/track` Delayed (`+3.7%` vs Live `+₹11,539.19`).
+- **51-Experiment × 9-Day (`Nov 16–27`) Tick-Parity Batch Re-Run & `12:00–13:00` Midday Freeze Study**:
+  - Upgraded [`scripts/run_45_experiments.py`](file:///Users/yorha/Documents/Trading%20Stuff/scripts/run_45_experiments.py), [`scripts/analyze_45_results.py`](file:///Users/yorha/Documents/Trading%20Stuff/scripts/analyze_45_results.py), and [`scripts/generate_full_report_45.py`](file:///Users/yorha/Documents/Trading%20Stuff/scripts/generate_full_report_45.py) for `19` active tracks, tick-level scoring parity, shared `_build_bar_scoring_context()` cache, `E16–E21` (`12:00–13:00` vs `11:30–13:30` midday freeze configs), and native `create_tracks(..., strategy_cfg=...)` convexity scaling (removing double-scaling).
+  - Saved full results to [`docs/live/experiments/nov16_27_51exp_tick/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/experiments/nov16_27_51exp_tick) (preserving [`nov16_26_45exp/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/experiments/nov16_26_45exp)), updated [`SIMULATION_HYPOTHESIS_REPORT.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/SIMULATION_HYPOTHESIS_REPORT.md) and [`EXPERIMENT_E10_W3_CAP3_OOS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/EXPERIMENT_E10_W3_CAP3_OOS.md), confirming **`E10_W3_CAP3`** (`+₹2,564,818` P / `+₹2,187,811` D, `9/9` green, `₹0` P & `₹0` D MaxDD) remains superior and **`midday_freeze` (`12:00–13:00` and `11:30–13:30`) should stay disabled**.
+
+---
+
+## 2026-11-27 — Simulation Lab `ITM`/`OTM` Mode Checkbox Alias Fix
+
+- Fixed `renderBaseTracks()` in [`web/static/js/simulation_tab.js`](file:///Users/yorha/Documents/Trading%20Stuff/web/static/js/simulation_tab.js) so v1 base-track configs specifying `"ITM"` and `"OTM"` ([`config/tracks/default.json`](file:///Users/yorha/Documents/Trading%20Stuff/config/tracks/default.json), [`config/tracks/v1.json`](file:///Users/yorha/Documents/Trading%20Stuff/config/tracks/v1.json)) pre-check the `ITM1` / `OTM1` UI checkboxes while preserving exact `"ITM"` / `"OTM"` payload mode values (`fast_momentum_ITM`, `fast_momentum_OTM`, etc.).
+
+---
+
 ## 2026-11-26 — Batch Simulation Reports, Dual 1:1 Square Charts & Market Regime Analytics (`IMPROVEMENTS #2`)
 
 Completed all deliverables for Batch Simulation Analytics alongside additive UX refinements (`154/154` tests passing):

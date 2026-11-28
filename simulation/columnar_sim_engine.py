@@ -9,9 +9,11 @@ import argparse
 from dataclasses import dataclass, field
 import glob
 import heapq
+import inspect
 import math
 import os
 import random
+import re
 import shutil
 import sys
 import time
@@ -273,13 +275,18 @@ class ColumnarSimEngine:
         self.tracks_by_mode: Dict[str, Dict[str, Any]] = {}
 
     def _load_manifest_catalog(self) -> None:
-        """Load option contract metadata from subscription manifest or universe CSV."""
+        """Load option contract metadata and canonical strike ladder from subscription manifest."""
         manifest_candidates = [
             os.path.join(self.data_path, "subscription_manifest.json"),
             "data/subscription_manifest.json",
         ]
-        if self.session_date:
-            d_nodash = self.session_date.replace("-", "")
+        date_hint = self.session_date
+        if not date_hint and self.data_path:
+            m = re.search(r"(\d{4}-\d{2}-\d{2}|\d{8})", os.path.basename(os.path.normpath(self.data_path)))
+            if m:
+                date_hint = m.group(1)
+        if date_hint:
+            d_nodash = date_hint.replace("-", "")
             manifest_candidates.insert(0, f"data/subscription_manifest_{d_nodash}.json")
 
         m_path = None
@@ -289,20 +296,25 @@ class ColumnarSimEngine:
                 break
 
         token_map: Dict[str, Tuple[str, float, str]] = {}
+        manifest_catalog_map: Dict[Tuple[str, str, float], str] = {}
         if m_path:
             try:
                 import json
                 with open(m_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
-                # 1. From options_map
+                # 1. From options_map (preserves full canonical strike grid identically to RMSService)
                 for und, u_data in data.get("options_map", {}).items():
+                    und_u = und.upper()
                     for s_str, opt_pair in u_data.get("strikes", {}).items():
                         try:
                             s_val = float(s_str)
                             for otype, ikey in opt_pair.items():
+                                ot_u = otype.upper()
                                 norm = normalize_instrument_token(ikey)
-                                token_map[norm] = (und.upper(), s_val, otype.upper())
+                                token_map[norm] = (und_u, s_val, ot_u)
+                                if ot_u in ("CE", "PE"):
+                                    manifest_catalog_map[(und_u, ot_u, s_val)] = norm
                         except Exception:
                             pass
 
@@ -317,6 +329,7 @@ class ColumnarSimEngine:
                 print(f"[SIMULATION_ENGINE] Warning loading manifest {m_path}: {e}", file=sys.stderr)
 
         self.token_map = token_map
+        self._manifest_catalog_map = manifest_catalog_map
 
     def _load_lot_sizes(self) -> None:
         """Load lot sizes per underlying from filtered.csv."""
@@ -449,6 +462,9 @@ class ColumnarSimEngine:
             df = df.sort(["token", "exchange_timestamp"])
 
         partitions = df.partition_by("token", as_dict=True)
+        # Seed catalog from manifest options_map so missing/unrecorded middle strikes never shift ATM/ITM/OTM labels,
+        # while allowing recorded option tokens in df_options to override per-strike (e.g. synthetic tests).
+        catalog_by_key: Dict[Tuple[str, str, float], str] = dict(getattr(self, "_manifest_catalog_map", {}))
 
         for tok_tuple, sub_df in partitions.items():
             tok = tok_tuple[0] if isinstance(tok_tuple, tuple) else tok_tuple
@@ -481,11 +497,14 @@ class ColumnarSimEngine:
                     opt_details = parse_option_details(first_sym)
             if opt_details:
                 und, strike, otype = opt_details
-                und = und.upper()
-                if und not in self.options_catalog:
-                    self.options_catalog[und] = {"CE": [], "PE": []}
-                if otype in ("CE", "PE"):
-                    self.options_catalog[und][otype].append((strike, norm_token))
+                und_u = und.upper()
+                ot_u = otype.upper()
+                if ot_u in ("CE", "PE"):
+                    catalog_by_key[(und_u, ot_u, float(strike))] = norm_token
+
+        self.options_catalog = {}
+        for (und_u, ot_u, s_val), tok in catalog_by_key.items():
+            self.options_catalog.setdefault(und_u, {"CE": [], "PE": []})[ot_u].append((s_val, tok))
 
         # Sort strikes ascending in catalog
         for und in self.options_catalog:
@@ -919,6 +938,63 @@ class ColumnarSimEngine:
                     if had_closure:
                         _prune_open_state()
 
+        supports_subset_eval = "symbol_indices" in inspect.signature(scoring_eng.evaluate_universe).parameters
+
+        def _dispatch_alerts(alerts: List[SetupAlert], eval_ts: float, dt_curr: datetime) -> None:
+            nonlocal delay_seq
+            ist_date = dt_curr.strftime("%Y-%m-%d")
+            for alert in alerts:
+                cap_key = (ist_date, alert.symbol.upper())
+                if (
+                    self.max_alerts_per_symbol_per_day is not None
+                    and sym_daily_alert_counts.get(cap_key, 0) >= self.max_alerts_per_symbol_per_day
+                ):
+                    continue
+
+                resolved_strikes = self.resolve_sim_strikes(
+                    symbol=alert.symbol,
+                    direction=alert.direction,
+                    trigger_price=alert.trigger_price,
+                    timestamp=eval_ts,
+                    atr=float(getattr(alert, "atr", 0.0) or 0.0),
+                )
+                if not resolved_strikes:
+                    continue
+
+                sym_daily_alert_counts[cap_key] = sym_daily_alert_counts.get(cap_key, 0) + 1
+
+                opp = ActionableOpportunity(
+                    opp_id=f"OPP_SIM_{alert.symbol}_{int(eval_ts*1000)}",
+                    alert_id=alert.alert_id,
+                    symbol=alert.symbol,
+                    direction=alert.direction,
+                    archetype=alert.archetype,
+                    trigger_price=alert.trigger_price,
+                    strikes=resolved_strikes,
+                    timestamp=eval_ts,
+                    flag_high=alert.flag_high,
+                    flag_low=alert.flag_low,
+                    pole_high=getattr(alert, "pole_high", None),
+                    pole_low=getattr(alert, "pole_low", None),
+                    atr=alert.atr,
+                    rvol=alert.rvol,
+                    clv=alert.clv,
+                )
+
+                for m_name, track_dict in tracks_by_mode.items():
+                    for tr_name, track in track_dict.items():
+                        new_trade = track.on_opportunity(opp)
+                        if new_trade is None:
+                            continue
+                        if m_name == "paper_delayed" and ctx_delayed is not None:
+                            while ctx_delayed.pending_orders:
+                                rel_ts, req = ctx_delayed.pending_orders.pop(0)
+                                delay_seq += 1
+                                pending_delayed_meta[req.order_id] = (m_name, tr_name, track, new_trade)
+                                heapq.heappush(delayed_heap, (rel_ts, delay_seq, req))
+                        else:
+                            _register_filled_trade(m_name, tr_name, track, new_trade, eval_ts)
+
         for i in range(total_eq):
             t_curr = float(ts_arr[i])
             token = tokens[i]
@@ -965,69 +1041,38 @@ class ColumnarSimEngine:
             # 3. Flush events at exact t_curr (after equity LTP at t_curr is live)
             _flush_events(t_curr, inclusive=True)
 
-            # 4. Step B: Serialized Scoring Spin Evaluation (Evaluates whenever 1.0 simulated second elapses)
-            if (t_curr - last_scoring_eval_ts) >= 1.0:
-                last_scoring_eval_ts = t_curr
+            # 4. Step B: Tick-Accurate Scoring Evaluation
+            # Evaluate updated symbol immediately on tick (0ms breakout fidelity vs 200Hz live loop)
+            # plus 250ms periodic sweeps for time-only min_candle_elapsed_sec boundary crossings.
+            is_sweep = (t_curr - last_scoring_eval_ts) >= 0.25
+            should_tick_eval = False
+            if not is_sweep and supports_subset_eval and sym_idx is not None and sym_idx < len(scoring_eng.index_to_symbol):
+                bar_idx = int(candle_mgr.current_bar_idx[sym_idx])
+                if bar_idx >= 0:
+                    c_bar = candle_mgr.candles[sym_idx, bar_idx]
+                    c_ts = float(c_bar["timestamp"])
+                    m = scoring_eng.meta.get(canonical_sym)
+                    if (
+                        c_ts > 0.0
+                        and (m is None or (m.status_bar_idx != bar_idx and c_ts != m.last_evaluated_ts))
+                        and (self.min_candle_elapsed_sec <= 0.0 or (t_curr - c_ts) >= self.min_candle_elapsed_sec)
+                        and float(c_bar["rvol"]) >= scoring_eng.min_volume_thrust_mult
+                    ):
+                        should_tick_eval = True
+
+            if is_sweep or should_tick_eval:
                 dt_curr = datetime.fromtimestamp(t_curr, tz=IST)
                 curr_minutes = dt_curr.hour * 60 + dt_curr.minute
-
-                # Hard Entry Freeze Cutoff: no new trade setups generated after entry_freeze_time (default 15:00 IST)
+                if is_sweep:
+                    last_scoring_eval_ts = t_curr
                 if curr_minutes < self.entry_freeze_minutes:
-                    alerts = scoring_eng.evaluate_universe(now_ts=t_curr)
-                    ist_date = dt_curr.strftime("%Y-%m-%d")
-
-                    for alert in alerts:
-                        cap_key = (ist_date, alert.symbol.upper())
-                        if (
-                            self.max_alerts_per_symbol_per_day is not None
-                            and sym_daily_alert_counts.get(cap_key, 0) >= self.max_alerts_per_symbol_per_day
-                        ):
-                            continue
-
-                        resolved_strikes = self.resolve_sim_strikes(
-                            symbol=alert.symbol,
-                            direction=alert.direction,
-                            trigger_price=alert.trigger_price,
-                            timestamp=t_curr,
-                            atr=float(getattr(alert, "atr", 0.0) or 0.0),
-                        )
-                        if not resolved_strikes:
-                            continue
-
-                        sym_daily_alert_counts[cap_key] = sym_daily_alert_counts.get(cap_key, 0) + 1
-
-                        opp = ActionableOpportunity(
-                            opp_id=f"OPP_SIM_{alert.symbol}_{int(t_curr*1000)}",
-                            alert_id=alert.alert_id,
-                            symbol=alert.symbol,
-                            direction=alert.direction,
-                            archetype=alert.archetype,
-                            trigger_price=alert.trigger_price,
-                            strikes=resolved_strikes,
-                            timestamp=t_curr,
-                            flag_high=alert.flag_high,
-                            flag_low=alert.flag_low,
-                            pole_high=getattr(alert, "pole_high", None),
-                            pole_low=getattr(alert, "pole_low", None),
-                            atr=alert.atr,
-                            rvol=alert.rvol,
-                            clv=alert.clv,
-                        )
-
-                        # Dispatch to Active Mode Tracks
-                        for m_name, track_dict in tracks_by_mode.items():
-                            for tr_name, track in track_dict.items():
-                                new_trade = track.on_opportunity(opp)
-                                if new_trade is None:
-                                    continue
-                                if m_name == "paper_delayed" and ctx_delayed is not None:
-                                    while ctx_delayed.pending_orders:
-                                        rel_ts, req = ctx_delayed.pending_orders.pop(0)
-                                        delay_seq += 1
-                                        pending_delayed_meta[req.order_id] = (m_name, tr_name, track, new_trade)
-                                        heapq.heappush(delayed_heap, (rel_ts, delay_seq, req))
-                                else:
-                                    _register_filled_trade(m_name, tr_name, track, new_trade, t_curr)
+                    alerts = (
+                        scoring_eng.evaluate_universe(now_ts=t_curr)
+                        if is_sweep
+                        else scoring_eng.evaluate_universe(now_ts=t_curr, symbol_indices=(sym_idx,))
+                    )
+                    if alerts:
+                        _dispatch_alerts(alerts, t_curr, dt_curr)
 
         # Final EOD Auto Square-off for any remaining open positions
         last_ts = float(ts_arr[-1]) if total_eq > 0 else 0.0

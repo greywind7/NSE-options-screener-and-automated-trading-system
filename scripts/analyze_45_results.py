@@ -72,11 +72,15 @@ def load_all() -> Tuple[List[r45.ExpConfig], Dict[str, Dict[str, Any]]]:
 def summarize() -> None:
     exps, data = load_all()
 
-    # Check track presence
-    sample_tracks = sorted(list(data[DATES[0]][exps[0].exp_id]["modes"]["paper"].keys()))
+    # Check track presence dynamically (handles 19-track and legacy 20-track ensembles)
+    sample_tracks = set(data[DATES[0]][exps[0].exp_id]["modes"]["paper"].keys())
     active_tracks = [t for t in ALL_TRACKS if t in sample_tracks]
+    active_v1 = [t for t in V1_TRACKS if t in sample_tracks]
+    active_v2 = [t for t in V2_TRACKS if t in sample_tracks]
+    n_days = len(DATES)
+    n_exps = len(exps)
 
-    # Per-experiment aggregate across 8 days
+    # Per-experiment aggregate across active days
     exp_stats = []
     for e in exps:
         eid = e.exp_id
@@ -89,18 +93,18 @@ def summarize() -> None:
         p_gp = p_brok = p_net = 0.0
         d_gp = d_brok = d_net = 0.0
         p_v1 = p_v2 = d_v1 = d_v2 = 0.0
-        track_7d_p = {tr: [] for tr in ALL_TRACKS}
-        track_7d_d = {tr: [] for tr in ALL_TRACKS}
+        track_7d_p = {tr: [] for tr in active_tracks}
+        track_7d_d = {tr: [] for tr in active_tracks}
 
         for dt in DATES:
             pm = data[dt][eid]["modes"]["paper"]
             dm = data[dt][eid]["modes"]["paper_delayed"]
-            dp = sum(pm[t]["net_pnl"] for t in ALL_TRACKS)
-            dd_day = sum(dm[t]["net_pnl"] for t in ALL_TRACKS)
-            dv1p = sum(pm[t]["net_pnl"] for t in V1_TRACKS)
-            dv2p = sum(pm[t]["net_pnl"] for t in V2_TRACKS)
-            dv1d = sum(dm[t]["net_pnl"] for t in V1_TRACKS)
-            dv2d = sum(dm[t]["net_pnl"] for t in V2_TRACKS)
+            dp = sum(pm[t]["net_pnl"] for t in active_tracks)
+            dd_day = sum(dm[t]["net_pnl"] for t in active_tracks)
+            dv1p = sum(pm[t]["net_pnl"] for t in active_v1)
+            dv2p = sum(pm[t]["net_pnl"] for t in active_v2)
+            dv1d = sum(dm[t]["net_pnl"] for t in active_v1)
+            dv2d = sum(dm[t]["net_pnl"] for t in active_v2)
             p_daily.append(dp)
             d_daily.append(dd_day)
             p_v1_daily.append(dv1p)
@@ -111,7 +115,7 @@ def summarize() -> None:
             p_v2 += dv2p
             d_v1 += dv1d
             d_v2 += dv2d
-            for t in ALL_TRACKS:
+            for t in active_tracks:
                 tp = pm[t]
                 td = dm[t]
                 p_tr += tp["trades"]; p_w += tp["wins"]; p_be += tp["bes"]; p_l += tp["losses"]
@@ -121,9 +125,9 @@ def summarize() -> None:
                 track_7d_p[t].append(tp["net_pnl"])
                 track_7d_d[t].append(td["net_pnl"])
 
-        # Pruned 17t check dynamically later; also compute losing-3 excluded
+        # Exclude persistent losers dynamically if present
         losers3 = {"structural_convexity_ATM", "gamma_runner_OTM2", "delta_scalp_ITM2"}
-        keep17 = [t for t in ALL_TRACKS if t not in losers3]
+        keep17 = [t for t in active_tracks if t not in losers3]
         p_17 = sum(sum(track_7d_p[t]) for t in keep17)
         d_17 = sum(sum(track_7d_d[t]) for t in keep17)
 
@@ -149,27 +153,24 @@ def summarize() -> None:
         })
 
     exp_stats.sort(key=lambda x: x["p_net"], reverse=True)
-    print("=== TOP 25 LEADERBOARD (8 DAYS: NOV 16-26, TICK-BY-TICK) ===")
+    print(f"=== FULL LEADERBOARD ({n_days} DAYS: {DATES[0]}..{DATES[-1]}, TICK-BY-TICK | {n_exps} EXPS | {len(active_tracks)} TRACKS) ===")
     for idx, r in enumerate(exp_stats, 1):
         e = r["exp"]
-        slip = r["p_net"] - r["d_net"]
         ret_dd = r["p_net"] / r["p_dd"] if r["p_dd"] > 0 else float("inf")
         print(
             f"{idx:2d}. {e.exp_id:<32s} | opps={r['opps']:4d} tr={r['p_tr']:5d} WR={r['p_wr']:4.1f}% "
-            f"| P={r['p_net']:+10.0f} (DD={r['p_dd']:7.0f}, G={r['p_green']}/8, R/D={ret_dd:5.1f}) "
+            f"| P={r['p_net']:+10.0f} (DD={r['p_dd']:7.0f}, G={r['p_green']}/{n_days}, R/D={ret_dd:5.1f}) "
             f"| v1={r['p_v1']:+9.0f} v2={r['p_v2']:+9.0f} | D={r['d_net']:+10.0f} (DD={r['d_dd']:7.0f})"
         )
 
-    print("\n=== TRACK CONSISTENCY ACROSS ALL 45 EXPERIMENTS (8 DAYS) ===")
+    print(f"\n=== TRACK CONSISTENCY ACROSS ALL {n_exps} EXPERIMENTS ({n_days} DAYS) ===")
     tr_rows = []
-    for t in ALL_TRACKS:
+    for t in active_tracks:
         prof = "v1" if t in V1_TRACKS else "v2"
         p_tots = []
         d_tots = []
         p_dds = []
         p_greens = []
-        worst_day = 0.0
-        best_day = 0.0
         all_day_vals = []
         for r in exp_stats:
             arr_p = r["track_8d_p"][t]
@@ -198,9 +199,9 @@ def summarize() -> None:
     tr_rows.sort(key=lambda x: x["avg_p"], reverse=True)
     for idx, tr in enumerate(tr_rows, 1):
         print(
-            f"{idx:2d}. [{tr['prof']}] {tr['track']:<25s} | Pos={tr['pos_p']:2d}/45 (D:{tr['pos_d']:2d}/45) "
+            f"{idx:2d}. [{tr['prof']}] {tr['track']:<25s} | Pos={tr['pos_p']:2d}/{n_exps} (D:{tr['pos_d']:2d}/{n_exps}) "
             f"| AvgP={tr['avg_p']:+9.0f} AvgD={tr['avg_d']:+9.0f} | Min..Max={tr['min_p']:+8.0f}..{tr['max_p']:+8.0f} "
-            f"| Grn={tr['avg_green']:.2f}/8 | AvgDD={tr['avg_dd']:7.0f} MaxDD={tr['max_dd']:7.0f} | DayMin..Max={tr['worst_day']:+7.0f}..{tr['best_day']:+7.0f}"
+            f"| Grn={tr['avg_green']:.2f}/{n_days} | AvgDD={tr['avg_dd']:7.0f} MaxDD={tr['max_dd']:7.0f} | DayMin..Max={tr['worst_day']:+7.0f}..{tr['best_day']:+7.0f}"
         )
 
 

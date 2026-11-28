@@ -546,24 +546,28 @@ class ScoringEngine3:
 
         return None
 
-    def evaluate_universe(self, now_ts: Optional[float] = None) -> List[SetupAlert]:
-        """Single spin-loop pass across 221 F&O equities (< 500 microseconds)."""
+    def evaluate_universe(
+        self, now_ts: Optional[float] = None, symbol_indices: Optional[Any] = None
+    ) -> List[SetupAlert]:
+        """Single spin-loop pass across monitored F&O equities (< 500 microseconds)."""
         now_ts = now_ts or time.time()
-        bar_idx, min_offset, sec_in_min = self._get_bar_index(now_ts)
-        elapsed_in_bar = min_offset * 60 + sec_in_min
+        bar_idx, _, _ = self._get_bar_index(now_ts)
         actionable: List[SetupAlert] = []
+        indices = symbol_indices if symbol_indices is not None else range(len(self.index_to_symbol))
 
-        for idx, symbol in enumerate(self.index_to_symbol):
+        for idx in indices:
+            symbol = self.index_to_symbol[idx]
             m = self.meta[symbol]
-            candle = self._read_candle_seqlock(idx, bar_idx)
+
+            # Fast Guard: Already triggered on this bar before reading SHM
+            if m.status is not None and m.status_bar_idx == bar_idx:
+                continue
+
+            candle = self._read_candle_seqlock(idx, bar_idx) if self.enable_zmq else self.candles[idx, bar_idx]
 
             # Gate 1: No activity on this bar yet
             c_ts = float(candle["timestamp"])
             if c_ts == 0.0 or c_ts == m.last_evaluated_ts:
-                continue
-
-            # Gate 2: Already triggered on this bar
-            if m.status is not None and m.status_bar_idx == bar_idx:
                 continue
 
             # Gate 2b: Min elapsed seconds inside active candle before firing setup alerts
@@ -572,12 +576,13 @@ class ScoringEngine3:
 
             # Strict current-candle rVOL and ATR-14 from Shared Memory (computed by CandleManager)
             rvol = float(candle["rvol"])
-            raw_atr = float(candle["atr"])
-            atr = raw_atr if raw_atr > 0.0 else max(1.0, float(candle["high"] - candle["low"]))
 
             # Gate 3: Institutional rVOL Invariant (rVOL >= min_volume_thrust_mult)
             if rvol < self.min_volume_thrust_mult:
                 continue
+
+            raw_atr = float(candle["atr"])
+            atr = raw_atr if raw_atr > 0.0 else max(1.0, float(candle["high"] - candle["low"]))
 
             # Archetype 1: Bull / Bear Flag Breakout
             flag_alert = self._check_flag_breakout(symbol, idx, bar_idx, candle, rvol, atr, now_ts)
