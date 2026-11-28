@@ -25,9 +25,12 @@ from core.candles.shm_layout import (
     get_shm_views,
 )
 from core.common.ipc_schemas import SetupAlert
+from core.common.logging_utils import get_logger
 from core.common.symbol_utils import normalize_instrument_token
 from core.common.time_utils import IST
 from strategies.momentum.opportunity_pool import OpportunityPool
+
+logger = get_logger("SCORING_ENGINE_3_0")
 
 
 @dataclass
@@ -408,6 +411,7 @@ class ScoringEngine3:
                                 timestamp=now_ts,
                                 pole_high=pole_high,
                                 pole_low=pole_low,
+                                strategy_id="momentum",
                             )
 
                 # --- Bear Flag ---
@@ -451,6 +455,7 @@ class ScoringEngine3:
                                 timestamp=now_ts,
                                 pole_high=pole_high,
                                 pole_low=pole_low,
+                                strategy_id="momentum",
                             )
 
         return None
@@ -510,6 +515,7 @@ class ScoringEngine3:
                 timestamp=now_ts,
                 pole_high=combined_high,
                 pole_low=combined_low,
+                strategy_id="momentum",
             )
 
         # Bear Impulse
@@ -542,6 +548,7 @@ class ScoringEngine3:
                 timestamp=now_ts,
                 pole_high=combined_high,
                 pole_low=combined_low,
+                strategy_id="momentum",
             )
 
         return None
@@ -624,14 +631,14 @@ class ScoringEngine3:
     def run_spin_loop(self) -> None:
         """Continuous microsecond spin-loop with 5ms sleep yield."""
         self.running = True
-        print(f"[SCORING_ENGINE_3_0] Active | SHM: {self.shm_name} | 221 Universe symbols")
+        logger.info(f"Active | SHM: {self.shm_name} | 221 Universe symbols")
 
         while self.running:
             try:
                 self.evaluate_universe()
                 time.sleep(0.005)  # 5ms yield to prevent 100% single-thread core burnout
             except Exception as e:
-                print(f"[SCORING_ENGINE_3_0] Loop error: {e}", file=sys.stderr)
+                logger.error(f"Loop error: {e}")
 
     def stop(self) -> None:
         self.running = False
@@ -645,7 +652,7 @@ class ScoringEngine3:
                 self.pool.stop()
         except Exception:
             pass
-        print("[SCORING_ENGINE_3_0] Stopped cleanly.")
+        logger.info("Stopped cleanly.")
 
 
 def main():

@@ -314,16 +314,44 @@ The table below compares the performance of all 8 new `v2` tracks against the fu
 
 ---
 
-## 5. Track Management & Usage Guide
+## 5. Global Execution Calibration & Recovery Determinism
 
-### 5.1 Profile Directory (`config/tracks/` & `config/strategies.json`)
+### 5.1 Option Convexity & Spread-Aware Target/SL Scaling (`option_convexity_scaling`)
+
+Enabled globally via [`config/strategies.json`](file:///Users/yorha/Documents/Trading%20Stuff/config/strategies.json) (`strategies.momentum.option_convexity_scaling`) and computed on every entry in [`compute_convexity_scaled_targets()`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py#L16-L43), Option Convexity Scaling prevents fixed option percentages from choking wide-spread/low-premium contracts or under-scaling expensive high-delta contracts:
+
+- **Configuration Keys (`config/strategies.json`)**:
+  - `enabled`: `true`
+  - `reference_premium_pct`: `0.015` (1.5% of underlying spot price as baseline ATM premium ratio)
+  - `min_scale` / `max_scale`: `0.45` / `1.25` (bounded target scale factor)
+  - `sl_min_scale`: `0.75` (minimum SL scale factor before spread floor check)
+  - `sl_floor_min_pct` / `sl_floor_max_pct`: `0.035` / `0.12` (3.5% – 12.0% SL floor bounds)
+  - `sl_spread_mult`: `2.5` (multiple of live bid-ask spread for noise immunity)
+- **Scaling Equations** (given underlying `spot`, option `bid`, `ask`, and base track `target_pct`, `sl_pct`):
+  $$\text{prem\_pct} = \frac{\text{ask}}{\text{spot}}, \qquad \text{spread\_pct} = \frac{\text{ask} - \text{bid}}{\text{ask}}$$
+  $$\text{scale} = \operatorname{clip}\left(\frac{\text{reference\_premium\_pct}}{\max(10^{-6}, \text{prem\_pct})}, \; \text{min\_scale}, \; \text{max\_scale}\right)$$
+  $$\text{scaled\_target\_pct} = \text{target\_pct} \times \text{scale}$$
+  $$\text{sl\_floor} = \operatorname{clip}\left(\text{spread\_pct} \times \text{sl\_spread\_mult}, \; \text{sl\_floor\_min\_pct}, \; \text{sl\_floor\_max\_pct}\right)$$
+  $$\text{scaled\_sl\_pct} = \max\left(\text{sl\_floor}, \; \min\left(\text{sl\_pct} \times \text{max\_scale}, \; \text{sl\_pct} \times \max(\text{sl\_min\_scale}, \text{scale})\right)\right)$$
+- **Parity**: Executed identically across [`BaseTrack.on_opportunity()`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py) (Live/Paper/Delayed) and `ColumnarSimEngine`.
+
+### 5.2 Composite `origin_track`, `sub_track_rule` & Legacy Quarantine
+
+- Every [`TradeState`](file:///Users/yorha/Documents/Trading%20Stuff/common/interfaces.py) records both `origin_track` (specific sub-track name such as `fast_momentum_ITM`) and `sub_track_rule` (e.g., `FastMomentumTrack`) in `TRADE_ENTRY_SUBMITTED`, `TRADE_FILLED`, and `TRADE_EXIT` journal events.
+- During `--continue` crash recovery, [`CompositeTrack.add_recovered_trade()`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/composite_track.py) strictly validates `origin_track` against registered sub-tracks. Unattributed or ambiguous legacy trades are quarantined into `quarantined_legacy_trades.jsonl` inside the session directory rather than falling back to `sub_tracks[0]`.
+- Live Telemetry, Historical Review, and Trade Analysis Modals surface both `Origin / Rule` badges for full composite attribution.
+
+---
+
+## 6. Track Management & Usage Guide
+
+### 6.1 Profile Directory (`config/tracks/` & `config/strategies.json`)
 Track configurations are isolated in dedicated profile JSON files (`gamma_runner_OTM2` retired from active profiles on `2026-11-26`):
 - `config/tracks/v1.json`: The `12` baseline legacy tracks + composite tracks.
 - `config/tracks/v2.json`: The `7` active multi-regime tracks (`gamma_runner_OTM2` retired).
-- `config/tracks/default.json`: Active `19`-track ensemble combining `12 v1` + `7 v2` tracks.
-- `config/strategies.json` -> `option_convexity_scaling`: Globally scales per-trade `target_pct` (`scale = clip(0.015 / (ask / spot), 0.45, 1.25)`) and enforces spread-aware SL floors (`max(3.5%, min(12%, 2.5 * spread_pct))`) in [`BaseTrack.on_opportunity()`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py).
+- `config/tracks/default.json`: Active `19`-track ensemble combining `12 v1` + `7 v2` runnable tracks (`12 v1` + `7 v2`, plus 3 `composite_shared_*` ensembles depending on profile selection).
 
-### 5.2 Command Line Interface (`runner.py`)
+### 6.2 Command Line Interface (`runner.py`) & Admin Ops UI
 Run simulations or live trading with profile presets or individual tracks:
 
 ```bash

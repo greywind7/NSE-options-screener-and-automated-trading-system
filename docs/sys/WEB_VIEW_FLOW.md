@@ -269,6 +269,31 @@ sequenceDiagram
 
 ---
 
+### 5.5 Collapsible Hamburger Vertical Sidebar & Origin Track Attribution
+- Primary navigation uses a sticky **vertical left sidebar** (`#sidebar-nav`) toggled via the header hamburger button (`#sidebar-toggle-btn`, persisted in `localStorage`) separating *Trading & Analytics* (`Live Telemetry`, `Live Alerts`, `Historical Review`, `Simulation Lab`, `Simulation Results`) and *Operations & Telemetry* (`Admin Ops`, `System Health`), freeing horizontal space for wide analytics/log tables.
+- Live Telemetry, Historical Review, and Trade Analysis Modals include an **Origin / Rule** column displaying `origin_track` (sub-track inside composites) and `sub_track_rule`.
+
+---
+
+### 5.6 Tab 5: Admin Ops Control Plane (`AdminService`)
+Organized via a clean **Operational Activity Dropdown** (`premarket`, `core`, `strategy`, `risk`, `postmarket`, `processes`, `all`):
+1. **Pre-Market Preparation Pipeline**: Individual step checkboxes (`master`, `filter`, `volume`, `manifest`, `cleanup`), exchange (`NSE`/`MCX`), date, volume days, and `--reset`.
+2. **Core Infrastructure Tier**: Individual selection/stop for `feed_handler` (`ws`/`mock`), `candle_manager`, `quotes_broker`, decoupled `rms_service`, and `market_recorder` (`--debug`).
+3. **Strategy & Granular Mode-Track Launcher**: Independent per-mode checkboxes (`paper`, `paper_delayed`, `live`) listing only runnable moneyness-suffixed and composite tracks (no bare parameter templates), `--continue` state recovery, capital/EOD overrides, automatic Core RMS attachment, and typed `CONFIRM LIVE` guard for live mode.
+4. **Risk, Auth & Emergency**: Per-mode Freeze/Unfreeze (`all`, `live`, `paper`, `paper_delayed`, `sim`), Emergency `STOP LIVE` (`STOP LIVE` typed confirmation), REST fallback toggle, Groww position reconciliation, and Groww TOTP daily token refresh (masked secret status only).
+5. **Post-Market Housekeeping**: Selectable actions (`archive`, `prune`, `rotate_logs`, `report`) with keep-raw and archive-all options.
+6. **Processes & Audit Trail**: Active process table (`logs/pids.json`) with per-role Stop buttons and immutable `logs/admin_audit.jsonl` viewer.
+
+---
+
+### 5.7 Tab 6: System Health & Day's Log Inspector (`HealthService`)
+- Persistent header sidebar badge polls `/api/health/status` globally across all tabs.
+- **Immediate `RED` Escalation**: Banner and sidebar badge turn **`RED`** immediately if any `ERROR`/`CRITICAL` log entry is recorded today (`YYYY-MM-DD` IST) or any registered PID in `logs/pids.json` is `DEAD` (`YELLOW` on today's `WARN` or active execution freeze, `GREEN` otherwise).
+- **Process, IPC & SHM Probe**: Displays live `PID`, `Tier`, `CPU%`, `RSS MB`, `Uptime`, per-process today error/warn counts, IPC socket presence, and `shm_ohlc_221` readiness across both `/tmp/shm_ohlc_221.shm` (`mmap_tmp`) and POSIX `SharedMemory` (`posix_shm`).
+- **Day's Structured Log Inspector**: Date-filtered structured viewer supporting per-file (`logs/*.log`) selection, level pills (`ALL`, `ERROR`, `WARN`, `INFO`), and full-text logger/message search.
+
+---
+
 ## 6. Comprehensive API Reference
 
 ### 6.1 REST Endpoints
@@ -298,6 +323,17 @@ sequenceDiagram
 | `GET` | `/api/chart/candles` | `date`, `token`, `symbol`, `is_option`, `interval` | Aggregates and returns OHLCV candles from Parquet recordings. |
 | `GET` | `/api/alerts` | `date` (optional) | Returns setup alerts list (top 5 actionable + chronological log). |
 | `GET` | `/api/alerts/candles` | `symbol`, `date`, `trigger_price`, `trigger_ts` | Returns 5m candles attached to SHM or Parquet with trigger overlay. |
+| `GET` | `/api/admin/config` | None | Returns pre-market steps, core services, runnable tracks, freeze flags, masked auth, and recent audit entries. |
+| `POST`| `/api/admin/premarket` | `steps`, `exchange`, `session_date`, `volume_days`, `reset` | Runs selected pre-market preparation steps via `core/ops/operations.py`. |
+| `POST`| `/api/admin/postmarket` | `actions`, `session_date`, `keep_raw`, `archive_all` | Runs selected post-market housekeeping actions. |
+| `POST`| `/api/admin/core/start` | `services`, `feed_mode`, `debug` | Launches selected Core tier services (Feed, CandleManager, QuotesBroker, RMS, Recorder). |
+| `POST`| `/api/admin/core/stop` | `services` (optional) | Stops selected or all Core tier services. |
+| `POST`| `/api/admin/strategy/start` | `modes`, `tracks_by_mode`, `continue_state`, `confirm_live*` | Launches Scoring Engine and granular `(mode, track)` processes (attaching to Core RMS). |
+| `POST`| `/api/admin/strategy/stop` | `modes`, `include_scoring` | Stops selected strategy/execution processes. |
+| `POST`| `/api/admin/process/stop` | `role` | Terminates an individual registered process role. |
+| `POST`| `/api/admin/action` | `action`, `params` | Executes `freeze`, `unfreeze`, `stop_live`, `rest_fallback`, `reconcile`, `refresh_groww_token`, or `stop_all`. |
+| `GET` | `/api/health/status` | `date` (optional YYYY-MM-DD) | Returns `GREEN`/`YELLOW`/`RED` system health, process metrics, IPC/SHM probe, and today's log error/warn counts. |
+| `GET` | `/api/health/logs` | `file`, `level`, `q`, `date`, `limit` | Returns day-filtered structured log entries for inspection in the UI. |
 
 ---
 

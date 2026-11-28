@@ -15,12 +15,17 @@ from typing import Any, Dict, List, Optional, Set
 import uuid
 from aiohttp import web, WSMsgType
 
+from core.common.logging_utils import get_logger
 from core.common.time_utils import IST
 from web.candle_service import CandleService
 from web.historical_service import HistoricalService
 from web.live_service import LiveService
 from web.simulation_service import SimulationService
 from web.alert_service import AlertService
+from web.admin_service import AdminService
+from web.health_service import HealthService
+
+_logger = get_logger("WEB_SERVER")
 
 
 class AnalyticsWebServer:
@@ -29,10 +34,14 @@ class AnalyticsWebServer:
         host: str = "0.0.0.0",
         port: int = 8080,
         recordings_dir: str = "recordings",
+        logs_dir: str = "logs",
+        pids_file: Optional[str] = None,
     ):
         self.host = host
         self.port = port
         self.recordings_dir = recordings_dir
+        self.logs_dir = logs_dir
+        self.pids_file = pids_file or os.path.join(logs_dir, "pids.json")
 
         self.server_boot_id: str = uuid.uuid4().hex[:12]
         self.server_start_time: str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
@@ -41,7 +50,16 @@ class AnalyticsWebServer:
         self.historical_service = HistoricalService(recordings_dir=recordings_dir)
         self.simulation_service = SimulationService(recordings_dir=recordings_dir)
         self.candle_service = CandleService(recordings_dir=recordings_dir)
-        self.alert_service = AlertService(recordings_dir=recordings_dir)
+        self.alert_service = AlertService(recordings_dir=recordings_dir, logs_dir=logs_dir)
+        self.admin_service = AdminService(
+            logs_dir=logs_dir,
+            pids_file=self.pids_file,
+            recordings_dir=recordings_dir,
+        )
+        self.health_service = HealthService(
+            logs_dir=logs_dir,
+            pids_file=self.pids_file,
+        )
 
         @web.middleware
         async def no_cache_middleware(request: web.Request, handler):
@@ -110,6 +128,21 @@ class AnalyticsWebServer:
         # 5. Alert Routes
         self.app.router.add_get("/api/alerts", self.handle_alerts)
         self.app.router.add_get("/api/alerts/candles", self.handle_alert_candles)
+
+        # 6. Admin Control Plane Routes
+        self.app.router.add_get("/api/admin/config", self.handle_admin_config)
+        self.app.router.add_post("/api/admin/premarket", self.handle_admin_premarket)
+        self.app.router.add_post("/api/admin/postmarket", self.handle_admin_postmarket)
+        self.app.router.add_post("/api/admin/core/start", self.handle_admin_core_start)
+        self.app.router.add_post("/api/admin/core/stop", self.handle_admin_core_stop)
+        self.app.router.add_post("/api/admin/strategy/start", self.handle_admin_strategy_start)
+        self.app.router.add_post("/api/admin/strategy/stop", self.handle_admin_strategy_stop)
+        self.app.router.add_post("/api/admin/process/stop", self.handle_admin_process_stop)
+        self.app.router.add_post("/api/admin/action", self.handle_admin_action)
+
+        # 7. System Health & Log Inspector Routes
+        self.app.router.add_get("/api/health/status", self.handle_health_status)
+        self.app.router.add_get("/api/health/logs", self.handle_health_logs)
 
         # Lifecycle hooks
         self.app.on_startup.append(self.on_startup)
@@ -279,7 +312,7 @@ class AnalyticsWebServer:
                 self.simulation_service.is_running = False
                 self.simulation_service.latest_error = str(exc)
                 self.simulation_service.progress_status = f"Failed: {exc}"
-                print(f"[SERVER] Simulation background task error: {exc}", file=sys.stderr)
+                _logger.error(f"Simulation background task error: {exc}")
                 return
             try:
                 res = t.result()
@@ -506,6 +539,158 @@ class AnalyticsWebServer:
         )
         return web.json_response(data)
 
+    # 6. Admin Control Plane Handlers
+    async def handle_admin_config(self, request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok", **self.admin_service.get_config()})
+
+    async def handle_admin_premarket(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            res = await self.admin_service.execute_premarket(
+                steps=body.get("steps"),
+                reset=bool(body.get("reset", False)),
+                session_date=body.get("session_date") or None,
+                exchange=body.get("exchange", "NSE"),
+                volume_days=int(body.get("volume_days", 30)),
+            )
+            code = 200 if res.get("status") == "ok" else 400
+            return web.json_response(res, status=code)
+        except Exception as e:
+            return web.json_response({"status": "error", "error": str(e)}, status=400)
+
+    async def handle_admin_postmarket(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            res = await self.admin_service.execute_postmarket(
+                actions=body.get("actions"),
+                session_date=body.get("session_date") or None,
+                keep_raw=bool(body.get("keep_raw", True)),
+                archive_all=bool(body.get("archive_all", False)),
+            )
+            code = 200 if res.get("status") in ("ok", "partial") else 400
+            return web.json_response(res, status=code)
+        except Exception as e:
+            return web.json_response({"status": "error", "error": str(e)}, status=400)
+
+    async def handle_admin_core_start(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            res = self.admin_service.start_core(
+                services=body.get("services"),
+                feed_mode=body.get("feed_mode", "ws"),
+                debug=bool(body.get("debug", False)),
+            )
+            return web.json_response(res)
+        except Exception as e:
+            return web.json_response({"status": "error", "error": str(e)}, status=400)
+
+    async def handle_admin_core_stop(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            res = self.admin_service.stop_core(services=body.get("services"))
+            return web.json_response(res)
+        except Exception as e:
+            return web.json_response({"status": "error", "error": str(e)}, status=400)
+
+    async def handle_admin_strategy_start(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            cap_val = body.get("capital")
+            res = self.admin_service.start_strategies(
+                modes=body.get("modes"),
+                tracks_by_mode=body.get("tracks_by_mode"),
+                tracks=body.get("tracks"),
+                continue_state=bool(body.get("continue_state", False)),
+                confirm_live=bool(body.get("confirm_live", False)),
+                confirm_live_phrase=str(body.get("confirm_live_phrase", "")),
+                capital=float(cap_val) if cap_val not in (None, "") else None,
+                eod_freeze_time=body.get("eod_freeze_time") or None,
+                eod_time=body.get("eod_time") or None,
+                spawn_scoring=bool(body.get("spawn_scoring", True)),
+                allow_fallback_rms=bool(body.get("allow_fallback_rms", True)),
+            )
+            return web.json_response(res)
+        except Exception as e:
+            return web.json_response({"status": "error", "error": str(e)}, status=400)
+
+    async def handle_admin_strategy_stop(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            res = self.admin_service.stop_strategies(
+                modes=body.get("modes"),
+                include_scoring=bool(body.get("include_scoring", True)),
+            )
+            return web.json_response(res)
+        except Exception as e:
+            return web.json_response({"status": "error", "error": str(e)}, status=400)
+
+    async def handle_admin_process_stop(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            res = self.admin_service.stop_process(role=body.get("role", ""))
+            return web.json_response(res)
+        except Exception as e:
+            return web.json_response({"status": "error", "error": str(e)}, status=400)
+
+    async def handle_admin_action(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            res = await self.admin_service.perform_action(
+                action=body.get("action", ""),
+                params=body.get("params") or body,
+            )
+            return web.json_response(res)
+        except Exception as e:
+            return web.json_response({"status": "error", "error": str(e)}, status=400)
+
+    # 7. System Health & Log Inspector Handlers
+    async def handle_health_status(self, request: web.Request) -> web.Response:
+        target_date = request.query.get("date") or None
+        return web.json_response(self.health_service.get_status(target_date=target_date))
+
+    async def handle_health_logs(self, request: web.Request) -> web.Response:
+        file_name = request.query.get("file") or None
+        level = request.query.get("level") or "ALL"
+        query = request.query.get("q") or ""
+        date_str = request.query.get("date") or None
+        try:
+            limit = int(request.query.get("limit", 300))
+        except (ValueError, TypeError):
+            limit = 300
+        return web.json_response(
+            self.health_service.get_logs(
+                file=file_name,
+                level=level,
+                query=query,
+                date_str=date_str,
+                limit=limit,
+            )
+        )
+
     # Lifecycles
     async def on_startup(self, app: web.Application) -> None:
         await self.live_service.start()
@@ -521,13 +706,11 @@ class AnalyticsWebServer:
 
     def run(self) -> None:
         """Run web server synchronously."""
-        print("=" * 80)
-        print(f"🚀 ANTIGRAVITY ANALYTICS & SIMULATION WEB UI")
-        print(f"URL: http://localhost:{self.port} (or http://{self.host}:{self.port})")
-        print("=" * 80)
+        get_logger("WEB_SERVER", log_file="logs/web_server.log")
+        _logger.info(f"ANTIGRAVITY ANALYTICS & SIMULATION WEB UI listening at http://localhost:{self.port} (http://{self.host}:{self.port})")
 
         def _sig_handler(sig, frame):
-            print("\n[SERVER] Shutdown signal received. Exiting immediately...")
+            _logger.info("Shutdown signal received. Exiting immediately...")
             self.teardown()
             sys.exit(0)
 

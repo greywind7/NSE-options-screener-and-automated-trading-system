@@ -306,6 +306,7 @@ class LiveService:
                                 "status": data.get("status", "OPEN"),
                                 "entry_reason": data.get("entry_reason") or data.get("metadata", {}).get("entry_reason") or data.get("metadata", {}).get("archetype") or "-",
                                 "origin_track": data.get("origin_track") or data.get("metadata", {}).get("origin_track") or data.get("metadata", {}).get("sub_track") or track,
+                                "sub_track_rule": data.get("sub_track_rule") or data.get("metadata", {}).get("sub_track_rule") or "",
                                 "exit_price": data.get("exit_price"),
                                 "exit_time": data.get("exit_time"),
                                 "exit_reason": data.get("exit_reason"),
@@ -317,7 +318,7 @@ class LiveService:
                             IMMUTABLE_FIELDS = {
                                 "trade_id", "mode", "track", "symbol", "token",
                                 "option_type", "strike", "lot_size", "quantity",
-                                "entry_ask", "entry_time", "entry_reason", "origin_track",
+                                "entry_ask", "entry_time", "entry_reason", "origin_track", "sub_track_rule",
                             }
                             tr = trades_map[trade_id]
                             for k, v in data.items():

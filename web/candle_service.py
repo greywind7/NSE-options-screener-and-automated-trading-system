@@ -11,8 +11,11 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 import polars as pl
 
+from core.common.logging_utils import get_logger
 from core.common.symbol_utils import normalize_instrument_token
 from core.common.time_utils import IST
+
+_logger = get_logger("CANDLE_SERVICE")
 
 
 class CandleService:
@@ -165,5 +168,5 @@ class CandleService:
             return candles
 
         except Exception as e:
-            print(f"[CANDLE_SERVICE] Error generating candles for {token}/{symbol}: {e}")
+            _logger.error(f"Error generating candles for {token}/{symbol}: {e}")
             return []

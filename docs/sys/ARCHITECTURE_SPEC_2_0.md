@@ -1,8 +1,8 @@
 # System Architecture Specification 2.0: High-Throughput Distributed Options Trading Engine
 
 > **Document Type**: Comprehensive Architectural Blueprint & Specification  
-> **Version**: 2.0 (Distributed Multi-Process, ZeroMQ IPC, Shared Memory, Quotes Broker)  
-> **Last Updated**: 2026-11-26 | **Status**: Active Source-of-Truth Specification  
+> **Version**: 2.1 (Distributed Multi-Process, ZeroMQ IPC, Shared Memory, Core-Decoupled RMS, IST Logging)  
+> **Last Updated**: 2026-11-28 | **Status**: Active Source-of-Truth Specification  
 > **Historical Reference**: Previous brainstorming, specs, and archived audits (e.g., [`2026-11-25_SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive/2026-11-25_SYSTEM_AUDIT_2_0.md)) live in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive); active enhancements live in [`IMPROVEMENTS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/IMPROVEMENTS.md).
 
 ---
@@ -207,18 +207,17 @@ flowchart TD
 
 ---
 
-### ADR-011: Strict Decoupling of Core Data Infrastructure from Strategy Execution
-* **Problem**: In legacy architectures, launching or stopping a strategy also killed and restarted the WebSocket feed listener, dropping ticks during the 10-second reconnect handshake, corrupting ongoing recordings, and wiping active candle state.
-* **Decision**: Strictly separate the **Core Data Infrastructure Lifecycle** from the **Strategy Lifecycle**:
-  1. **Core Data Tier (`runner.py core` or independent commands)**:
-     - The `runner.py core` command enforces that `--feed <ws|mock>`, `--candlemanager`, and `--quotesbroker` are all passed with their respective parameters, with `--record` optional.
-     - Alternatively, each component can be started completely independently (`runner.py feed`, `runner.py candlemanager`, `runner.py quotesbroker`, `runner.py record`).
-     - `CandleManager` allocates and owns `shm_ohlc_221` (777 KB in L2 cache).
-     - Runs continuously all day from 09:00 to 15:30 without interruption.
-  2. **Strategy & Execution Tier (`runner.py start`)**:
-     - Attaches to running `shm_ohlc_221` and Quotes Broker sockets.
-     - Spawns `ScoringEngine3`, `RMSOptionResolver`, each of the specified tracks across requested execution modes (`--mode paper,paper_delayed,live`), and launches the `dashboard` implicitly.
-     - Can be stopped (`runner.py stop --strategy`), re-tuned, and restarted at any time during market hours with **zero data loss**, zero WebSocket reconnects, and zero corruption of recorded market files.
+### ADR-011: Strict Decoupling of Core Data & RMS Infrastructure from Strategy Execution
+* **Problem**: Restarting or reconfiguring strategy tracks in legacy launches also risked tearing down the WebSocket feed listener or duplicating the shared `RMSService`, creating socket bind contention and dropping ongoing market recordings.
+* **Decision**: Strictly decouple **Core Data & RMS Infrastructure** from the **Strategy & Execution Lifecycle**:
+  1. **Core Data & RMS Tier (`runner.py core` / Admin Ops Core Panel)**:
+     - Launches `FeedHandler` (`ws|mock`), `CandleManager` (`shm_ohlc_221` backed at `/tmp/shm_ohlc_221.shm` mmap or POSIX SHM when `FORCE_POSIX_SHM` is set), `QuotesBroker`, decoupled `RMSService` (`--rms`, or standalone `runner.py rmsservice`), and optional `MarketRecorder` (`--record`).
+     - `RMSService` subscribes to `SetupAlert` events carrying `strategy_id` + `strategy_tags` and publishes validated `ActionableOpportunity` messages on topic `OPP.<strategy_id>.<symbol>`.
+  2. **Strategy & Execution Tier (`runner.py start` / Admin Ops Strategy Panel)**:
+     - Checks `is_core_rms_running()` (and respects `--no-rms`): attaches directly to the running Core `RMSService` without spawning a duplicate brokered instance (with automatic fallback RMS launch if Core RMS is offline and fallback is enabled).
+     - Forks isolated per-`(mode, track)` execution superstructures and `ScoringEngine3` independently, allowing zero-data-loss strategy restarts mid-session.
+  3. **Standardized IST Structured Logging (`core/common/logging_utils.py`)**:
+     - All core, strategy, execution, and web services emit standardized `[YYYY-MM-DD HH:MM:SS.mmm IST] [LEVEL] [LOGGER] Message` logs (`WARNING` normalized to `WARN`), ingested daily by the System Health Monitor (`web/health_service.py`) for instant `RED` alerting on errors.
 
 ---
 

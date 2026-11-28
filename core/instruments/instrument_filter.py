@@ -29,6 +29,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from core.common.logging_utils import get_logger
+
+_logger = get_logger("PREMARKET.FILTER")
+
 
 @dataclass
 class EquityInstrument:
@@ -63,15 +67,15 @@ def run_instrument_filter(
     and write to output_csv.
     """
     if skip_if_exists and os.path.exists(output_csv) and os.path.getsize(output_csv) > 1000:
-        print(f"  ✓ Found existing Filtered Equities at '{output_csv}' ({os.path.getsize(output_csv) / 1024:.1f} KB). (Skipping filtering)")
+        _logger.info(f"Found existing Filtered Equities at '{output_csv}' ({os.path.getsize(output_csv) / 1024:.1f} KB). Skipping filtering.")
         return output_csv
 
     if not os.path.exists(master_csv):
-        print(f"❌ Master CSV file not found: {master_csv}", file=sys.stderr)
+        _logger.error(f"Master CSV file not found: {master_csv}")
         return None
 
     os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
-    print(f"  🔍 Scanning instrument master '{master_csv}' for active F&O contracts...")
+    _logger.info(f"Scanning instrument master '{master_csv}' for active F&O contracts...")
 
     if target_exchange.upper() == "MCX":
         # Extract active commodity futures and options
@@ -148,7 +152,7 @@ def run_instrument_filter(
                 row_copy["available_expiries"] = ";".join(row_copy["available_expiries"])
                 writer.writerow(row_copy)
 
-        print(f"  ✓ Successfully filtered and saved {len(mcx_instruments):,} MCX commodities to '{output_csv}'")
+        _logger.info(f"Successfully filtered and saved {len(mcx_instruments):,} MCX commodities to '{output_csv}'")
         return output_csv
 
     # Pass 1: Identify underlying symbols that have active FNO contracts
@@ -223,7 +227,7 @@ def run_instrument_filter(
                             except (ValueError, TypeError):
                                 pass
 
-    print(f"  ✓ Identified {len(fno_by_underlying):,} unique F&O underlying derivatives in {target_exchange}.")
+    _logger.info(f"Identified {len(fno_by_underlying):,} unique F&O underlying derivatives in {target_exchange}.")
 
     # Pass 2: Match FNO underlyings to Cash Equities
     filtered_equities: List[EquityInstrument] = []
@@ -313,7 +317,7 @@ def run_instrument_filter(
             row_dict["available_expiries"] = ";".join(row_dict["available_expiries"])
             writer.writerow(row_dict)
 
-    print(f"  ✓ Successfully filtered and saved {len(filtered_equities):,} F&O equities to '{output_csv}'")
+    _logger.info(f"Successfully filtered and saved {len(filtered_equities):,} F&O equities to '{output_csv}'")
     return output_csv
 
 

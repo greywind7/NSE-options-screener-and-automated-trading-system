@@ -15,7 +15,10 @@ import time
 from typing import Any, Dict, List, Optional, Set
 import zmq
 
+from core.common.logging_utils import get_logger
 from core.common.symbol_utils import is_option_contract, normalize_instrument_token
+
+logger = get_logger("QUOTES_BROKER")
 from core.common.ipc_schemas import (
     QuoteDepthUpdate,
     QuoteHeartbeat,
@@ -69,6 +72,9 @@ class QuotesBroker:
         # ZeroMQ Context
         self._owns_ctx = ctx is None
         self.ctx = ctx or zmq.Context()
+        import threading
+        self._loop_done = threading.Event()
+        self._loop_done.set()
 
         # 1. Subscriber to live option depth & equity ticks from FeedHandler
         self.sub = self.ctx.socket(zmq.SUB)
@@ -264,7 +270,7 @@ class QuotesBroker:
         except zmq.Again:
             return False
         except Exception as e:
-            print(f"[QUOTES_BROKER] Request error: {e}", file=sys.stderr)
+            logger.error(f"Request error: {e}")
             return True
 
     def _emit_heartbeat(self, now: Optional[float] = None) -> None:
@@ -292,10 +298,10 @@ class QuotesBroker:
     def start(self) -> None:
         """Run the QuotesBroker single-threaded ZMQ event loop (keeps all sockets single-owner)."""
         self.running = True
-        print(
-            f"[QUOTES_BROKER] Active | Feed SUB: {self.feed_ipc} | ROUTER: {self.router_ipc} "
-            f"| STREAM PUB: {self.stream_ipc} | Heartbeat: {self.heartbeat_ipc}",
-            flush=True,
+        self._loop_done.clear()
+        logger.info(
+            f"Active | Feed SUB: {self.feed_ipc} | ROUTER: {self.router_ipc} "
+            f"| STREAM PUB: {self.stream_ipc} | Heartbeat: {self.heartbeat_ipc}"
         )
 
         poller = zmq.Poller()
@@ -303,37 +309,41 @@ class QuotesBroker:
         poller.register(self.router, zmq.POLLIN)
         last_hb_ts = time.time()
 
-        while self.running:
-            try:
-                events = dict(poller.poll(timeout=10))
-                if self.sub in events:
-                    for _ in range(256):
-                        try:
-                            frames = self.sub.recv_multipart(flags=zmq.NOBLOCK)
-                        except zmq.Again:
-                            break
-                        if len(frames) >= 2:
-                            tick = unpack_message(frames[-1])
-                            self.on_tick(tick)
-                        if not self.running:
-                            break
+        try:
+            while self.running:
+                try:
+                    events = dict(poller.poll(timeout=10))
+                    if self.sub in events:
+                        for _ in range(256):
+                            try:
+                                frames = self.sub.recv_multipart(flags=zmq.NOBLOCK)
+                            except zmq.Again:
+                                break
+                            if len(frames) >= 2:
+                                tick = unpack_message(frames[-1])
+                                self.on_tick(tick)
+                            if not self.running:
+                                break
 
-                if self.router in events:
-                    for _ in range(64):
-                        if not self._handle_request() or not self.running:
-                            break
+                    if self.router in events:
+                        for _ in range(64):
+                            if not self._handle_request() or not self.running:
+                                break
 
-                now = time.time()
-                if now - last_hb_ts >= 1.0:
-                    self._emit_heartbeat(now)
-                    last_hb_ts = now
-            except zmq.ZMQError:
-                break
-            except Exception as e:
-                print(f"[QUOTES_BROKER] Loop error: {e}", file=sys.stderr, flush=True)
+                    now = time.time()
+                    if now - last_hb_ts >= 1.0:
+                        self._emit_heartbeat(now)
+                        last_hb_ts = now
+                except zmq.ZMQError:
+                    break
+                except Exception as e:
+                    logger.error(f"Loop error: {e}")
+        finally:
+            self._loop_done.set()
 
     def stop(self) -> None:
         self.running = False
+        self._loop_done.wait(timeout=1.0)
         try:
             self.sub.close(linger=0)
             self.router.close(linger=0)
@@ -344,7 +354,7 @@ class QuotesBroker:
                 self.ctx.destroy(linger=0)
         except Exception:
             pass
-        print("[QUOTES_BROKER] Stopped cleanly.")
+        logger.info("Stopped cleanly.")
 
 
 class QuotesBrokerClient:

@@ -46,6 +46,9 @@ class TestRMSService(unittest.TestCase):
 
     def tearDown(self):
         self.rms.stop()
+        self.broker.running = False
+        if self.broker_thread.is_alive():
+            self.broker_thread.join(timeout=1.0)
         self.broker.stop()
         self.ctx.destroy(linger=0)
 

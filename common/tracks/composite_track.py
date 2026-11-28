@@ -154,17 +154,33 @@ class CompositeTrack:
                 st.exit_trade(trade, exit_price=exit_price, reason=reason, ts=ts)
                 return
 
-    def add_recovered_trade(self, trade: TradeState, is_filled: bool = True) -> None:
-        """Route recovered trade from journal (--continue) into its originating sub-track."""
+    def add_recovered_trade(self, trade: TradeState, is_filled: bool = True) -> bool:
+        """
+        Deterministically route recovered trade from journal (--continue) into its originating sub-track.
+        Returns True if matched and restored; returns False if origin_track is missing,
+        ambiguous (equals parent composite track), or unknown so caller can quarantine it.
+        """
         if not self.sub_tracks:
-            return
-        origin = trade.origin_track or (trade.metadata or {}).get("sub_track") or (trade.metadata or {}).get("origin_track")
+            return False
+        meta = trade.metadata or {}
+        origin = trade.origin_track or meta.get("origin_track") or meta.get("sub_track")
+        if not origin or origin == self.track_name:
+            return False
+
         target_st = None
-        if origin:
-            for st in self.sub_tracks:
-                if st.track_name == origin:
-                    target_st = st
-                    break
+        for st in self.sub_tracks:
+            if st.track_name == origin:
+                target_st = st
+                break
         if target_st is None:
-            target_st = self.sub_tracks[0]
+            return False
+
+        trade.origin_track = target_st.track_name
+        if not trade.sub_track_rule:
+            trade.sub_track_rule = (
+                meta.get("sub_track_rule")
+                or getattr(target_st, "rule_name", None)
+                or target_st.__class__.__name__
+            )
         target_st.add_recovered_trade(trade, is_filled=is_filled)
+        return True

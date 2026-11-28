@@ -13,9 +13,11 @@ from typing import Any, Dict, Generator, List, Optional
 import pyarrow.parquet as pq
 import zmq
 
+from core.common.logging_utils import get_logger
 from core.common.symbol_utils import is_option_contract, normalize_instrument_token
 from core.common.ipc_schemas import pack_message
 
+logger = get_logger("REPLAY")
 DEFAULT_FEED_IPC = "ipc:///tmp/feed_ticks_pub.ipc"
 
 
@@ -54,7 +56,7 @@ class HistoricalReplayIngestor:
     def stream_ticks(self) -> Generator[Dict[str, Any], None, None]:
         files = self._collect_files()
         if not files:
-            print(f"[REPLAY] No parquet or jsonl recording files found at: {self.data_path}", file=sys.stderr)
+            logger.warning(f"No parquet or jsonl recording files found at: {self.data_path}")
             return
 
         for filepath in files:
@@ -101,12 +103,12 @@ class HistoricalReplayIngestor:
                         "received_timestamp": rec_ts,
                     }
             except Exception as e:
-                print(f"[REPLAY] Error reading file {filepath}: {e}", file=sys.stderr)
+                logger.error(f"Error reading file {filepath}: {e}")
 
     def run(self) -> int:
         """Stream ticks to PUB socket. Returns total ticks published."""
         self.running = True
-        print(f"[REPLAY] Starting playback from: {self.data_path} -> {self.feed_ipc} (Speed={self.speed})")
+        logger.info(f"Starting playback from: {self.data_path} -> {self.feed_ipc} (Speed={self.speed})")
         time.sleep(0.1)  # Allow subscriber discovery
 
         published_count = 0
@@ -133,7 +135,7 @@ class HistoricalReplayIngestor:
 
         elapsed = time.time() - start_real
         rate = published_count / max(elapsed, 0.001)
-        print(f"[REPLAY] Completed playback: {published_count} ticks in {elapsed:.2f}s ({rate:.0f} ticks/s)")
+        logger.info(f"Completed playback: {published_count} ticks in {elapsed:.2f}s ({rate:.0f} ticks/s)")
         return published_count
 
     def stop(self) -> None:
@@ -144,7 +146,7 @@ class HistoricalReplayIngestor:
                 self.ctx.destroy(linger=0)
         except Exception:
             pass
-        print("[REPLAY] Stopped.")
+        logger.info("Stopped.")
 
 
 def main():

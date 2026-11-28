@@ -16,8 +16,11 @@ from core.candles.shm_layout import (
     create_or_attach_shm,
     get_shm_views,
 )
+from core.common.logging_utils import get_logger
 from core.common.symbol_utils import normalize_instrument_token
 from core.common.time_utils import IST
+
+_logger = get_logger("ALERT_SERVICE")
 from web.candle_service import CandleService
 
 
@@ -62,7 +65,7 @@ class AlertService:
                             self.symbol_to_idx[normalize_instrument_token(ik.strip())] = idx
                         idx += 1
         except Exception as e:
-            print(f"[ALERT_SERVICE] Error loading universe map: {e}")
+            _logger.warning(f"Error loading universe map: {e}")
 
     def _get_symbol_shm_index(self, symbol: str) -> Optional[int]:
         clean = symbol.strip().upper()
@@ -186,7 +189,7 @@ class AlertService:
                     self._save_to_local_cache(canonical_date, clean_sym, candles)
                     self._local_cache[cache_key] = candles
             except Exception as e:
-                print(f"[ALERT_SERVICE] Parquet fallback error: {e}")
+                _logger.warning(f"Parquet fallback error: {e}")
 
         # Build trigger marker
         markers = []

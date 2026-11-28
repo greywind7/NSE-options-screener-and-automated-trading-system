@@ -20,8 +20,11 @@ import pyarrow.parquet as pq
 import zmq
 
 from core.common.ipc_schemas import unpack_message
+from core.common.logging_utils import get_logger
 from core.common.symbol_utils import is_option_contract
 from core.common.time_utils import get_market_date_str
+
+logger = get_logger("MARKET_RECORDER")
 
 DEFAULT_FEED_EQ_IPC = "ipc:///tmp/feed_equity.ipc"
 DEFAULT_FEED_OPT_IPC = "ipc:///tmp/feed_options.ipc"
@@ -232,7 +235,7 @@ class MarketRecorder:
         """Run dual-stream subscriber loop."""
         self.running = True
         feed_info = self.feed_ipc if self.feed_ipc else f"EQ={self.feed_eq_ipc}, OPT={self.feed_opt_ipc}"
-        print(f"[MARKET_RECORDER] Active (Dual Stream) | Feed: {feed_info} | Dest: {self.output_dir}")
+        logger.info(f"Active (Dual Stream) | Feed: {feed_info} | Dest: {self.output_dir}")
 
         poller = zmq.Poller()
         poller.register(self.sub, zmq.POLLIN)
@@ -253,7 +256,7 @@ class MarketRecorder:
                 except zmq.ZMQError:
                     break
                 except Exception as e:
-                    print(f"[MARKET_RECORDER] Error: {e}", file=sys.stderr)
+                    logger.error(f"Recorder loop error: {e}")
         finally:
             self.flush()
 
@@ -263,7 +266,7 @@ class MarketRecorder:
         try:
             self.flush()
         except Exception as e:
-            print(f"[MARKET_RECORDER] Error flushing on stop: {e}", file=sys.stderr)
+            logger.error(f"Error flushing on stop: {e}")
         try:
             self.sub.close(linger=0)
             if self._owns_ctx:
@@ -276,7 +279,7 @@ class MarketRecorder:
             except Exception:
                 pass
             self._debug_file = None
-        print("[MARKET_RECORDER] Stopped cleanly and flushed (Dual Streams).")
+        logger.info("Stopped cleanly and flushed (Dual Streams).")
 
 
 def main():

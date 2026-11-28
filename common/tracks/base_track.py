@@ -279,6 +279,7 @@ class BaseTrack(ABC):
         now_ts = opp.timestamp or time.time()
         entry_reason = getattr(opp, "archetype", None) or "MOMENTUM_BREAKOUT"
         origin_track = self.track_name
+        sub_track_rule = getattr(self, "rule_name", None) or getattr(self, "track_type", None) or self.__class__.__name__
 
         trade = TradeState(
             trade_id=trade_id,
@@ -300,12 +301,14 @@ class BaseTrack(ABC):
             status="OPEN",
             entry_reason=entry_reason,
             origin_track=origin_track,
+            sub_track_rule=sub_track_rule,
             underlying_entry_price=float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
             metadata={
                 "opp_id": opp.opp_id,
                 "archetype": opp.archetype,
                 "sub_track": self.track_name,
                 "origin_track": origin_track,
+                "sub_track_rule": sub_track_rule,
                 "entry_reason": entry_reason,
                 "preferred_mode": self.preferred_mode,
                 "required_capital": required_capital,

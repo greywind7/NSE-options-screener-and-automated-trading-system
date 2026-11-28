@@ -3,8 +3,11 @@ Mode Risk Manager: Mode-Specific Capital and Risk Coordinator.
 Tracks mode-specific realized PnL, available capital, committed capital,
 and daily loss circuit breakers for Paper, Paper Delayed, Live, and Sim modes.
 """
-import sys
 from typing import Any, Dict, List, Optional
+
+from core.common.logging_utils import get_logger
+
+logger = get_logger("MODE_RISK")
 
 
 class ModeRiskManager:
@@ -78,8 +81,7 @@ class ModeRiskManager:
         if self.enable_circuit_breaker and self.daily_pnl <= -self.daily_loss_limit_inr:
             self.circuit_breaker_tripped = True
             self.frozen = True
-            print(
+            logger.error(
                 f"[{self.mode.upper()}_RMS] Daily loss circuit breaker tripped! "
-                f"PnL: {self.daily_pnl:.2f} <= -{self.daily_loss_limit_inr:.2f}. Mode frozen.",
-                file=sys.stderr,
+                f"PnL: {self.daily_pnl:.2f} <= -{self.daily_loss_limit_inr:.2f}. Mode frozen."
             )

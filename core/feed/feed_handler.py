@@ -38,9 +38,12 @@ from core.common.ipc_schemas import (
     OptionDepthTickEvent,
     pack_message,
 )
+from core.common.logging_utils import get_logger
 from core.common.symbol_utils import normalize_instrument_token, is_option_contract
 from core.config.config_loader import get_config_manager
 from core.feed.position_registry import ProtectedPositionRegistry
+
+_logger = get_logger("FEED_HANDLER")
 
 try:
     from core.feed.proto import MarketDataFeedV3_pb2 as pb
@@ -318,7 +321,7 @@ class FeedHandler:
 
     def _log(self, msg: str, force: bool = False) -> None:
         if not self.silent or force:
-            print(msg)
+            _logger.info(msg)
 
     def is_rest_fallback_allowed(self) -> bool:
         if getattr(self, "allow_rest_fallback", False):
@@ -712,7 +715,7 @@ class FeedHandler:
                     if sk not in self.protected_logged_keys:
                         self.protected_logged_keys.add(sk)
                         sym_disp = self.symbol_map.get(sk, sk)
-                        print(f"  🛡️ [PROTECTION ACTIVE] Retaining subscription [CONN-{c_id}] for '{sym_disp}' ({sk}) - Active open position detected!")
+                        _logger.info(f"[PROTECTION ACTIVE] Retaining subscription [CONN-{c_id}] for '{sym_disp}' ({sk}) - Active open position detected!")
             keys_to_remove -= protected_keys
 
             # Guarantee any protected option for this symbol is active
@@ -889,17 +892,16 @@ class FeedHandler:
         self._running = True
         self.load_instruments()
 
-        print("=" * 80)
-        print("📡 MARKET DATA FEED HANDLER SERVICE ACTIVE (DUAL CONNECTION)")
-        print(f"Equity IPC Socket  : {self.feed_equity_ipc} (Subscribed by CandleManager & Recorder)")
-        print(f"Options IPC Socket : {self.feed_options_ipc} (Subscribed by QuotesBroker & Recorder)")
-        print(f"Connections        : {self.num_connections} Parallel WebSockets (Upstox limit: 2,000 keys/conn)")
+        _logger.info(
+            f"MARKET DATA FEED HANDLER ACTIVE ({self.num_connections} connections) | "
+            f"EquityIPC={self.feed_equity_ipc} | OptionsIPC={self.feed_options_ipc} | "
+            f"Assets={len(self.instruments):,} [{self.exchange}] | Mode={self.mode.upper()}"
+        )
         for i, c in enumerate(self.connections):
-            print(f"  • Connection {i}   : {len(c.subscribed_keys):,} keys ({len(c.underlying_keys):,} underlyings, {len(c.active_option_keys):,} options)")
-        print(f"Monitored Assets   : {len(self.instruments):,} total contracts [{self.exchange}]")
-        print(f"Ingestion Mode     : {self.mode.upper()}")
-        print(f"Time               : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 80)
+            _logger.info(
+                f"Connection {i}: {len(c.subscribed_keys):,} keys "
+                f"({len(c.underlying_keys):,} underlyings, {len(c.active_option_keys):,} options)"
+            )
 
         if self.mode == "mock":
             self._run_mock_stream()
@@ -908,7 +910,7 @@ class FeedHandler:
                 if self.is_rest_fallback_allowed():
                     self._run_poll_stream()
                 else:
-                    print("❌ websockets library not installed and REST fallback is disabled.", file=sys.stderr)
+                    _logger.error("websockets library not installed and REST fallback is disabled.")
             else:
                 self._run_websocket_stream()
         elif self.mode == "poll":
@@ -916,8 +918,7 @@ class FeedHandler:
 
     def _run_mock_stream(self) -> None:
         """Simulate realistic moving ticks across monitored equities and options partitioned across dual connections."""
-        print("📡 Ingestion Engine: SYNTHETIC MOCK MARKET TICK FEED (DUAL CONNECTION)")
-        print("✓ Simulation Mode: Generating live synthetic market ticks across monitored universe...")
+        _logger.info("Ingestion Engine: SYNTHETIC MOCK MARKET TICK FEED (DUAL CONNECTION) active")
         prices: Dict[str, float] = {}
         volumes: Dict[str, int] = {}
 
@@ -978,7 +979,7 @@ class FeedHandler:
             if self.is_rest_fallback_allowed():
                 self._run_poll_stream()
                 return
-            print("❌ Protobuf decoder module not found and REST fallback is disabled.", file=sys.stderr)
+            _logger.error("Protobuf decoder module not found and REST fallback is disabled.")
             return
 
         auth_url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
@@ -998,7 +999,7 @@ class FeedHandler:
             if self.is_rest_fallback_allowed():
                 self._run_poll_stream()
                 return
-            print("❌ Failed to authorize WebSocket connection and REST fallback is disabled.", file=sys.stderr)
+            _logger.error("Failed to authorize WebSocket connection and REST fallback is disabled.")
             return
 
         async def ws_connection_worker(conn_id: int):
@@ -1009,8 +1010,7 @@ class FeedHandler:
                 try:
                     conn_ws_url = get_authorized_ws_url()
                     if not conn_ws_url:
-                        ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        print(f"[{ts_str}] [FEED-CONN-{conn_id}] ⚠️ Cannot obtain WebSocket authorization URL. Retrying in {backoff:.1f}s...", file=sys.stderr)
+                        _logger.warning(f"[CONN-{conn_id}] Cannot obtain WebSocket authorization URL. Retrying in {backoff:.1f}s...")
                         await asyncio.sleep(backoff)
                         backoff = min(15.0, backoff * 1.5)
                         continue
@@ -1033,7 +1033,10 @@ class FeedHandler:
                             "data": {"mode": "full", "instrumentKeys": stream_keys},
                         }
                         await ws.send(json.dumps(sub_payload).encode("utf-8"))
-                        print(f"✓ [CONN-{conn_id}] Upstox V3 WebSocket connected. Subscribed to {len(stream_keys):,} contracts (Underlyings: {len(conn.underlying_keys):,}, Options: {len(conn.active_option_keys):,}).")
+                        _logger.info(
+                            f"[CONN-{conn_id}] Upstox V3 WebSocket connected. Subscribed to {len(stream_keys):,} contracts "
+                            f"(Underlyings: {len(conn.underlying_keys):,}, Options: {len(conn.active_option_keys):,})."
+                        )
                         backoff = 1.0
 
                         while self._running:
@@ -1114,8 +1117,7 @@ class FeedHandler:
                     if not self._running:
                         break
                     conn.ws = None
-                    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"[{ts_str}] [FEED-CONN-{conn_id}] ⚠️ WebSocket disconnected/error: {e}. Retrying connection in {backoff:.1f}s...", file=sys.stderr)
+                    _logger.warning(f"[CONN-{conn_id}] WebSocket disconnected/error: {e}. Retrying connection in {backoff:.1f}s...")
                     await asyncio.sleep(backoff)
                     backoff = min(15.0, backoff * 1.5)
 
@@ -1132,7 +1134,7 @@ class FeedHandler:
                 except Exception as e:
                     if not self._running:
                         break
-                    print(f"[FEED] Main dual runner exited: {e}. Restarting in 2s...", file=sys.stderr)
+                    _logger.error(f"Main dual runner exited: {e}. Restarting in 2s...")
                     time.sleep(2.0)
         finally:
             try:
@@ -1148,7 +1150,7 @@ class FeedHandler:
 
     def _run_poll_stream(self) -> None:
         """Fallback REST poller in batches of 500 contracts."""
-        print("📡 Ingestion Engine: REST POLLER FALLBACK STREAM (Stub - not active)")
+        _logger.info("Ingestion Engine: REST POLLER FALLBACK STREAM active")
         while self._running:
             time.sleep(self.poll_interval)
 
@@ -1169,7 +1171,7 @@ class FeedHandler:
                 self.pub_opt.close(0)
         if self._owns_ctx and hasattr(self, "ctx") and not self.ctx.closed:
             self.ctx.term()
-        print("[FEED] FeedHandler stopped cleanly.")
+        _logger.info("FeedHandler stopped cleanly.")
 
 
 def main():

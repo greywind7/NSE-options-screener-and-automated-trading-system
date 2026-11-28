@@ -292,6 +292,7 @@ class HistoricalService:
                                 "status": data.get("status", "OPEN"),
                                 "entry_reason": data.get("entry_reason") or data.get("metadata", {}).get("entry_reason") or data.get("metadata", {}).get("archetype") or "-",
                                 "origin_track": data.get("origin_track") or data.get("metadata", {}).get("origin_track") or data.get("metadata", {}).get("sub_track") or track,
+                                "sub_track_rule": data.get("sub_track_rule") or data.get("metadata", {}).get("sub_track_rule") or "",
                                 "exit_price": data.get("exit_price"),
                                 "exit_time": data.get("exit_time"),
                                 "exit_reason": data.get("exit_reason"),
@@ -302,7 +303,7 @@ class HistoricalService:
                             IMMUTABLE_FIELDS = {
                                 "trade_id", "mode", "track", "symbol", "token",
                                 "option_type", "strike", "lot_size", "quantity",
-                                "entry_ask", "entry_time", "entry_reason", "origin_track",
+                                "entry_ask", "entry_time", "entry_reason", "origin_track", "sub_track_rule",
                             }
                             tr = trades_map[trade_id]
                             for k, v in data.items():
@@ -350,6 +351,8 @@ class HistoricalService:
                         "trade_id": row.get("trade_id") or f"CSV_{len(trades)}",
                         "mode": row.get("mode", "live"),
                         "track": row.get("track", "fast_momentum"),
+                        "origin_track": row.get("origin_track") or row.get("track", "fast_momentum"),
+                        "sub_track_rule": row.get("sub_track_rule", ""),
                         "symbol": row.get("symbol", ""),
                         "token": normalize_instrument_token(row.get("token", "")),
                         "option_type": row.get("option_type", ""),

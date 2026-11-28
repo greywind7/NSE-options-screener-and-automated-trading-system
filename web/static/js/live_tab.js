@@ -316,9 +316,17 @@ window.LiveTab = {
       }
 
       const exitTime = isClosed ? tr.exit_time_str : `<span class="val-cyan">Active</span>`;
+      const originTrack = tr.origin_track || tr.track || "-";
+      const subRule = tr.sub_track_rule ? `<div style="font-size:10px; color:var(--text-dim); margin-top:2px;">${tr.sub_track_rule}</div>` : "";
+      const isCompositeOrigin = tr.origin_track && data.track && tr.origin_track !== data.track;
+      const originCell = `<div style="display:flex; flex-direction:column; align-items:center;">
+        <span class="badge ${isCompositeOrigin ? "badge-entry" : "badge-closed"}" style="font-size:10px;">${originTrack}</span>
+        ${subRule}
+      </div>`;
 
       row.innerHTML = `
         <td class="font-mono" style="font-size:11px; color:var(--text-dim);">${tr.trade_id.replace("TRD_", "")}</td>
+        <td class="text-center">${originCell}</td>
         <td style="font-weight:600; color:#fff;">${tr.symbol}</td>
         <td class="font-mono">${tr.strike} ${tr.option_type}</td>
         <td class="font-mono text-center">${tr.quantity}</td>
@@ -341,7 +349,7 @@ window.LiveTab = {
     }
 
     if (trades.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="13" class="text-center" style="padding:24px; color:var(--text-dim);">No individual trades recorded for this track yet.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="14" class="text-center" style="padding:24px; color:var(--text-dim);">No individual trades recorded for this track yet.</td></tr>`;
     }
   },
 };

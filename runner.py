@@ -36,19 +36,20 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.common.logging_utils import get_logger
 from core.common.time_utils import normalize_time_str
+from core.ops.operations import (
+    is_core_rms_running,
+    load_json_config,
+    resolve_tracks_by_mode,
+    run_post_market,
+    run_prepare_steps,
+    run_reconcile,
+    set_freeze_state,
+    set_rest_fallback_state,
+)
 
-
-def load_json_config(path: str) -> Dict[str, Any]:
-    """Load JSON configuration file safely."""
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error reading configuration {path}: {e}", file=sys.stderr)
-        return {}
+_logger = get_logger("RUNNER")
 
 
 def cmd_prepare(args: argparse.Namespace) -> int:
@@ -64,10 +65,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         Forces a fresh retrieval and complete rebuild of all documents, updating
         both the dated files and the canonical reference files.
     """
-    session_date = getattr(args, "date", None)
-    if not session_date:
-        session_date = datetime.now().strftime("%Y%m%d")
-
+    session_date = getattr(args, "date", None) or datetime.now().strftime("%Y%m%d")
     is_reset = getattr(args, "reset", False)
     is_mcx = getattr(args, "mcx", False) or getattr(args, "exchange", "NSE").upper() == "MCX"
     target_exchange = "MCX" if is_mcx else "NSE"
@@ -78,148 +76,21 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     print(f"Time        : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
 
-    from core.instruments.master_fetcher import run_master_fetcher
-    from core.instruments.instrument_filter import run_instrument_filter
-    from core.volume.volume_index import run_volume_indexer
-    from core.instruments.subscription_manifest import run_manifest_generator
-
-    sys_cfg = load_json_config("config/system.json")
-    inst_cfg = load_json_config("config/instruments.json")
-
-    # Define dated paths and canonical paths
-    dated_master = f"data/instrument_{session_date}.csv"
-    canonical_master = inst_cfg.get("instruments", {}).get("paths", {}).get("instrument_master_csv", "data/instrument.csv")
-
-    if is_mcx:
-        dated_filtered = f"data/filtered_mcx_{session_date}.csv"
-        dated_index = f"data/index_mcx_{session_date}.json"
-        dated_manifest = f"data/subscription_manifest_mcx_{session_date}.json"
-        canonical_filtered = "data/filtered_mcx.csv"
-        canonical_index = "data/index_mcx.json"
-        canonical_manifest = "data/subscription_manifest_mcx.json"
-    else:
-        dated_filtered = f"data/filtered_{session_date}.csv"
-        dated_index = f"data/index_{session_date}.json"
-        dated_manifest = f"data/subscription_manifest_{session_date}.json"
-        canonical_filtered = inst_cfg.get("instruments", {}).get("paths", {}).get("filtered_universe_csv", "data/filtered.csv")
-        canonical_index = inst_cfg.get("instruments", {}).get("paths", {}).get("volume_index_json", "data/index.json")
-        canonical_manifest = inst_cfg.get("instruments", {}).get("paths", {}).get("subscription_manifest_json", "data/subscription_manifest.json")
-
-    def sync_copy(src: str, dst: str) -> None:
-        if os.path.exists(src) and os.path.abspath(src) != os.path.abspath(dst):
-            try:
-                shutil.copy2(src, dst)
-            except Exception as e:
-                print(f"  ⚠️ Warning syncing {src} -> {dst}: {e}", file=sys.stderr)
-
-    # -------------------------------------------------------------
-    # Step 1: Upstox Instrument Master Database
-    # -------------------------------------------------------------
-    print(f"\n[Step 1/4] Checking Instrument Master (Date: {session_date})...")
-    if not is_reset and os.path.exists(dated_master) and os.path.getsize(dated_master) > 100_000:
-        print(f"  ✓ Found today's Instrument Master at '{dated_master}' ({os.path.getsize(dated_master) / (1024 * 1024):.2f} MB). Skipping download.")
-        master_path = dated_master
-    elif not is_reset and os.path.exists(canonical_master) and os.path.getsize(canonical_master) > 100_000:
-        print(f"  ✓ Found existing local Instrument Master at '{canonical_master}'. Stamping dated copy '{dated_master}'.")
-        sync_copy(canonical_master, dated_master)
-        master_path = dated_master
-    else:
-        master_path = run_master_fetcher(force_download=is_reset, target_csv=dated_master)
-
-    if not master_path or not os.path.exists(master_path):
-        print(f"❌ Pre-market preparation failed at Step 1: Instrument master not available.", file=sys.stderr)
-        return 1
-    sync_copy(master_path, canonical_master)
-
-    # -------------------------------------------------------------
-    # Step 2: F&O Universe Filter (~213 equities or ~17 MCX commodities)
-    # -------------------------------------------------------------
-    print(f"\n[Step 2/4] Filtering Eligible {target_exchange} Universe (Date: {session_date})...")
-    if not is_reset and os.path.exists(dated_filtered) and os.path.getsize(dated_filtered) > 1000:
-        print(f"  ✓ Found today's Filtered {target_exchange} Universe at '{dated_filtered}' ({os.path.getsize(dated_filtered) / 1024:.1f} KB). Skipping filter.")
-        filtered_path = dated_filtered
-    elif not is_reset and os.path.exists(canonical_filtered) and os.path.getsize(canonical_filtered) > 1000:
-        print(f"  ✓ Found existing Filtered {target_exchange} Universe at '{canonical_filtered}'. Stamping dated copy '{dated_filtered}'.")
-        sync_copy(canonical_filtered, dated_filtered)
-        filtered_path = dated_filtered
-    else:
-        filtered_path = run_instrument_filter(master_csv=master_path, output_csv=dated_filtered, target_exchange=target_exchange)
-
-    if not filtered_path or not os.path.exists(filtered_path):
-        print(f"❌ Pre-market preparation failed at Step 2: {target_exchange} filtering failed.", file=sys.stderr)
-        return 1
-    sync_copy(filtered_path, canonical_filtered)
-
-    # -------------------------------------------------------------
-    # Step 3: Historical 30-Day Volume Index Baseline
-    # -------------------------------------------------------------
-    print(f"\n[Step 3/4] Building 30-Day Volume Baseline Index (Date: {session_date})...")
-    if not is_reset and not os.path.exists(dated_index) and os.path.exists(canonical_index):
-        print(f"  ✓ Found existing Volume Index at '{canonical_index}'. Validating for dated copy '{dated_index}'.")
-        sync_copy(canonical_index, dated_index)
-
-    volume_path = run_volume_indexer(
-        instruments_csv=filtered_path,
-        output_json=dated_index,
-        days=args.volume_days,
-        skip_if_exists=not is_reset,
+    res = run_prepare_steps(
+        reset=is_reset,
+        session_date=session_date,
+        exchange=target_exchange,
+        volume_days=getattr(args, "volume_days", 30),
     )
-
-    if not volume_path or not os.path.exists(volume_path):
-        print(f"❌ Pre-market preparation failed at Step 3: Volume index build failed.", file=sys.stderr)
+    if res.get("status") != "ok":
+        for err in res.get("errors", []):
+            _logger.error(err)
         return 1
-    sync_copy(volume_path, canonical_index)
-
-    # -------------------------------------------------------------
-    # Step 4: Multi-Stream Subscription Manifest Generator
-    # -------------------------------------------------------------
-    print(f"\n[Step 4/4] Generating Multi-Stream Subscription Manifest (Date: {session_date})...")
-    pop_strikes = inst_cfg.get("instruments", {}).get("options_subscription", {}).get("popular_strikes_above_atm", 3)
-    max_opt_und = (
-        sys_cfg.get("system", {}).get("manifest", {}).get("max_stream_underlyings_with_options")
-        or sys_cfg.get("system", {}).get("feed", {}).get("max_stream_underlyings_with_options", 110)
-    )
-    if not is_reset and os.path.exists(dated_manifest) and os.path.getsize(dated_manifest) > 10_000:
-        print(f"  ✓ Found today's Subscription Manifest at '{dated_manifest}' ({os.path.getsize(dated_manifest) / 1024:.1f} KB). Skipping generation.")
-        manifest_path = dated_manifest
-    elif not is_reset and os.path.exists(canonical_manifest) and os.path.getsize(canonical_manifest) > 10_000:
-        print(f"  ✓ Found existing Subscription Manifest at '{canonical_manifest}'. Stamping dated copy '{dated_manifest}'.")
-        sync_copy(canonical_manifest, dated_manifest)
-        manifest_path = dated_manifest
-    else:
-        manifest_path = run_manifest_generator(
-            filtered_csv=filtered_path,
-            volume_index_json=volume_path,
-            master_csv=master_path,
-            output_json=dated_manifest,
-            popular_strikes=pop_strikes,
-            max_stream_underlyings_with_options=int(max_opt_und),
-            session_date=session_date,
-        )
-
-    if not manifest_path or not os.path.exists(manifest_path):
-        print(f"❌ Pre-market preparation failed at Step 4: Manifest generation failed.", file=sys.stderr)
-        return 1
-    sync_copy(manifest_path, canonical_manifest)
-
     print("\n" + "=" * 80)
     print(f"✅ PRE-MARKET PREPARATION COMPLETED ({target_exchange} | {'RESET FRESH' if is_reset else 'SOFT PREPARE'})!")
-    print(f"  • Date Tagged Documents for Session: {session_date}")
-    print(f"    - Instrument Master : {dated_master} (Canonical: {canonical_master})")
-    print(f"    - {target_exchange} Universe     : {dated_filtered} (Canonical: {canonical_filtered})")
-    print(f"    - Volume Baseline   : {dated_index} (Canonical: {canonical_index})")
-    print(f"    - Stream Manifest   : {dated_manifest} (Canonical: {canonical_manifest})")
+    for step_name, info in res.get("steps", {}).items():
+        print(f"  • {step_name:10s}: {info.get('path') or info.get('status')}")
     print("=" * 80)
-
-    # Maintenance: Prune stale preparation files from older trading sessions and rotate debug logs
-    try:
-        from core.instruments.cleanup import prune_old_preparation_files
-        from core.auth.upstox_auth import prune_debug_log
-        prune_old_preparation_files(keep_session_date=session_date)
-        prune_debug_log("logs/debug.log")
-    except Exception as e:
-        print(f"  ⚠️ Preparation maintenance note: {e}", file=sys.stderr)
-
     return 0
 
 
@@ -240,17 +111,19 @@ def get_python_binary() -> str:
 
 
 def cmd_core(args: argparse.Namespace) -> int:
-    """Launch centralized Core Tier: Ingestion, Shared Memory Candle Manager, Quotes Broker, and optional Recorder."""
+    """Launch centralized Core Tier: Ingestion, SHM Candle Manager, Quotes Broker, Decoupled RMS, and optional Recorder."""
     feed_flag = getattr(args, "feed", False)
     candle_flag = getattr(args, "candlemanager", False)
     quotes_flag = getattr(args, "quotesbroker", False)
+    rms_flag = getattr(args, "rms", False)
     record_flag = getattr(args, "record", False)
 
-    # If none of the service flags are passed, start full core suite by default
-    if not (feed_flag or candle_flag or quotes_flag):
+    # If none of the core service flags are passed, start full core suite by default
+    if not (feed_flag or candle_flag or quotes_flag or rms_flag):
         feed_flag = True
         candle_flag = True
         quotes_flag = True
+        rms_flag = True
 
     print("=" * 80)
     print("🚀 LAUNCHING TRADING SYSTEM SPEC 2.0 - CORE INFRASTRUCTURE TIER")
@@ -259,30 +132,40 @@ def cmd_core(args: argparse.Namespace) -> int:
     procs = []
 
     # 1. Feed Handler
-    feed_mode = getattr(args, "mode", "ws")
-    feed_cmd = [py_bin, "-m", "core.feed.feed_handler", "--mode", feed_mode]
-    p_feed = spawn_process(feed_cmd, "feed_handler", "logs/feed_handler.log")
-    procs.append(p_feed)
-    print(f"  • Feed Handler      : Spawned (PID: {p_feed.pid}, Mode: {feed_mode})")
+    if feed_flag:
+        feed_mode = getattr(args, "mode", "ws")
+        feed_cmd = [py_bin, "-m", "core.feed.feed_handler", "--mode", feed_mode]
+        p_feed = spawn_process(feed_cmd, "feed_handler", "logs/feed_handler.log", tier="CORE")
+        procs.append(p_feed)
+        print(f"  • Feed Handler      : Spawned (PID: {p_feed.pid}, Mode: {feed_mode})")
 
     # 2. Candle Manager
-    candle_cmd = [py_bin, "-m", "core.candles.candle_manager"]
-    p_candle = spawn_process(candle_cmd, "candle_manager", "logs/candle_manager.log")
-    procs.append(p_candle)
-    print(f"  • Candle Manager    : Spawned (PID: {p_candle.pid})")
+    if candle_flag:
+        candle_cmd = [py_bin, "-m", "core.candles.candle_manager"]
+        p_candle = spawn_process(candle_cmd, "candle_manager", "logs/candle_manager.log", tier="CORE")
+        procs.append(p_candle)
+        print(f"  • Candle Manager    : Spawned (PID: {p_candle.pid})")
 
     # 3. Quotes Broker
-    quotes_cmd = [py_bin, "-m", "core.quotes.quotes_broker"]
-    p_quotes = spawn_process(quotes_cmd, "quotes_broker", "logs/quotes_broker.log")
-    procs.append(p_quotes)
-    print(f"  • Quotes Broker     : Spawned (PID: {p_quotes.pid})")
+    if quotes_flag:
+        quotes_cmd = [py_bin, "-m", "core.quotes.quotes_broker"]
+        p_quotes = spawn_process(quotes_cmd, "quotes_broker", "logs/quotes_broker.log", tier="CORE")
+        procs.append(p_quotes)
+        print(f"  • Quotes Broker     : Spawned (PID: {p_quotes.pid})")
 
-    # 4. Optional Market Recorder
+    # 4. Decoupled RMS & Strikes Service (Core Tier)
+    if rms_flag:
+        rms_cmd = [py_bin, "-m", "core.rms.rms_service"]
+        p_rms = spawn_process(rms_cmd, "rms_service", "logs/rms_service.log", tier="CORE")
+        procs.append(p_rms)
+        print(f"  • RMS & Strikes     : Spawned (PID: {p_rms.pid})")
+
+    # 5. Optional Market Recorder
     if record_flag:
         rec_cmd = [py_bin, "-m", "core.recorder.market_recorder"]
         if getattr(args, "debug", False):
             rec_cmd.append("--debug")
-        p_rec = spawn_process(rec_cmd, "market_recorder", "logs/market_recorder.log")
+        p_rec = spawn_process(rec_cmd, "market_recorder", "logs/market_recorder.log", tier="CORE")
         procs.append(p_rec)
         print(f"  • Market Recorder   : Spawned (PID: {p_rec.pid})")
 
@@ -328,8 +211,17 @@ def cmd_quotesbroker(args: argparse.Namespace) -> int:
     """Launch Quotes Broker independently."""
     py_bin = get_python_binary()
     cmd = [py_bin, "-m", "core.quotes.quotes_broker"]
-    p = spawn_process(cmd, "quotes_broker")
+    p = spawn_process(cmd, "quotes_broker", tier="CORE")
     print(f"  • Quotes Broker     : Spawned (PID: {p.pid})")
+    return supervise_processes([p])
+
+
+def cmd_rmsservice(args: argparse.Namespace) -> int:
+    """Launch decoupled Core RMS & Strike Selection service independently."""
+    py_bin = get_python_binary()
+    cmd = [py_bin, "-m", "core.rms.rms_service"]
+    p = spawn_process(cmd, "rms_service", "logs/rms_service.log", tier="CORE")
+    print(f"  • RMS Service       : Spawned (PID: {p.pid})")
     return supervise_processes([p])
 
 
@@ -411,38 +303,42 @@ def cmd_record(args: argparse.Namespace) -> int:
 
 
 def cmd_start_v2(args: argparse.Namespace) -> int:
-    """Launch 2.0 Distributed Multi-Track Trading System."""
+    """Launch 2.0 Distributed Multi-Track Trading System (attaches to Core RMS if already active)."""
     mode_arg = getattr(args, "mode", "paper") or "paper"
     modes = [m.strip().lower() for m in mode_arg.split(",") if m.strip()]
+    strat_cfg_path = getattr(args, "strategy_config", "config/strategies.json") or "config/strategies.json"
 
     raw_tracks = getattr(args, "tracks", None)
-    if not raw_tracks or raw_tracks.strip().upper() == "ALL":
-        from common.tracks.factory import get_enabled_track_names
-        tracks = get_enabled_track_names()
-    elif raw_tracks.strip().lower() in ("v1", "v2", "default") or os.path.exists(os.path.join("config", "tracks", f"{raw_tracks.strip().lower()}.json")):
-        from common.tracks.factory import get_enabled_track_names
-        tracks = get_enabled_track_names(track_profile=raw_tracks.strip().lower())
-    else:
-        tracks = [t.strip() for t in raw_tracks.split(",") if t.strip()]
+    tracks_by_mode = resolve_tracks_by_mode(
+        modes=modes,
+        tracks_spec=raw_tracks,
+        strategy_config=strat_cfg_path,
+    )
 
     print("=" * 80)
     print("⚡ LAUNCHING TRADING SYSTEM SPEC 2.0 - DISTRIBUTED EXECUTION")
     print(f"Modes  : {', '.join(m.upper() for m in modes)}")
-    print(f"Tracks : {', '.join(tracks)}")
+    for m in modes:
+        print(f"  • {m:13s}: {', '.join(tracks_by_mode.get(m, []))}")
     print("=" * 80)
 
     py_bin = get_python_binary()
     procs = []
 
     # 1. Scoring Engine 3.0 (Momentum Strategy)
-    p_score = spawn_process([py_bin, "-m", "strategies.momentum.scoring_engine"], "scoring_engine", "logs/scoring_engine.log")
+    p_score = spawn_process([py_bin, "-m", "strategies.momentum.scoring_engine"], "scoring_engine", "logs/scoring_engine.log", tier="STRATEGY")
     procs.append(p_score)
     print(f"  • Scoring Engine 3.0 : Spawned (PID: {p_score.pid})")
 
-    # 2. RMS Service
-    p_rms = spawn_process([py_bin, "-m", "core.rms.rms_service"], "rms_service", "logs/rms_service.log")
-    procs.append(p_rms)
-    print(f"  • RMS & Strikes      : Spawned (PID: {p_rms.pid})")
+    # 2. RMS Service: Attach to Core-tier RMS if active or --no-rms specified, else spawn fallback
+    no_rms = bool(getattr(args, "no_rms", False))
+    if no_rms or is_core_rms_running():
+        reason = "--no-rms requested" if no_rms else "Core RMS service already running"
+        print(f"  • RMS & Strikes      : Attaching to decoupled Core RMS ({reason})")
+    else:
+        p_rms = spawn_process([py_bin, "-m", "core.rms.rms_service"], "rms_service", "logs/rms_service.log", tier="CORE")
+        procs.append(p_rms)
+        print(f"  • RMS & Strikes      : Spawned fallback (PID: {p_rms.pid})")
 
     # 3. Execution Superstructures (one child process per mode and track)
     is_continue = getattr(args, "continue_state", False)
@@ -454,7 +350,7 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
     for m in modes:
         cls_mod = "paper" if m == "paper" else "delayed" if m == "paper_delayed" else "live"
         cls_name = "PaperSuperstructure" if m == "paper" else "DelayedSuperstructure" if m == "paper_delayed" else "LiveSuperstructure"
-        for tr in tracks:
+        for tr in tracks_by_mode.get(m, []):
             extra_kwargs = ""
             if m == "live":
                 extra_kwargs += f", live_confirmed={confirm_live}"
@@ -469,7 +365,7 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
                 f"s = {cls_name}(track_names=['{tr}'], continue_state={is_continue}{extra_kwargs}); "
                 f"s.start()"
             )
-            p_exec = spawn_process([py_bin, "-c", exec_code], f"exec_{m}_{tr}", f"logs/exec_{m}_{tr}.log")
+            p_exec = spawn_process([py_bin, "-c", exec_code], f"exec_{m}_{tr}", f"logs/exec_{m}_{tr}.log", tier="EXECUTION")
             procs.append(p_exec)
             print(f"  • Track Process      : {m.upper()} [{tr}] (PID: {p_exec.pid}) {'[CONTINUE STATE]' if is_continue else ''}")
 
@@ -717,24 +613,13 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_post_market(args: argparse.Namespace) -> int:
     """
-    Execute post-market archiving pipeline:
-    Compresses session recordings in recordings/{session_date}/ or recordings/session_{session_date}_market.jsonl
-    into .tar.gz archives to drastically reduce disk usage, and safely removes uncompressed files.
+    Execute post-market archiving pipeline via shared `run_post_market`.
     """
-    import re
-    import tarfile
-
-    session_date = getattr(args, "date", None)
-    if not session_date:
-        session_date = datetime.now().strftime("%Y%m%d")
-
+    session_date = getattr(args, "date", None) or datetime.now().strftime("%Y%m%d")
     record_dir = getattr(args, "record_dir", "recordings")
     delete_raw = getattr(args, "delete_raw", False)
     keep_raw_arg = getattr(args, "keep_raw", None)
-    if keep_raw_arg is not None:
-        keep_raw = bool(keep_raw_arg)
-    else:
-        keep_raw = not delete_raw
+    keep_raw = bool(keep_raw_arg) if keep_raw_arg is not None else (not delete_raw)
     archive_all = getattr(args, "all", False)
 
     print("=" * 80)
@@ -743,108 +628,27 @@ def cmd_post_market(args: argparse.Namespace) -> int:
     print(f"Time            : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
 
-    if not os.path.exists(record_dir):
-        print(f"❌ Recording directory not found: {record_dir}", file=sys.stderr)
+    res = run_post_market(
+        actions=["archive", "prune", "rotate_logs"],
+        session_date=session_date,
+        record_dir=record_dir,
+        keep_raw=keep_raw,
+        archive_all=archive_all,
+    )
+    arch = res.get("actions", {}).get("archive", {})
+    if arch.get("status") == "error":
+        _logger.error(arch.get("error", "Post-market archiving failed."))
         return 1
-
-    targets_to_archive: List[Tuple[str, str, str]] = []
-
-    if archive_all:
-        for item in sorted(os.listdir(record_dir)):
-            item_path = os.path.join(record_dir, item)
-            if os.path.isdir(item_path) and re.match(r"^\d{8}$", item):
-                targets_to_archive.append(("dir", item, item_path))
-            elif os.path.isfile(item_path) and re.match(r"^session_\d{8}_market\.jsonl$", item):
-                dt = item.split("_")[1]
-                targets_to_archive.append(("legacy_file", dt, item_path))
-    else:
-        folder_path = os.path.join(record_dir, session_date)
-        legacy_file = os.path.join(record_dir, f"session_{session_date}_market.jsonl")
-        if os.path.isdir(folder_path):
-            targets_to_archive.append(("dir", session_date, folder_path))
-        elif os.path.isfile(legacy_file):
-            targets_to_archive.append(("legacy_file", session_date, legacy_file))
-        else:
-            archive_path = os.path.join(record_dir, f"{session_date}.tar.gz")
-            if os.path.exists(archive_path):
-                print(f"  ✓ Session {session_date} is already archived at '{archive_path}' ({os.path.getsize(archive_path)/(1024*1024):.2f} MB).")
-                return 0
-            print(f"❌ No uncompressed recording found for session date '{session_date}' in '{record_dir}'.", file=sys.stderr)
-            return 1
-
-    total_raw_bytes = 0
-    total_comp_bytes = 0
-
-    for t_type, dt, t_path in targets_to_archive:
-        if t_type == "dir":
-            archive_path = os.path.join(record_dir, f"{dt}.tar.gz")
-            raw_bytes = sum(
-                os.path.getsize(os.path.join(root, f))
-                for root, _, files in os.walk(t_path)
-                for f in files
-            )
-            print(f"\n[Compressing Session {dt}]")
-            print(f"  • Source Directory : {t_path} ({raw_bytes / (1024 * 1024):.2f} MB)")
-            print(f"  • Target Archive   : {archive_path}")
-
-            with tarfile.open(archive_path, "w:gz") as tar:
-                tar.add(t_path, arcname=dt)
-
-            comp_bytes = os.path.getsize(archive_path)
-            reduction = ((raw_bytes - comp_bytes) / raw_bytes * 100.0) if raw_bytes > 0 else 0.0
-            print(f"  ✓ Created {archive_path} ({comp_bytes / (1024 * 1024):.2f} MB) [Savings: {reduction:.1f}% reduction]")
-
-            total_raw_bytes += raw_bytes
-            total_comp_bytes += comp_bytes
-
-            if not keep_raw:
-                shutil.rmtree(t_path)
-                print(f"  ✓ Cleaned up uncompressed raw folder: {t_path}")
-            else:
-                print("  ℹ️ Raw files preserved (--keep-raw active).")
-
-        elif t_type == "legacy_file":
-            archive_path = os.path.join(record_dir, f"session_{dt}_market.tar.gz")
-            raw_bytes = os.path.getsize(t_path)
-            print(f"\n[Compressing Legacy Session {dt}]")
-            print(f"  • Source File    : {t_path} ({raw_bytes / (1024 * 1024):.2f} MB)")
-            print(f"  • Target Archive : {archive_path}")
-
-            with tarfile.open(archive_path, "w:gz") as tar:
-                tar.add(t_path, arcname=os.path.basename(t_path))
-
-            comp_bytes = os.path.getsize(archive_path)
-            reduction = ((raw_bytes - comp_bytes) / raw_bytes * 100.0) if raw_bytes > 0 else 0.0
-            print(f"  ✓ Created {archive_path} ({comp_bytes / (1024 * 1024):.2f} MB) [Savings: {reduction:.1f}% reduction]")
-
-            total_raw_bytes += raw_bytes
-            total_comp_bytes += comp_bytes
-
-            if not keep_raw:
-                os.remove(t_path)
-                print(f"  ✓ Cleaned up uncompressed raw file: {t_path}")
-            else:
-                print("  ℹ️ Raw file preserved (--keep-raw active).")
-
+    if arch.get("status") == "already_archived":
+        print(f"  ✓ Session {session_date} is already archived at '{arch.get('archive_path')}'.")
+        return 0
     print("\n" + "=" * 80)
-    overall_savings = ((total_raw_bytes - total_comp_bytes) / total_raw_bytes * 100.0) if total_raw_bytes > 0 else 0.0
-    saved_mb = (total_raw_bytes - total_comp_bytes) / (1024 * 1024)
     print("🎉 ARCHIVING SUMMARY")
-    print(f"  • Sessions Processed : {len(targets_to_archive)}")
-    print(f"  • Total Raw Size     : {total_raw_bytes / (1024 * 1024):.2f} MB")
-    print(f"  • Total Archive Size : {total_comp_bytes / (1024 * 1024):.2f} MB")
-    print(f"  • Net Disk Saved     : {saved_mb:.2f} MB ({overall_savings:.1f}% reduction)")
+    print(f"  • Sessions Processed : {arch.get('sessions_processed', 0)}")
+    print(f"  • Total Raw Size     : {arch.get('raw_mb', 0.0):.2f} MB")
+    print(f"  • Total Archive Size : {arch.get('archive_mb', 0.0):.2f} MB")
+    print(f"  • Net Disk Saved     : {arch.get('saved_mb', 0.0):.2f} MB")
     print("=" * 80)
-
-    # EOD Maintenance: Prune stale preparation files from older trading sessions and rotate debug logs
-    try:
-        from core.instruments.cleanup import prune_old_preparation_files
-        from core.auth.upstox_auth import prune_debug_log
-        prune_old_preparation_files(keep_session_date=session_date)
-        prune_debug_log("logs/debug.log")
-    except Exception as e:
-        print(f"  ⚠️ EOD maintenance note: {e}", file=sys.stderr)
-
     return 0
 
 
@@ -994,48 +798,15 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_freeze(args: argparse.Namespace) -> int:
     """Freeze new entry orders for an execution mode while trailing active positions."""
     mode = getattr(args, "mode", "all") or "all"
-    mode = mode.lower()
-    os.makedirs("logs", exist_ok=True)
-    all_modes = ["live", "paper", "paper_delayed", "sim"]
-
-    created_flags = []
-    if mode in ("all", "*"):
-        all_flag = os.path.join("logs", ".freeze_all")
-        with open(all_flag, "w", encoding="utf-8") as f:
-            f.write(f"frozen at {datetime.now().isoformat()}\n")
-        created_flags.append(all_flag)
-        for m in all_modes:
-            flag_file = os.path.join("logs", f".freeze_{m}")
-            with open(flag_file, "w", encoding="utf-8") as f:
-                f.write(f"frozen at {datetime.now().isoformat()} via freeze all\n")
-            created_flags.append(flag_file)
-    else:
-        flag_file = os.path.join("logs", f".freeze_{mode}")
-        with open(flag_file, "w", encoding="utf-8") as f:
-            f.write(f"frozen at {datetime.now().isoformat()}\n")
-        created_flags.append(flag_file)
-
-    signaled_pid = None
-    pid_file = os.path.join("logs", "strategy.pid")
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file, "r", encoding="utf-8") as f:
-                pid = int(f.read().strip())
-            os.kill(pid, signal.SIGUSR1)
-            signaled_pid = pid
-        except Exception:
-            pass
-
+    res = set_freeze_state(mode=mode, freeze=True)
     print("=" * 80)
-    print(f"❄️  EXECUTION MODE FROZEN: {mode.upper()}")
+    print(f"❄️  EXECUTION MODE FROZEN: {res['mode'].upper()}")
     print("=" * 80)
-    for cf in created_flags:
+    for cf in res.get("created_flags", []):
         print(f"  • Flag File Created : {cf}")
-    if signaled_pid:
-        print(f"  • Signal Sent       : SIGUSR1 delivered to running strategy (PID: {signaled_pid})")
-    print(f"  • Existing Trades   : Continues trailing and exiting per targets/SL dynamically.")
-    print(f"  • New Entries       : BLOCKED (No new positions will be opened in {mode.upper()} mode).")
-    print(f"  • To resume         : python3 runner.py unfreeze --mode {mode}")
+    if res.get("signaled_pids"):
+        print(f"  • Signal Sent       : SIGUSR1 delivered to PIDs {res['signaled_pids']}")
+    print(f"  • To resume         : python3 runner.py unfreeze --mode {res['mode']}")
     print("=" * 80)
     return 0
 
@@ -1043,107 +814,35 @@ def cmd_freeze(args: argparse.Namespace) -> int:
 def cmd_unfreeze(args: argparse.Namespace) -> int:
     """Unfreeze an execution mode to resume regular order entry."""
     mode = getattr(args, "mode", "all") or "all"
-    mode = mode.lower()
-    os.makedirs("logs", exist_ok=True)
-    all_modes = ["live", "paper", "paper_delayed", "sim"]
-    all_flag = os.path.join("logs", ".freeze_all")
-
-    removed_flags = []
-    retained_frozen = []
-
-    if mode in ("all", "*"):
-        # Unfreezing all removes .freeze_all and all individual .freeze_<mode> files
-        if os.path.exists(all_flag):
-            try:
-                os.remove(all_flag)
-                removed_flags.append(all_flag)
-            except Exception as e:
-                print(f"Error removing {all_flag}: {e}", file=sys.stderr)
-        for m in all_modes:
-            flag_file = os.path.join("logs", f".freeze_{m}")
-            if os.path.exists(flag_file):
-                try:
-                    os.remove(flag_file)
-                    removed_flags.append(flag_file)
-                except Exception as e:
-                    print(f"Error removing {flag_file}: {e}", file=sys.stderr)
-    else:
-        # Unfreezing a single mode:
-        # If 'all' was frozen, remove .freeze_all and ensure all other modes are individually frozen!
-        if os.path.exists(all_flag):
-            try:
-                os.remove(all_flag)
-                removed_flags.append(all_flag)
-            except Exception as e:
-                print(f"Error removing {all_flag}: {e}", file=sys.stderr)
-            for other_m in all_modes:
-                if other_m != mode:
-                    other_flag = os.path.join("logs", f".freeze_{other_m}")
-                    if not os.path.exists(other_flag):
-                        with open(other_flag, "w", encoding="utf-8") as f:
-                            f.write(f"frozen at {datetime.now().isoformat()} (retained after unfreezing {mode})\n")
-                    retained_frozen.append(other_m)
-
-        # Remove the specific mode's flag file
-        target_flag = os.path.join("logs", f".freeze_{mode}")
-        if os.path.exists(target_flag):
-            try:
-                os.remove(target_flag)
-                removed_flags.append(target_flag)
-            except Exception as e:
-                print(f"Error removing {target_flag}: {e}", file=sys.stderr)
-
-    signaled_pid = None
-    pid_file = os.path.join("logs", "strategy.pid")
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file, "r", encoding="utf-8") as f:
-                pid = int(f.read().strip())
-            os.kill(pid, signal.SIGUSR2)
-            signaled_pid = pid
-        except Exception:
-            pass
-
+    res = set_freeze_state(mode=mode, freeze=False)
     print("=" * 80)
-    print(f"🔥 EXECUTION MODE UN-FROZEN: {mode.upper()}")
+    print(f"🔥 EXECUTION MODE UN-FROZEN: {res['mode'].upper()}")
     print("=" * 80)
-    for rf in removed_flags:
+    for rf in res.get("removed_flags", []):
         print(f"  • Flag File Removed : {rf}")
-    if retained_frozen:
-        print(f"  • Remaining Frozen  : {', '.join(m.upper() for m in retained_frozen)} (retained in frozen state)")
-    if signaled_pid:
-        print(f"  • Signal Sent       : SIGUSR2 delivered to running strategy (PID: {signaled_pid})")
-    print(f"  • Normal Execution  : RESUMED across {mode.upper()} mode.")
+    if res.get("retained_frozen"):
+        print(f"  • Remaining Frozen  : {', '.join(m.upper() for m in res['retained_frozen'])}")
+    if res.get("signaled_pids"):
+        print(f"  • Signal Sent       : SIGUSR2 delivered to PIDs {res['signaled_pids']}")
     print("=" * 80)
     return 0
 
 
 def cmd_reconcile(args: argparse.Namespace) -> int:
     """Manually trigger broker position reconciliation against Groww."""
-    from execution.superstructures.live import LiveSuperstructure, GrowwLiveAdapter
     print("=" * 80)
     print("🔄 BROKER POSITION RECONCILIATION & CONFLATION ENGINE")
     print("=" * 80)
-    adapter = LiveSuperstructure(
-        live_confirmed=getattr(args, "confirm_live", True),
-        enable_polling=False,
-    )
-    res = adapter.reconcile_broker_positions()
+    res = run_reconcile(confirm_live=getattr(args, "confirm_live", True))
     print(f"Status           : {res.get('status')}")
     print(f"Broker Positions : {res.get('broker_positions_count', 0)}")
     print(f"Local Positions  : {res.get('local_positions_count', 0)}")
-    if res.get("ghost_positions_closed"):
-        print(f"Ghost Positions Resolved : {len(res['ghost_positions_closed'])}")
-        for g in res["ghost_positions_closed"]:
-            print(f"  • {g['symbol']}: closed externally on broker, local state cleared.")
-    if res.get("orphan_positions_adopted"):
-        print(f"Orphan Positions Adopted : {len(res['orphan_positions_adopted'])}")
-        for o in res["orphan_positions_adopted"]:
-            print(f"  • {o['symbol']}: qty {o['quantity']} adopted into local risk tracking.")
-    if res.get("quantity_mismatches_adjusted"):
-        print(f"Quantity Discrepancies Adjusted : {len(res['quantity_mismatches_adjusted'])}")
-        for a in res["quantity_mismatches_adjusted"]:
-            print(f"  • {a['symbol']}: adjusted {a['old_quantity']} -> {a['new_quantity']}.")
+    for g in res.get("ghost_positions_closed", []):
+        print(f"  • Ghost closed: {g['symbol']}")
+    for o in res.get("orphan_positions_adopted", []):
+        print(f"  • Orphan adopted: {o['symbol']} (qty {o['quantity']})")
+    for a in res.get("quantity_mismatches_adjusted", []):
+        print(f"  • Qty adjusted: {a['symbol']} {a['old_quantity']} -> {a['new_quantity']}")
     print("=" * 80)
     return 0
 
@@ -1157,38 +856,11 @@ def cmd_stop_live(args: argparse.Namespace) -> int:
 def cmd_rest_fallback(args: argparse.Namespace) -> int:
     """Check or dynamically toggle REST polling fallback for market data listener."""
     action = getattr(args, "action", "status") or "status"
-    flag_file = os.path.join("logs", ".allow_rest_fallback")
-    os.makedirs("logs", exist_ok=True)
-    if action == "enable":
-        with open(flag_file, "w", encoding="utf-8") as f:
-            f.write(f"enabled at {datetime.now().isoformat()}\n")
-        print("=" * 80)
-        print("⚠️  REST FALLBACK DYNAMICALLY ENABLED")
-        print("=" * 80)
-        print(f"  • Flag File Created : {flag_file}")
-        print("  • Listener Policy   : Switching to REST poller is now permitted if WebSocket fails.")
-        print("================================================================================")
-    elif action == "disable":
-        if os.path.exists(flag_file):
-            try:
-                os.remove(flag_file)
-            except Exception as e:
-                print(f"Error removing {flag_file}: {e}", file=sys.stderr)
-        print("=" * 80)
-        print("🛡️  REST FALLBACK DYNAMICALLY DISABLED (Optimal Trading Guard Active)")
-        print("=" * 80)
-        print(f"  • Flag File Removed : {flag_file}")
-        print("  • Listener Policy   : WebSocket reconnect strictly enforced; no suboptimal REST polling.")
-        print("================================================================================")
-    else:
-        is_enabled = os.path.exists(flag_file)
-        print("=" * 80)
-        print(f"📡 REST FALLBACK STATUS: {'ENABLED' if is_enabled else 'DISABLED (Default - Optimal Trading Guard)'}")
-        print("=" * 80)
-        print(f"  • Disk Flag File    : {flag_file} ({'PRESENT' if is_enabled else 'ABSENT'})")
-        print(f"  • Current Policy    : {'Degraded REST quote polling permitted' if is_enabled else 'Strict binary WebSocket streaming only'}")
-        print("  • To Change         : python3 runner.py rest-fallback enable | disable")
-        print("================================================================================")
+    res = set_rest_fallback_state(action=action)
+    print("=" * 80)
+    print(f"📡 REST FALLBACK STATUS: {'ENABLED' if res['enabled'] else 'DISABLED (Default - Optimal Trading Guard)'}")
+    print(f"  • Disk Flag File    : {res['flag_file']} ({'PRESENT' if res['enabled'] else 'ABSENT'})")
+    print("=" * 80)
     return 0
 
 
@@ -1205,10 +877,11 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Operational commands")
 
     # Command: core
-    p_core = subparsers.add_parser("core", help="Launch Core Ingestion Tier (Feed, CandleManager, QuotesBroker, optional Recorder)")
+    p_core = subparsers.add_parser("core", help="Launch Core Ingestion Tier (Feed, CandleManager, QuotesBroker, RMS, optional Recorder)")
     p_core.add_argument("--feed", action="store_true", help="Launch live/mock feed handler")
     p_core.add_argument("--candlemanager", action="store_true", help="Launch shared memory candle manager")
     p_core.add_argument("--quotesbroker", action="store_true", help="Launch LVC quotes broker")
+    p_core.add_argument("--rms", action="store_true", help="Launch decoupled RMS strike selection service")
     p_core.add_argument("--record", action="store_true", help="Launch market tick recorder")
     p_core.add_argument("--debug", action="store_true", help="Dump raw incoming ticks to recorder debug log")
     p_core.add_argument("--mode", default="ws", choices=["ws", "mock"], help="Feed ingestion mode (default: ws)")
@@ -1224,6 +897,9 @@ def main():
 
     # Command: quotesbroker
     subparsers.add_parser("quotesbroker", help="Start LVC quotes broker")
+
+    # Command: rmsservice
+    subparsers.add_parser("rmsservice", help="Start decoupled Core RMS & strike selection service")
 
     # Command: dashboard
     p_dash = subparsers.add_parser("dashboard", help="Start universal terminal telemetry dashboard (Retired in favor of web UI)")
@@ -1288,8 +964,9 @@ def main():
     p_start.add_argument("--strategy", default="momentum", choices=["momentum"], help="Strategy package to execute")
     p_start.add_argument("--exchange", default="NSE", choices=["NSE", "MCX"], help="Target market exchange (default: NSE)")
     p_start.add_argument("--mcx", action="store_true", help="Shortcut for --exchange MCX")
-    p_start.add_argument("--mode", default="paper", help="Execution mode(s): paper, paper_delayed, live, all, or comma-separated e.g. 'paper,live' (default: paper)")
+    p_start.add_argument("--mode", "--modes", dest="mode", default="paper", help="Execution mode(s): paper, paper_delayed, live, all, or comma-separated e.g. 'paper,live' (default: paper)")
     p_start.add_argument("--tracks", "--track", dest="tracks", default=None, help="Filter active strategy tracks: fast_momentum, trend_pullback, fixed_target, composite, or ALL")
+    p_start.add_argument("--no-rms", dest="no_rms", action="store_true", default=False, help="Do not spawn fallback RMS service (attach to Core RMS)")
     p_start.add_argument("--continue", dest="continue_state", action="store_true", help="Recover previous state & active positions from today's journals")
     p_start.add_argument("--legacy", action="store_true", default=False, help="Run legacy strategy engine instead of 2.0 distributed architecture")
     p_start.add_argument("--record", action="store_true", help="Launch market tick recorder service")
@@ -1414,6 +1091,7 @@ def main():
         "feed": cmd_feed,
         "candlemanager": cmd_candlemanager,
         "quotesbroker": cmd_quotesbroker,
+        "rmsservice": cmd_rmsservice,
         "dashboard": cmd_dashboard,
         "prepare": cmd_prepare,
         "listen": cmd_listen,

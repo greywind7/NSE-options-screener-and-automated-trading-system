@@ -22,11 +22,14 @@ from core.common.ipc_schemas import (
     unpack_message,
 )
 from core.common.time_utils import get_market_date_str
+from core.common.logging_utils import get_logger
 from core.quotes.quotes_broker import (
     QuotesBrokerClient,
     DEFAULT_QUOTES_ROUTER_IPC,
     DEFAULT_QUOTES_STREAM_IPC,
 )
+
+_logger = get_logger("SUPERSTRUCTURE")
 
 DEFAULT_RMS_SUB_IPC = "ipc:///tmp/rms_strike_pub.ipc"
 DEFAULT_HB_SUB_IPC = "ipc:///tmp/quotes_heartbeat.pub"
@@ -211,11 +214,17 @@ class BaseSuperstructure(ExecutionContext, ABC):
                     continue
                 try:
                     meta = dict(tdict.get("metadata") or {})
-                    origin_track = (
+                    is_composite = hasattr(track, "sub_tracks") and bool(getattr(track, "sub_tracks", None))
+                    raw_origin = (
                         tdict.get("origin_track")
                         or meta.get("origin_track")
                         or meta.get("sub_track")
-                        or tr_name
+                    )
+                    origin_track = raw_origin if is_composite else (raw_origin or tr_name)
+                    sub_track_rule = (
+                        tdict.get("sub_track_rule")
+                        or meta.get("sub_track_rule")
+                        or (None if is_composite else track.__class__.__name__)
                     )
                     trade = TradeState(
                         trade_id=tid,
@@ -237,6 +246,7 @@ class BaseSuperstructure(ExecutionContext, ABC):
                         status=tdict.get("status", "OPEN"),
                         entry_reason=tdict.get("entry_reason"),
                         origin_track=origin_track,
+                        sub_track_rule=sub_track_rule,
                         exit_price=float(tdict["exit_price"]) if tdict.get("exit_price") is not None else None,
                         exit_time=float(tdict["exit_time"]) if tdict.get("exit_time") is not None else None,
                         exit_reason=tdict.get("exit_reason"),
@@ -249,7 +259,28 @@ class BaseSuperstructure(ExecutionContext, ABC):
 
                     is_filled = (tid in filled_ids) or (self.mode != "paper_delayed")
                     if hasattr(track, "add_recovered_trade"):
-                        track.add_recovered_trade(trade, is_filled=is_filled)
+                        rec_ok = track.add_recovered_trade(trade, is_filled=is_filled)
+                        if rec_ok is False:
+                            quarantine_path = os.path.join(session_dir, "quarantined_legacy_trades.jsonl")
+                            try:
+                                os.makedirs(session_dir, exist_ok=True)
+                                with open(quarantine_path, "a", encoding="utf-8") as qf:
+                                    qf.write(json.dumps({
+                                        "timestamp": time.time(),
+                                        "mode": self.mode,
+                                        "track": tr_name,
+                                        "trade_id": tid,
+                                        "origin_track": origin_track,
+                                        "reason": "missing_or_invalid_origin_track_for_composite",
+                                        "trade": tdict,
+                                    }) + "\n")
+                            except Exception:
+                                pass
+                            _logger.error(
+                                f"[{self.mode.upper()}] Quarantined ambiguous composite trade {tid} "
+                                f"(track='{tr_name}', origin_track={origin_track!r}) -> {quarantine_path}"
+                            )
+                            continue
                     elif trade.status == "OPEN":
                         track.active_trades[tid] = trade
                     else:
@@ -284,7 +315,7 @@ class BaseSuperstructure(ExecutionContext, ABC):
                         self.risk_mgr.update_pnl(trade.realized_pnl)
                         total_closed_recovered += 1
                 except Exception as e:
-                    print(f"[{self.mode.upper()}_SUPERSTRUCTURE] ⚠️ Error recovering trade {tid}: {e}", file=sys.stderr)
+                    _logger.error(f"[{self.mode.upper()}] Error recovering trade {tid}: {e}")
 
         if tokens_to_sub:
             self._recovered_tokens = list(tokens_to_sub)
@@ -299,9 +330,8 @@ class BaseSuperstructure(ExecutionContext, ABC):
                                     trade.current_bid = bid
                                     trade.highest_price = max(trade.highest_price, bid)
 
-        ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(
-            f"[{ts_str}] [{self.mode.upper()}_SUPERSTRUCTURE] ✓ State recovered (--continue): "
+        _logger.info(
+            f"[{self.mode.upper()}] State recovered (--continue): "
             f"{total_open_recovered} open trades re-activated, {total_closed_recovered} closed trades restored."
         )
 
@@ -322,11 +352,11 @@ class BaseSuperstructure(ExecutionContext, ABC):
 
     def freeze(self) -> None:
         self._is_frozen = True
-        print(f"[{self.mode.upper()}_SUPERSTRUCTURE] In-memory execution FROZEN.")
+        _logger.warning(f"[{self.mode.upper()}] In-memory execution FROZEN.")
 
     def unfreeze(self) -> None:
         self._is_frozen = False
-        print(f"[{self.mode.upper()}_SUPERSTRUCTURE] In-memory execution UN-FROZEN.")
+        _logger.info(f"[{self.mode.upper()}] In-memory execution UN-FROZEN.")
 
     def subscribe_quotes(self, tokens: List[str]) -> Dict[str, Any]:
         """Subscribe to live quotes stream from Quotes Broker with superstructure client_id for reference counting."""
@@ -423,7 +453,7 @@ class BaseSuperstructure(ExecutionContext, ABC):
         from common.tracks.factory import create_tracks
         self.tracks = create_tracks(context=self, track_filter=self.track_names)
         for name in self.tracks.keys():
-            print(f"[{self.mode.upper()}_SUPERSTRUCTURE] Registered track: {name}")
+            _logger.info(f"[{self.mode.upper()}] Registered track: {name}")
 
     def on_opportunity(self, opp: ActionableOpportunity) -> None:
         """Route incoming opportunity to all active tracks."""
@@ -474,7 +504,7 @@ class BaseSuperstructure(ExecutionContext, ABC):
             except (ValueError, OSError, AttributeError):
                 pass
         self.running = True
-        print(f"[{self.mode.upper()}_SUPERSTRUCTURE] Active | Tracks: {list(self.tracks.keys())}")
+        _logger.info(f"[{self.mode.upper()}] Active | Tracks: {list(self.tracks.keys())}")
 
         # Re-ensure subscriptions to QuotesBroker upon entering loop for recovered positions
         if hasattr(self, "_recovered_tokens") and self._recovered_tokens:
@@ -533,7 +563,7 @@ class BaseSuperstructure(ExecutionContext, ABC):
             except zmq.ZMQError:
                 break
             except Exception as e:
-                print(f"[{self.mode.upper()}_SUPERSTRUCTURE] Error: {e}", file=sys.stderr)
+                _logger.error(f"[{self.mode.upper()}] Loop error: {e}")
 
     def stop(self) -> None:
         self.running = False

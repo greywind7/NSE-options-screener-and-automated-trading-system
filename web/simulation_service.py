@@ -16,7 +16,10 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import polars as pl
 
+from core.common.logging_utils import get_logger
 from core.common.time_utils import IST
+
+_logger = get_logger("SIMULATION_SERVICE")
 from simulation.columnar_sim_engine import ColumnarSimEngine
 from web.batch_analytics import (
     build_batch_comparison_summary,
@@ -580,7 +583,7 @@ class SimulationService:
         except Exception as e:
             self.latest_error = str(e)
             self.progress_status = f"Failed: {e}"
-            print(f"[SIMULATION_SERVICE] Simulation job error for {job_id}: {e}")
+            _logger.error(f"Simulation job error for {job_id}: {e}")
             return {"error": str(e), "status": "failed"}
         finally:
             if process and process.is_alive():

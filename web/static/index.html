@@ -11,35 +11,17 @@
 <body>
 
   <!-- =========================================================================
-       HEADER / NAVBAR
+       HEADER / TOP STATUS BAR
        ========================================================================= -->
   <header class="header-bar">
     <div class="brand-section">
+      <button type="button" id="sidebar-toggle-btn" class="hamburger-btn" aria-label="Toggle Navigation Menu" aria-expanded="true" title="Collapse / Expand Sidebar">☰</button>
       <div class="brand-logo">AG</div>
       <div>
         <span class="brand-title">ANTIGRAVITY</span>
         <span class="brand-tag">Analytics 2.0</span>
       </div>
     </div>
-
-    <!-- Navigation Tabs -->
-    <nav class="nav-tabs">
-      <button class="tab-btn active" data-tab="live">
-        <span style="color:var(--accent-red); font-size:14px;">●</span> Live Telemetry
-      </button>
-      <button class="tab-btn" data-tab="alerts">
-        <span>🚨</span> Live Alerts
-      </button>
-      <button class="tab-btn" data-tab="historical">
-        <span>📜</span> Historical Review
-      </button>
-      <button class="tab-btn" data-tab="simulation">
-        <span style="color:var(--accent-cyan); font-size:14px;">⚡</span> Simulation Lab
-      </button>
-      <button class="tab-btn" data-tab="sim-results" id="nav-tab-sim-results" style="display:none;">
-        <span style="color:var(--accent-green); font-size:14px;">📊</span> Simulation Results
-      </button>
-    </nav>
 
     <!-- Status & Clock -->
     <div class="status-section">
@@ -52,9 +34,47 @@
   </header>
 
   <!-- =========================================================================
-       MAIN SPA CONTAINER
+       APP SHELL (VERTICAL LEFT SIDEBAR + MAIN CONTENT)
        ========================================================================= -->
-  <main class="main-container">
+  <div id="app-shell" class="app-shell">
+    <aside id="sidebar-nav" class="sidebar-nav nav-tabs">
+      <div class="sidebar-section-label">Trading &amp; Analytics</div>
+      <button class="tab-btn active" data-tab="live">
+        <span style="color:var(--accent-red); font-size:14px;">●</span>
+        <span>Live Telemetry</span>
+      </button>
+      <button class="tab-btn" data-tab="alerts">
+        <span>🚨</span>
+        <span>Live Alerts</span>
+      </button>
+      <button class="tab-btn" data-tab="historical">
+        <span>📜</span>
+        <span>Historical Review</span>
+      </button>
+      <button class="tab-btn" data-tab="simulation">
+        <span style="color:var(--accent-cyan); font-size:14px;">⚡</span>
+        <span>Simulation Lab</span>
+      </button>
+      <button class="tab-btn" data-tab="sim-results" id="nav-tab-sim-results" style="display:none;">
+        <span style="color:var(--accent-green); font-size:14px;">📊</span>
+        <span>Simulation Results</span>
+      </button>
+      <div class="sidebar-section-label" style="margin-top:8px;">Operations &amp; Telemetry</div>
+      <button class="tab-btn" data-tab="admin" id="nav-tab-admin">
+        <span>🛠️</span>
+        <span>Admin Ops</span>
+      </button>
+      <button class="tab-btn" data-tab="health" id="nav-tab-health">
+        <span id="nav-health-dot" class="health-dot green">●</span>
+        <span style="flex:1;">System Health</span>
+        <span id="nav-health-badge" class="health-nav-pill green">OK</span>
+      </button>
+    </aside>
+
+    <!-- =======================================================================
+         MAIN SPA CONTAINER
+         ======================================================================= -->
+    <main class="main-container">
 
     <!-- =======================================================================
          TAB 1: LIVE TELEMETRY & MTM
@@ -177,6 +197,7 @@
               <thead>
                 <tr>
                   <th>Trade ID</th>
+                  <th class="text-center">Origin / Rule</th>
                   <th>Symbol</th>
                   <th>Contract</th>
                   <th class="text-center">Qty</th>
@@ -393,6 +414,7 @@
               <thead>
                 <tr>
                   <th>Trade ID</th>
+                  <th class="text-center">Origin / Rule</th>
                   <th>Symbol</th>
                   <th>Contract</th>
                   <th class="text-center">Qty</th>
@@ -1056,7 +1078,392 @@
 
     </section>
 
+    <!-- =======================================================================
+         TAB 5: ADMIN OPS CONTROL PLANE
+         ======================================================================= -->
+    <section id="view-admin" class="tab-view">
+      <div class="controls-bar" style="justify-content:space-between;">
+        <div id="admin-auth-badges" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;"></div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <div id="admin-freeze-badges" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
+          <button type="button" id="admin-refresh-btn" class="pill-btn active">↻ Refresh State</button>
+        </div>
+      </div>
+
+      <!-- Workflow Activity Selector Dropdown -->
+      <div class="controls-bar" style="justify-content:space-between; flex-wrap:wrap; gap:10px;">
+        <div class="filter-group" style="gap:10px;">
+          <span class="filter-label">Operational Activity:</span>
+          <select id="admin-activity-select" class="custom-select" style="min-width:260px;">
+            <option value="premarket">1. Pre-Market Preparation Pipeline</option>
+            <option value="core">2. Core Infrastructure Tier</option>
+            <option value="strategy">3. Strategy &amp; Granular Execution Tracks</option>
+            <option value="risk">4. Risk Controls, Broker Auth &amp; Emergency</option>
+            <option value="postmarket">5. Post-Market Housekeeping</option>
+            <option value="processes">6. Active Processes &amp; Audit Trail</option>
+            <option value="all">Overview (Show All Sections)</option>
+          </select>
+        </div>
+        <div class="pill-group" style="flex-wrap:wrap;">
+          <button type="button" class="pill-btn admin-activity-pill active" data-activity="premarket">1. Pre-Market</button>
+          <button type="button" class="pill-btn admin-activity-pill" data-activity="core">2. Core</button>
+          <button type="button" class="pill-btn admin-activity-pill" data-activity="strategy">3. Strategy</button>
+          <button type="button" class="pill-btn admin-activity-pill" data-activity="risk">4. Risk &amp; Auth</button>
+          <button type="button" class="pill-btn admin-activity-pill" data-activity="postmarket">5. Post-Market</button>
+          <button type="button" class="pill-btn admin-activity-pill" data-activity="processes">6. Processes &amp; Audit</button>
+          <button type="button" class="pill-btn admin-activity-pill" data-activity="all">All</button>
+        </div>
+      </div>
+
+      <!-- 1. PRE-MARKET ACTIVITIES -->
+      <div class="admin-card admin-activity-panel" data-activity="premarket">
+        <div class="admin-card-header">
+          <div class="panel-title"><span>🌅 Pre-Market Preparation Pipeline</span></div>
+          <div class="pill-group">
+            <button type="button" id="admin-pm-select-all" class="pill-btn">All</button>
+            <button type="button" id="admin-pm-select-none" class="pill-btn">None</button>
+          </div>
+        </div>
+        <div id="admin-premarket-steps" class="admin-check-grid"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Exchange</label>
+            <select id="admin-premarket-exchange" class="custom-select" style="width:100%;">
+              <option value="NSE">NSE (F&amp;O Equities)</option>
+              <option value="MCX">MCX (Commodities)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Session Date (YYYYMMDD)</label>
+            <input type="text" id="admin-premarket-date" class="form-input" placeholder="20261128" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Volume Days</label>
+            <input type="number" id="admin-premarket-days" class="form-input" value="30" min="7" max="30" />
+          </div>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" id="admin-premarket-reset" />
+            <span style="font-size:12px;">Force Fresh Rebuild (--reset)</span>
+          </label>
+          <button type="button" id="admin-run-premarket-btn" class="pill-btn active">▶ Launch Selected Pre-Market</button>
+        </div>
+        <div id="admin-premarket-result" style="display:none; font-size:12px; font-family:var(--font-mono);"></div>
+      </div>
+
+      <!-- 2. CORE INFRASTRUCTURE TIER -->
+      <div class="admin-card admin-activity-panel" data-activity="core" style="display:none;">
+        <div class="admin-card-header">
+          <div class="panel-title"><span>⚙️ Core Infrastructure Tier</span></div>
+          <span class="chart-subtext">Decoupled RMS runs in Core</span>
+        </div>
+        <div id="admin-core-services" class="admin-check-grid"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Feed Ingestion Mode</label>
+            <select id="admin-core-feed-mode" class="custom-select" style="width:100%;">
+              <option value="ws">Live WebSocket (ws)</option>
+              <option value="mock">Synthetic Mock Feed (mock)</option>
+            </select>
+          </div>
+          <div class="form-group" style="display:flex; align-items:flex-end; padding-bottom:6px;">
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+              <input type="checkbox" id="admin-core-debug" />
+              <span style="font-size:12px;">Recorder Raw Debug (--debug)</span>
+            </label>
+          </div>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button type="button" id="admin-start-core-btn" class="pill-btn active">▶ Launch Selected Core</button>
+          <button type="button" id="admin-stop-selected-core-btn" class="pill-btn">■ Stop Selected</button>
+          <button type="button" id="admin-stop-all-core-btn" class="pill-btn btn-danger">⛔ Stop All Core</button>
+        </div>
+        <div id="admin-core-result" style="display:none; font-size:12px; font-family:var(--font-mono);"></div>
+      </div>
+
+      <!-- 3. STRATEGY & GRANULAR PER-MODE TRACK LAUNCHER -->
+      <div class="admin-card admin-activity-panel" data-activity="strategy" style="display:none;">
+        <div class="admin-card-header">
+          <div class="panel-title"><span>🚀 Strategy &amp; Granular Mode-Track Launcher</span></div>
+          <span class="chart-subtext">Only runnable moneyness &amp; composite tracks are shown</span>
+        </div>
+
+        <div id="admin-mode-track-matrix" style="display:flex; flex-direction:column; gap:10px;"></div>
+
+        <div class="form-row" style="margin-top:4px;">
+          <div class="form-group">
+            <label class="form-label">Capital Override (Optional INR)</label>
+            <input type="number" id="admin-strat-capital" class="form-input" placeholder="e.g. 250000" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">EOD Freeze Time (IST)</label>
+            <input type="text" id="admin-strat-freeze-time" class="form-input" placeholder="15:10" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">EOD Square-Off Time (IST)</label>
+            <input type="text" id="admin-strat-eod-time" class="form-input" placeholder="15:15" />
+          </div>
+        </div>
+
+        <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:center;">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" id="admin-strat-continue" />
+            <span>Continue State from Today's Journals (--continue)</span>
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" id="admin-strat-scoring" checked />
+            <span>Ensure Scoring Engine 3.0 Running</span>
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" id="admin-strat-fallback-rms" checked />
+            <span>Auto-Start Fallback RMS if Core RMS Offline</span>
+          </label>
+        </div>
+
+        <div id="admin-live-guard" style="display:none; padding:10px 12px; border:1px solid var(--accent-red); border-radius:8px; background:rgba(239,68,68,0.10);">
+          <div style="font-weight:700; color:#fecaca; margin-bottom:6px;">🚨 LIVE EXECUTION CONFIRMATION REQUIRED</div>
+          <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+              <input type="checkbox" id="admin-live-confirm-cb" />
+              <span>Authorize real Groww broker execution (--confirm-live)</span>
+            </label>
+            <input type="text" id="admin-live-confirm-phrase" class="form-input" placeholder="Type CONFIRM LIVE" style="max-width:200px;" />
+          </div>
+        </div>
+
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button type="button" id="admin-start-strategy-btn" class="pill-btn active">⚡ Launch Selected Modes &amp; Tracks</button>
+          <button type="button" id="admin-stop-strategy-btn" class="pill-btn">■ Stop Selected Mode(s)</button>
+          <button type="button" id="admin-stop-all-strategy-btn" class="pill-btn btn-danger">⛔ Stop All Strategies</button>
+        </div>
+        <div id="admin-strategy-result" style="display:none; font-size:12px; font-family:var(--font-mono);"></div>
+      </div>
+
+      <!-- 4. RISK, AUTH & EMERGENCY CONTROLS -->
+      <div class="admin-card admin-activity-panel" data-activity="risk" style="display:none;">
+        <div class="admin-card-header">
+          <div class="panel-title"><span>🛡️ Risk Controls, Broker Auth &amp; Emergency</span></div>
+        </div>
+
+        <div>
+          <div class="form-label" style="margin-bottom:6px;">Freeze / Unfreeze New Entries</div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button type="button" class="pill-btn admin-freeze-btn" data-mode="all" data-act="freeze">❄️ Freeze ALL</button>
+            <button type="button" class="pill-btn admin-freeze-btn" data-mode="all" data-act="unfreeze">🔥 Unfreeze ALL</button>
+            <button type="button" class="pill-btn admin-freeze-btn" data-mode="live" data-act="freeze">❄️ Freeze LIVE</button>
+            <button type="button" class="pill-btn admin-freeze-btn" data-mode="live" data-act="unfreeze">🔥 Unfreeze LIVE</button>
+            <button type="button" class="pill-btn admin-freeze-btn" data-mode="paper" data-act="freeze">❄️ Freeze Paper</button>
+            <button type="button" class="pill-btn admin-freeze-btn" data-mode="paper" data-act="unfreeze">🔥 Unfreeze Paper</button>
+          </div>
+        </div>
+
+        <div style="padding:10px; border:1px solid rgba(239,68,68,0.45); border-radius:8px; background:rgba(239,68,68,0.08);">
+          <div style="font-weight:700; color:#fecaca; margin-bottom:6px;">Emergency STOP LIVE</div>
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <input type="text" id="admin-stop-live-phrase" class="form-input" placeholder="Type STOP LIVE" style="max-width:160px;" />
+            <label style="display:flex; align-items:center; gap:5px; font-size:12px;">
+              <input type="checkbox" id="admin-stop-live-procs" />
+              <span>Also kill exec_live processes</span>
+            </label>
+            <button type="button" id="admin-stop-live-btn" class="pill-btn btn-danger">🛑 STOP LIVE NOW</button>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <button type="button" id="admin-rf-enable-btn" class="pill-btn">Enable REST Fallback</button>
+          <button type="button" id="admin-rf-disable-btn" class="pill-btn">Disable REST Fallback</button>
+          <button type="button" id="admin-reconcile-btn" class="pill-btn">🔄 Reconcile Groww Positions</button>
+          <button type="button" id="admin-stop-all-btn" class="pill-btn btn-danger">⛔ Stop ALL Processes</button>
+        </div>
+
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <input type="text" id="admin-groww-totp" class="form-input" placeholder="6-digit Groww TOTP" style="max-width:190px;" />
+          <button type="button" id="admin-groww-token-btn" class="pill-btn active">🔑 Refresh Groww Token</button>
+        </div>
+        <div id="admin-risk-result" style="display:none; font-size:12px; font-family:var(--font-mono);"></div>
+      </div>
+
+      <!-- 5. POST-MARKET HOUSEKEEPING -->
+      <div class="admin-card admin-activity-panel" data-activity="postmarket" style="display:none;">
+        <div class="admin-card-header">
+          <div class="panel-title"><span>📦 Post-Market Housekeeping</span></div>
+        </div>
+        <div id="admin-postmarket-actions" class="admin-check-grid"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Session Date (YYYYMMDD)</label>
+            <input type="text" id="admin-postmarket-date" class="form-input" placeholder="20261128" />
+          </div>
+          <div class="form-group" style="display:flex; flex-direction:column; justify-content:flex-end; gap:4px;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
+              <input type="checkbox" id="admin-postmarket-keep-raw" checked />
+              <span>Keep Raw Recordings</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
+              <input type="checkbox" id="admin-postmarket-all" />
+              <span>Archive All Uncompressed Sessions</span>
+            </label>
+          </div>
+        </div>
+        <div>
+          <button type="button" id="admin-run-postmarket-btn" class="pill-btn active">▶ Run Post-Market Selected</button>
+        </div>
+        <div id="admin-postmarket-result" style="display:none; font-size:12px; font-family:var(--font-mono);"></div>
+      </div>
+
+      <!-- 6. RUNNING PROCESSES & AUDIT TRAIL -->
+      <div class="admin-grid admin-activity-panel" data-activity="processes" style="display:none;">
+        <div class="table-panel">
+          <div class="panel-header"><div class="panel-title"><span>🖥️ Active Registered Processes</span></div></div>
+          <div class="table-wrapper" style="max-height:360px; overflow-y:auto;">
+            <table class="data-table">
+              <thead><tr><th>Tier</th><th>Role</th><th>PID</th><th>State</th><th class="text-right">Action</th></tr></thead>
+              <tbody id="admin-procs-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="table-panel">
+          <div class="panel-header"><div class="panel-title"><span>📜 Admin Audit Trail</span></div></div>
+          <div class="table-wrapper" style="max-height:360px; overflow-y:auto;">
+            <table class="data-table">
+              <thead><tr><th>Time (IST)</th><th>Action</th><th>Status</th><th>Details</th></tr></thead>
+              <tbody id="admin-audit-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =======================================================================
+         TAB 6: SYSTEM HEALTH & DAY'S LOG INSPECTOR
+         ======================================================================= -->
+    <section id="view-health" class="tab-view">
+      <div id="health-overall-banner" class="health-banner green" style="margin-bottom:16px;">
+        <div>
+          <div id="health-overall-title" style="font-size:16px; font-weight:800;">SYSTEM STATUS: CHECKING...</div>
+          <div id="health-overall-reasons" style="font-size:12px; color:var(--text-muted); margin-top:4px;"></div>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
+            <input type="checkbox" id="health-auto-refresh" checked />
+            <span>Auto-Refresh (6s)</span>
+          </label>
+          <button type="button" id="health-refresh-btn" class="pill-btn active">↻ Refresh Health</button>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Running Processes</div>
+          <div id="health-stat-procs" class="stat-value">0 / 0</div>
+          <div class="stat-subtext">Registered PIDs Alive</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Dead Processes</div>
+          <div id="health-stat-dead" class="stat-value">0</div>
+          <div class="stat-subtext">Unexpected Exits Trigger RED</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Today's Log Errors</div>
+          <div id="health-stat-errors" class="stat-value">0</div>
+          <div class="stat-subtext">Immediate RED Status on Any ERROR</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Today's Warnings</div>
+          <div id="health-stat-warns" class="stat-value">0</div>
+          <div class="stat-subtext">WARN / Freeze Alerts</div>
+        </div>
+      </div>
+
+      <!-- Recent Errors Callout (Only shown when errors > 0) -->
+      <div id="health-recent-errors-panel" class="table-panel" style="display:none; margin-bottom:16px; border-color:var(--accent-red);">
+        <div class="panel-header"><div class="panel-title" style="color:#fecaca;"><span>🚨 Recent Errors Logged Today (Debug Queue)</span></div></div>
+        <div class="table-wrapper" style="max-height:220px; overflow-y:auto;">
+          <table class="data-table log-viewer-table">
+            <thead><tr><th>Time</th><th>Log File</th><th>Logger</th><th>Error Message</th></tr></thead>
+            <tbody id="health-recent-errors-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- IPC & SHM Status -->
+      <div class="controls-bar" style="margin-bottom:16px;">
+        <span class="filter-label">IPC / SHM Probe:</span>
+        <div id="health-infra-chips" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
+      </div>
+
+      <!-- Running Processes Matrix -->
+      <div class="table-panel" style="margin-bottom:16px;">
+        <div class="panel-header"><div class="panel-title"><span>🩺 Distributed Process Monitor</span></div></div>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Tier</th>
+                <th>Process Role</th>
+                <th>PID</th>
+                <th class="text-center">Status</th>
+                <th class="text-right">CPU %</th>
+                <th class="text-right">RSS MB</th>
+                <th class="text-center">Uptime</th>
+                <th class="text-center">Errors (Today)</th>
+                <th class="text-center">Warns (Today)</th>
+                <th class="text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="health-procs-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Day's Standardized Log Inspector -->
+      <div class="table-panel">
+        <div class="panel-header" style="flex-wrap:wrap; gap:10px;">
+          <div class="panel-title"><span>📜 Day's Structured Log Inspector</span></div>
+          <div id="health-log-counts" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
+        </div>
+        <div class="controls-bar" style="border:none; border-bottom:1px solid var(--border-subtle); border-radius:0; margin-bottom:0;">
+          <div class="filter-group">
+            <span class="filter-label">Log File:</span>
+            <select id="health-log-file-select" class="custom-select"></select>
+          </div>
+          <div class="filter-group">
+            <span class="filter-label">Date:</span>
+            <input type="date" id="health-log-date" class="form-input" />
+          </div>
+          <div class="pill-group">
+            <button type="button" class="pill-btn health-lvl-pill active" data-level="ALL">All</button>
+            <button type="button" class="pill-btn health-lvl-pill" data-level="ERROR">ERROR</button>
+            <button type="button" class="pill-btn health-lvl-pill" data-level="WARN">WARN</button>
+            <button type="button" class="pill-btn health-lvl-pill" data-level="INFO">INFO</button>
+          </div>
+          <input type="text" id="health-log-search" class="form-input" placeholder="Search logger or message..." style="flex:1; min-width:180px;" />
+          <select id="health-log-limit" class="custom-select">
+            <option value="150">Latest 150</option>
+            <option value="300" selected>Latest 300</option>
+            <option value="800">Latest 800</option>
+          </select>
+        </div>
+        <div class="table-wrapper" style="max-height:460px; overflow-y:auto;">
+          <table class="data-table log-viewer-table">
+            <thead>
+              <tr>
+                <th>Time (IST)</th>
+                <th>Level</th>
+                <th>File</th>
+                <th>Logger</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody id="health-logs-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
   </main>
+  </div> <!-- end .app-shell -->
 
   <!-- =========================================================================
        MODAL: TRACK COMPOSER
@@ -1219,12 +1626,14 @@
   <div id="toast-container" class="toast-container"></div>
 
   <!-- Scripts -->
-  <script src="/static/js/chart_engine.js?v=2.0.6"></script>
-  <script src="/static/js/live_tab.js?v=2.0.6"></script>
-  <script src="/static/js/alerts_tab.js?v=2.0.6"></script>
-  <script src="/static/js/historical_tab.js?v=2.0.6"></script>
-  <script src="/static/js/simulation_tab.js?v=2.0.6"></script>
-  <script src="/static/js/app.js?v=2.0.6"></script>
+  <script src="/static/js/chart_engine.js?v=2.0.7"></script>
+  <script src="/static/js/live_tab.js?v=2.0.7"></script>
+  <script src="/static/js/alerts_tab.js?v=2.0.7"></script>
+  <script src="/static/js/historical_tab.js?v=2.0.7"></script>
+  <script src="/static/js/simulation_tab.js?v=2.0.7"></script>
+  <script src="/static/js/admin_tab.js?v=2.0.7"></script>
+  <script src="/static/js/health_tab.js?v=2.0.7"></script>
+  <script src="/static/js/app.js?v=2.0.7"></script>
 </body>
 
 </html>

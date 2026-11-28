@@ -26,6 +26,10 @@ from collections import defaultdict
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from core.common.logging_utils import get_logger
+
+_logger = get_logger("PREMARKET.MANIFEST")
+
 
 def run_manifest_generator(
     filtered_csv: str = "data/filtered.csv",
@@ -45,15 +49,15 @@ def run_manifest_generator(
     Remaining options are background polled.
     """
     if skip_if_exists and os.path.exists(output_json) and os.path.getsize(output_json) > 10_000:
-        print(f"  ✓ Valid Subscription Manifest found at '{output_json}'. (Skipping generation)")
+        _logger.info(f"Valid Subscription Manifest found at '{output_json}'. Skipping generation.")
         return output_json
 
     if not os.path.exists(filtered_csv):
-        print(f"❌ Filtered equities file not found: {filtered_csv}", file=sys.stderr)
+        _logger.error(f"Filtered equities file not found: {filtered_csv}")
         return None
 
     if not os.path.exists(master_csv):
-        print(f"❌ Master instruments file not found: {master_csv}", file=sys.stderr)
+        _logger.error(f"Master instruments file not found: {master_csv}")
         return None
 
     # Load configured max_stream_underlyings_with_options if not explicitly provided
@@ -76,7 +80,7 @@ def run_manifest_generator(
         max_stream_underlyings_with_options = int(max_stream_underlyings_with_options)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_json)), exist_ok=True)
-    print(f"  📝 Generating Subscription Manifest from '{filtered_csv}' & '{master_csv}' (Max Option Underlyings: {max_stream_underlyings_with_options})...")
+    _logger.info(f"Generating Subscription Manifest from '{filtered_csv}' & '{master_csv}' (Max Option Underlyings: {max_stream_underlyings_with_options})...")
 
     # 1. Load Filtered Equities
     equities: Dict[str, Dict[str, Any]] = {}
@@ -164,7 +168,7 @@ def run_manifest_generator(
                 score = (d_vol * l_p) if (d_vol > 0 and l_p > 0) else d_vol
                 volume_scores[s_key] = score
         except Exception as e:
-            print(f"  ⚠️ Warning reading volume index: {e}")
+            _logger.warning(f"Warning reading volume index: {e}")
 
     # Underlyings that actually have options
     underlyings_with_options = [s for s in equities if options_by_underlying.get(s)]
@@ -330,12 +334,13 @@ def run_manifest_generator(
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
-    print(f"  ✓ Saved Subscription Manifest to '{output_json}'")
-    print(f"    • Underlyings Streamed      : {len(underlying_keys):,}")
-    print(f"    • Popular Options Streamed  : {len(popular_option_keys):,} ({len(stream_options_symbols)} Top Liquid Underlyings @ 3 above/below ATM)")
-    print(f"    • Total Streamed Keys (WS)  : {len(underlying_keys) + len(popular_option_keys):,} (Upstox limit: 2,000/conn, 4,000 across dual connections)")
-    print(f"    • Background Options Polled : {len(background_poll_keys):,} across {len(background_poll_batches)} batches")
-    print(f"    • Total Contracts Tracked   : {manifest['summary']['total_tracked_instruments']:,}")
+    _logger.info(
+        f"Saved Subscription Manifest to '{output_json}' | Underlyings={len(underlying_keys):,}, "
+        f"PopularOptions={len(popular_option_keys):,} ({len(stream_options_symbols)} underlyings), "
+        f"StreamedWS={len(underlying_keys) + len(popular_option_keys):,}, "
+        f"PollBatches={len(background_poll_batches)} ({len(background_poll_keys):,} keys), "
+        f"TotalTracked={manifest['summary']['total_tracked_instruments']:,}"
+    )
     return output_json
 
 

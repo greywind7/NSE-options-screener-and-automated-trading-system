@@ -146,6 +146,8 @@ class SetupAlert:
     timestamp: float
     pole_high: Optional[float] = None
     pole_low: Optional[float] = None
+    strategy_id: str = "momentum"
+    strategy_tags: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -168,6 +170,8 @@ class ActionableOpportunity:
     atr: Optional[float] = None
     rvol: Optional[float] = None
     clv: Optional[float] = None
+    strategy_id: str = "momentum"
+    strategy_tags: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:

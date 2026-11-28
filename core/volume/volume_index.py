@@ -26,6 +26,9 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.auth.upstox_auth import get_access_token, http_get_json, safe_float, safe_int
+from core.common.logging_utils import get_logger
+
+_logger = get_logger("PREMARKET.VOLUME")
 
 
 def compute_volume_profile(candles: List[List[Any]], interval_minutes: int = 1) -> Dict[str, Any]:
@@ -195,16 +198,16 @@ def run_volume_indexer(
                 if v.get("has_volume_data", True) and v.get("total_candles", 0) > 0 and v.get("daily_avg_volume", 0) > 0
             )
             if idx and len(idx) >= min_required_len and instruments_with_data >= min(len(idx) * 0.70, 100):
-                print(f"  ✓ Valid Volume Index found at '{output_json}' with {len(idx):,} instruments ({instruments_with_data} with volume). Skipping rebuild.")
+                _logger.info(f"Valid Volume Index found at '{output_json}' with {len(idx):,} instruments ({instruments_with_data} with volume). Skipping rebuild.")
                 return output_json
             else:
-                print(f"  ⚠️ Existing volume index at '{output_json}' lacks historical volume ({instruments_with_data}/{len(idx)} valid). Rebuilding...")
+                _logger.warning(f"Existing volume index at '{output_json}' lacks historical volume ({instruments_with_data}/{len(idx)} valid). Rebuilding...")
         except Exception:
-            print("  ⚠️ Existing volume index is corrupted. Rebuilding...")
+            _logger.warning("Existing volume index is corrupted. Rebuilding...")
 
     # 2. Load filtered instruments
     if not os.path.exists(instruments_csv):
-        print(f"❌ Instruments CSV file not found: {instruments_csv}", file=sys.stderr)
+        _logger.error(f"Instruments CSV file not found: {instruments_csv}")
         return None
 
     instruments: List[Dict[str, Any]] = []
@@ -214,13 +217,13 @@ def run_volume_indexer(
             instruments.append(r)
 
     if not instruments:
-        print(f"❌ No instruments found in {instruments_csv}", file=sys.stderr)
+        _logger.error(f"No instruments found in {instruments_csv}")
         return None
 
     failure_log_path = os.path.join("logs", "volume_index_failures.log")
     token = get_access_token()
     if not token:
-        print("❌ Cannot build volume index: UPSTOX_ACCESS_TOKEN not set in environment or .env", file=sys.stderr)
+        _logger.error("Cannot build volume index: UPSTOX_ACCESS_TOKEN not set in environment or .env")
         os.makedirs("logs", exist_ok=True)
         with open(failure_log_path, "a", encoding="utf-8") as lf:
             lf.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [ABORT] Volume index build aborted: UPSTOX_ACCESS_TOKEN missing\n")
@@ -233,7 +236,7 @@ def run_volume_indexer(
     from_str = from_dt.strftime("%Y-%m-%d")
     to_str = today.strftime("%Y-%m-%d")
 
-    print(f"  Building 30-Day Volume Index for {len(instruments):,} equities ({from_str} to {to_str})...")
+    _logger.info(f"Building 30-Day Volume Index for {len(instruments):,} equities ({from_str} to {to_str})...")
 
     index_data: Dict[str, Any] = {}
     success_count = 0
@@ -265,18 +268,18 @@ def run_volume_indexer(
 
         time.sleep(0.05)  # Rate limiting guard
 
-    print(f"\n  ✓ Successfully indexed {success_count}/{len(instruments)} instruments with historical candle data.")
+    _logger.info(f"Successfully indexed {success_count}/{len(instruments)} instruments with historical candle data.")
     if failures:
         os.makedirs("logs", exist_ok=True)
         with open(failure_log_path, "a", encoding="utf-8") as lf:
             for fl in failures:
                 lf.write(fl + "\n")
-        print(f"  ⚠️ {len(failures)} instruments lacked historical volume data (marked absent, logged to {failure_log_path}).")
+        _logger.warning(f"{len(failures)} instruments lacked historical volume data (marked absent, logged to {failure_log_path}).")
 
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2)
 
-    print(f"  ✓ Saved Volume Index to '{output_json}' ({os.path.getsize(output_json) / 1024:.1f} KB)")
+    _logger.info(f"Saved Volume Index to '{output_json}' ({os.path.getsize(output_json) / 1024:.1f} KB)")
     return output_json
 
 

@@ -225,7 +225,7 @@ $$\text{CLV} = \frac{\text{Current Price} - \text{Current Low}}{\text{Current Hi
 
 ---
 
-## 6. Loop-Local Actionable List & Priority Dispatch
+## 6. Loop-Local Actionable List, Schema & Priority Dispatch
 
 At the end of each spin-loop through the 221 F&O stocks:
 1. All triggered candidates are collected in a local list: `actionable_candidates`.
@@ -233,7 +233,8 @@ At the end of each spin-loop through the 221 F&O stocks:
    ```python
    actionable_candidates.sort(key=lambda x: x["rvol"], reverse=True)
    ```
-3. Dispatched sequentially over ZeroMQ `ipc:///tmp/alerts_breakout.ipc` to the RMS process.
+3. Each [`SetupAlert`](file:///Users/yorha/Documents/Trading%20Stuff/core/common/ipc_schemas.py) carries `strategy_id` (default `"momentum"`) and `strategy_tags`, dispatched over ZeroMQ `ipc:///tmp/scoring_alerts_pub.ipc` to the decoupled Core [`RMSService`](file:///Users/yorha/Documents/Trading%20Stuff/core/rms/rms_service.py), which republishes validated `ActionableOpportunity` messages on topic `OPP.<strategy_id>.<symbol>`.
+4. **Midday Freeze Configuration**: `config/strategies.json` exposes `strategies.momentum.midday_freeze` (`enabled`, `start`, `end`) for configurable lunch-hour signal suppression benchmarks; option target/SL sizing calibration (`option_convexity_scaling`) is handled downstream in the execution tracks layer ([`EXECUTION_TRACKS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/EXECUTION_TRACKS.md)).
 
 ### Why Priority Sorting by rVOL Matters:
 If 3 stocks break out on the exact same 5-minute candle, the stock experiencing the most violent relative volume explosion ($\text{rVOL} = 4.8\times$) is processed and allocated margin by the RMS **first**, before lower-volume setups ($\text{rVOL} = 2.1\times$).

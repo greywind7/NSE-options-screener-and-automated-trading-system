@@ -16,9 +16,12 @@ from typing import Any, Dict, List, Optional
 import zmq
 
 from core.common.ipc_schemas import ActionableOpportunity, SetupAlert, pack_message, unpack_message
+from core.common.logging_utils import get_logger
 from core.common.symbol_utils import normalize_instrument_token
 from core.common.time_utils import IST
 from core.quotes.quotes_broker import QuotesBrokerClient, DEFAULT_QUOTES_ROUTER_IPC
+
+_logger = get_logger("RMS_SERVICE")
 
 DEFAULT_ALERTS_SUB_IPC = "ipc:///tmp/scoring_alerts_pub.ipc"
 DEFAULT_RMS_PUB_IPC = "ipc:///tmp/rms_strike_pub.ipc"
@@ -170,7 +173,7 @@ class RMSService:
                     data = json.load(f)
                     self.options_map = data.get("options_map", {})
             except Exception as e:
-                print(f"[RMS_SERVICE] Warning loading options map: {e}")
+                _logger.warning(f"Warning loading options map: {e}")
 
     def resolve_strikes(self, symbol: str, direction: str, trigger_price: float, atr: float = 0.0) -> Dict[str, Any]:
         """
@@ -322,10 +325,9 @@ class RMSService:
             self.max_alerts_per_symbol_per_day is not None
             and self._daily_symbol_counts.get(cap_key, 0) >= self.max_alerts_per_symbol_per_day
         ):
-            print(
-                f"[RMS_SERVICE] Alert {alert.alert_id} capped: {alert.symbol} reached "
-                f"{self.max_alerts_per_symbol_per_day}/day limit",
-                flush=True,
+            _logger.warning(
+                f"Alert {alert.alert_id} capped: {alert.symbol} reached "
+                f"{self.max_alerts_per_symbol_per_day}/day limit"
             )
             return None
 
@@ -337,15 +339,16 @@ class RMSService:
             atr=float(getattr(alert, "atr", 0.0) or 0.0),
         )
         if not strikes:
-            print(
-                f"[RMS_SERVICE] Alert {alert.alert_id} rejected: no liquid strikes for "
-                f"{alert.symbol} {alert.direction} @ {alert.trigger_price:.2f}",
-                flush=True,
+            _logger.warning(
+                f"Alert {alert.alert_id} rejected: no liquid strikes for "
+                f"{alert.symbol} {alert.direction} @ {alert.trigger_price:.2f}"
             )
             return None
 
         self._daily_symbol_counts[cap_key] = self._daily_symbol_counts.get(cap_key, 0) + 1
 
+        strat_id = str(getattr(alert, "strategy_id", None) or "momentum")
+        strat_tags = dict(getattr(alert, "strategy_tags", None) or {})
         opp = ActionableOpportunity(
             opp_id=f"OPP_{alert.symbol}_{int(time.time()*1000)}",
             alert_id=alert.alert_id,
@@ -362,22 +365,23 @@ class RMSService:
             atr=alert.atr,
             rvol=alert.rvol,
             clv=alert.clv,
+            strategy_id=strat_id,
+            strategy_tags=strat_tags,
         )
 
-        topic = b"OPP." + alert.symbol.encode("utf-8")
+        topic = f"OPP.{strat_id}.{alert.symbol}".encode("utf-8")
         payload = pack_message(opp)
         self.pub.send_multipart([topic, payload], flags=zmq.NOBLOCK)
-        print(
-            f"[RMS_SERVICE] Published {opp.opp_id} ({alert.symbol} {alert.direction} @ {alert.trigger_price:.2f}) "
-            f"-> strikes={list(strikes.keys())}",
-            flush=True,
+        _logger.info(
+            f"Published {opp.opp_id} ({alert.symbol} {alert.direction} @ {alert.trigger_price:.2f}) "
+            f"-> strikes={list(strikes.keys())}"
         )
         return opp
 
     def start(self) -> None:
         """Run RMS subscriber loop."""
         self.running = True
-        print(f"[RMS_SERVICE] Active | SUB: {self.alerts_ipc} | PUB: {self.rms_pub_ipc}", flush=True)
+        _logger.info(f"Active | SUB: {self.alerts_ipc} | PUB: {self.rms_pub_ipc}")
 
         poller = zmq.Poller()
         poller.register(self.sub, zmq.POLLIN)
@@ -393,7 +397,7 @@ class RMSService:
             except zmq.ZMQError:
                 break
             except Exception as e:
-                print(f"[RMS_SERVICE] Error: {e}", file=sys.stderr)
+                _logger.error(f"RMSService loop error: {e}")
 
     def stop(self) -> None:
         self.running = False
@@ -405,7 +409,7 @@ class RMSService:
                 self.ctx.destroy(linger=0)
         except Exception:
             pass
-        print("[RMS_SERVICE] Stopped cleanly.")
+        _logger.info("RMSService stopped cleanly.")
 
 
 def main():

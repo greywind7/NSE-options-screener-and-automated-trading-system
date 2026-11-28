@@ -8,6 +8,7 @@ window.App = {
   wsReconnectTimer: null,
 
   init() {
+    this.initSidebarToggle();
     this.bindTabButtons();
     this.connectWebSocket();
     this.startClock();
@@ -16,8 +17,35 @@ window.App = {
     if (window.LiveTab) window.LiveTab.init();
     if (window.HistoricalTab) window.HistoricalTab.init();
     if (window.SimulationTab) window.SimulationTab.init();
+    if (window.AdminTab) window.AdminTab.init();
+    if (window.HealthTab) window.HealthTab.init();
 
     this.initTradeModal();
+  },
+
+  initSidebarToggle() {
+    const shell = document.getElementById("app-shell");
+    const btn = document.getElementById("sidebar-toggle-btn");
+    if (!shell || !btn) return;
+
+    const applyState = (collapsed) => {
+      shell.classList.toggle("sidebar-collapsed", collapsed);
+      btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      try {
+        localStorage.setItem("ag_sidebar_collapsed", collapsed ? "1" : "0");
+      } catch (_) {}
+      setTimeout(() => window.dispatchEvent(new Event("resize")), 220);
+    };
+
+    try {
+      if (localStorage.getItem("ag_sidebar_collapsed") === "1") {
+        applyState(true);
+      }
+    } catch (_) {}
+
+    btn.addEventListener("click", () => {
+      applyState(!shell.classList.contains("sidebar-collapsed"));
+    });
   },
 
   bindTabButtons() {
@@ -54,6 +82,10 @@ window.App = {
       window.SimulationTab.onActivate();
     } else if (tabName === "sim-results" && window.SimulationTab) {
       window.SimulationTab.onActivateResults();
+    } else if (tabName === "admin" && window.AdminTab) {
+      window.AdminTab.onActivate();
+    } else if (tabName === "health" && window.HealthTab) {
+      window.HealthTab.onActivate();
     }
 
     if (tabName !== "alerts" && window.AlertsTab) {
@@ -342,9 +374,15 @@ window.App = {
       const exitTimeStr = isClosed ? (trade.exit_time_str || "-") : "Active";
       const exitReasonStr = trade.exit_reason || (isClosed ? "Manual / Target" : "Live Holding");
       const bFee = trade.brokerage !== undefined ? `₹${Number(trade.brokerage).toFixed(2)}` : "₹60.00";
+      const trackLabel = trade.origin_track && trade.origin_track !== trade.track
+        ? `${trade.track || '-'} → ${trade.origin_track}`
+        : (trade.origin_track || trade.track || '-');
+      const ruleLabel = trade.sub_track_rule || (trade.metadata && trade.metadata.sub_track_rule) || "-";
 
       metaBar.innerHTML = `
         <div class="meta-item"><span class="meta-label">Contract:</span> <span class="meta-val">${symbol} ${contractDesc}</span></div>
+        <div class="meta-item"><span class="meta-label">Track / Origin:</span> <span class="meta-val badge badge-entry">${trackLabel}</span></div>
+        <div class="meta-item"><span class="meta-label">Sub-Track Rule:</span> <span class="meta-val">${ruleLabel}</span></div>
         <div class="meta-item"><span class="meta-label">Qty:</span> <span class="meta-val">${trade.quantity || 0}</span></div>
         <div class="meta-item"><span class="meta-label">Entry Reason:</span> <span class="meta-val badge badge-entry">${entryReasonStr}</span></div>
         <div class="meta-item"><span class="meta-label">Entry:</span> <span class="meta-val">₹${Number(trade.entry_price || 0).toFixed(2)} @ ${trade.entry_time_str || '-'}</span></div>

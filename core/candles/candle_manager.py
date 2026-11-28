@@ -28,11 +28,13 @@ from core.candles.shm_layout import (
     get_shm_views,
     unlink_shm,
 )
+from core.common.logging_utils import get_logger
 from core.common.symbol_utils import normalize_instrument_token
 from core.common.ipc_schemas import unpack_message
 from core.common.time_utils import IST
 from core.config.trading_schedule import get_trading_schedule, NSE_SCHEDULE
 
+logger = get_logger("CANDLE_MANAGER")
 DEFAULT_FEED_SUB_IPC = "ipc:///tmp/feed_equity.ipc"
 
 
@@ -67,7 +69,7 @@ class CandleManager:
         self._load_volume_baseline()
 
         # Allocate and own Shared Memory (Single Writer)
-        print(f"[CANDLE_MANAGER] Initializing Shared Memory segment '{self.shm_name}' (777 KB)...")
+        logger.info(f"Initializing Shared Memory segment '{self.shm_name}' (777 KB)...")
         self.shm = create_or_attach_shm(name=self.shm_name, create=True)
         self.headers, self.candles = get_shm_views(self.shm)
 
@@ -123,7 +125,7 @@ class CandleManager:
                             extra_keys[ik.strip()] = idx
                             extra_keys[normalize_instrument_token(ik.strip())] = idx
         else:
-            print(f"[CANDLE_MANAGER] Warning: {self.universe_csv} not found. Generating default slot index.")
+            logger.warning(f"{self.universe_csv} not found. Generating default slot index.")
             symbols = [f"STOCK_{i}" for i in range(NUM_SYMBOLS)]
 
         # Clamp/pad to NUM_SYMBOLS (221)
@@ -142,7 +144,7 @@ class CandleManager:
             if idx < len(symbols):
                 self.symbol_to_index[k] = idx
 
-        print(f"[CANDLE_MANAGER] Loaded universe: {len(symbols)} symbols mapped to SHM rows 0..{len(symbols)-1}")
+        logger.info(f"Loaded universe: {len(symbols)} symbols mapped to SHM rows 0..{len(symbols)-1}")
 
     def _load_volume_baseline(self) -> None:
         """Load 30-day 1-minute historical median volume profile."""
@@ -154,7 +156,7 @@ class CandleManager:
             arr = np.load(npy_path)
             if arr.shape == (NUM_SYMBOLS, 375):
                 self.volume_baseline = arr
-                print(f"[CANDLE_MANAGER] Loaded 30-day volume baseline from {npy_path}")
+                logger.info(f"Loaded 30-day volume baseline from {npy_path}")
                 return
 
         # 2. Parse data/index.json if present
@@ -189,10 +191,10 @@ class CandleManager:
                             elif float(rec.get("avg_1m_volume", 0.0)) > 0.0:
                                 self.volume_baseline[idx, :].fill(float(rec["avg_1m_volume"]))
                                 loaded_count += 1
-                print(f"[CANDLE_MANAGER] Initialized baseline profile from {self.baseline_file} ({loaded_count} symbols mapped)")
+                logger.info(f"Initialized baseline profile from {self.baseline_file} ({loaded_count} symbols mapped)")
                 return
             except Exception as e:
-                print(f"[CANDLE_MANAGER] Warning reading {self.baseline_file}: {e}")
+                logger.warning(f"Error reading {self.baseline_file}: {e}")
 
     def _get_bar_index(self, ts: float) -> Tuple[int, int, int]:
         """
@@ -359,8 +361,7 @@ class CandleManager:
         if not pq_file:
             return 0
 
-        ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{ts_str}] [CANDLE_MANAGER] 🔄 Warmup: Restoring state from '{pq_file}'...")
+        logger.info(f"Warmup: Restoring state from '{pq_file}'...")
         try:
             df = pl.read_parquet(pq_file)
             if len(df) == 0:
@@ -384,18 +385,17 @@ class CandleManager:
                     self.on_tick(token=tok, ltp=ltp, vol=vol, ts=ts)
                     replayed += 1
 
-            ts_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{ts_end}] [CANDLE_MANAGER] ✓ Warmup completed: Replayed {replayed:,} ticks. State restored to bar #{self.current_bar_idx}!")
+            logger.info(f"Warmup completed: Replayed {replayed:,} ticks. State restored.")
             return replayed
         except Exception as e:
-            print(f"[CANDLE_MANAGER] ⚠️ Warmup error: {e}", file=sys.stderr)
+            logger.error(f"Warmup error: {e}")
             return 0
 
     def start(self) -> None:
         """Run the main event loop listening to ZeroMQ ticks."""
         self.running = True
         self.warmup_from_parquet()
-        print(f"[CANDLE_MANAGER] Active | Listening on {self.sub_ipc} | SHM: {self.shm_name}")
+        logger.info(f"Active | Listening on {self.sub_ipc} | SHM: {self.shm_name}")
         while self.running:
             try:
                 topic, payload = self.sub.recv_multipart()
@@ -409,7 +409,7 @@ class CandleManager:
             except zmq.ZMQError:
                 break
             except Exception as e:
-                print(f"[CANDLE_MANAGER] Error processing tick: {e}", file=sys.stderr)
+                logger.error(f"Error processing tick: {e}")
 
     def stop(self) -> None:
         self.running = False
@@ -428,7 +428,7 @@ class CandleManager:
                 self.shm.close()
             except Exception:
                 pass
-        print("[CANDLE_MANAGER] Stopped cleanly.")
+        logger.info("Stopped cleanly.")
 
 
 def main():

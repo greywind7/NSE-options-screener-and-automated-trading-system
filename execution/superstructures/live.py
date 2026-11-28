@@ -28,6 +28,9 @@ from core.common.ipc_schemas import (
     OrderResult,
     unpack_message,
 )
+from core.common.logging_utils import get_logger
+
+_logger = get_logger("LIVE_SUPERSTRUCTURE")
 from core.common.time_utils import is_quote_fresh, normalize_time_str
 from execution.superstructures.base_superstructure import (
     BaseSuperstructure,
@@ -148,9 +151,9 @@ class LiveSuperstructure(BaseSuperstructure):
         if self.groww_client is None and HAS_GROWWAPI and self.access_token:
             try:
                 self.groww_client = GrowwAPI(self.access_token)
-                print("[LIVE_SUPERSTRUCTURE] Successfully initialized GrowwAPI SDK client.")
+                _logger.info("Successfully initialized GrowwAPI SDK client.")
             except Exception as e:
-                print(f"⚠️ [LIVE_SUPERSTRUCTURE] Failed to initialize GrowwAPI client: {e}")
+                _logger.warning(f"Failed to initialize GrowwAPI client: {e}")
 
         # In-memory orders and positions tracking
         self.orders: Dict[str, Dict[str, Any]] = {}
@@ -290,7 +293,7 @@ class LiveSuperstructure(BaseSuperstructure):
                 except Exception:
                     pass
         except Exception as e:
-            print(f"⚠️ [LIVE_SUPERSTRUCTURE] Failed to load positions state: {e}")
+            _logger.warning(f"Failed to load positions state: {e}")
 
     def _handle_session_expired(self, reason: str = "") -> None:
         """
@@ -305,17 +308,10 @@ class LiveSuperstructure(BaseSuperstructure):
         except Exception:
             pass
         self.freeze()
-        print("\n" + "=" * 80)
-        print("🚨 [CRITICAL ALERT] GROWW BROKER SESSION EXPIRED / UNAUTHORIZED (401/403)!")
-        print(f"   Reason: {reason}")
-        print("   Live execution mode has been automatically FROZEN for safety.")
-        print("   No new live entry orders will be submitted.")
-        print("   To resume trading:")
-        print("     1. Regenerate daily access token with TOTP:")
-        print("        python3 runner.py token --totp <CODE>")
-        print("     2. Unfreeze live mode:")
-        print("        python3 runner.py unfreeze --mode live")
-        print("=" * 80 + "\n")
+        _logger.error(
+            f"[CRITICAL ALERT] GROWW BROKER SESSION EXPIRED / UNAUTHORIZED (401/403)! Reason: {reason}. "
+            "Live execution automatically FROZEN. Regenerate token (`runner.py token --totp <CODE>`) and run `runner.py unfreeze --mode live`."
+        )
 
         try:
             os.makedirs("logs", exist_ok=True)
@@ -478,7 +474,7 @@ class LiveSuperstructure(BaseSuperstructure):
         if trans_type == "BUY" and q:
             is_fresh, quote_age = is_quote_fresh(q, now_ts=time.time(), max_age_sec=30.0)
             if not is_fresh:
-                print(f"🚨 [LIVE_SUPERSTRUCTURE] BUY order blocked: quote stale ({quote_age:.1f}s > 30s)")
+                _logger.warning(f"BUY order blocked: quote stale ({quote_age:.1f}s > 30s)")
                 return {
                     "order_id": "",
                     "symbol": symbol,
@@ -879,7 +875,7 @@ class LiveSuperstructure(BaseSuperstructure):
         mod_count = int(pos.get("modification_count", 0))
         # 25 modification limit enforcement
         if mod_count >= self.broker_max_order_modifications:
-            print(f"⚠️ [LIVE_SUPERSTRUCTURE] SL {sl_order_id} reached {mod_count} limit. Cancelling & replacing...")
+            _logger.warning(f"SL {sl_order_id} reached {mod_count} limit. Cancelling & replacing...")
             cancel_res = self.cancel_order(order_id=sl_order_id)
             sell_qty = int(pos.get("quantity", 0))
             sym = pos.get("symbol", symbol)
@@ -897,7 +893,7 @@ class LiveSuperstructure(BaseSuperstructure):
         mod_res = self.modify_order(order_id=sl_order_id, trigger_price=new_sl, price=round(new_sl * 0.98, 2), order_type="SL")
         mod_err = str(mod_res.get("error", "")).lower()
         if mod_res.get("status") == "ERROR" and any(w in mod_err for w in ("modification", "limit", "max", "exceed")):
-            print(f"⚠️ [LIVE_SUPERSTRUCTURE] Reactive cancel & replace triggered: {mod_err}")
+            _logger.warning(f"Reactive cancel & replace triggered: {mod_err}")
             cancel_res = self.cancel_order(order_id=sl_order_id)
             sell_qty = int(pos.get("quantity", 0))
             fresh_res = self._place_resting_sl_order(symbol=pos.get("symbol", symbol), instrument_token=pos.get("instrument_token", instrument_token), quantity=sell_qty, trigger_price=new_sl, pos_key=pos_key)
@@ -1249,7 +1245,7 @@ class LiveSuperstructure(BaseSuperstructure):
                         "exit_price": exit_p,
                         "net_pnl": net,
                     })
-                    print(f"⚠️ [RECONCILIATION] Ghost Position Resolved: {trading_sym} closed externally on broker. Local state synchronized.")
+                    _logger.warning(f"[RECONCILIATION] Ghost Position Resolved: {trading_sym} closed externally on broker. Local state synchronized.")
 
                 # Mismatch Case 2: Quantity Discrepancy
                 elif broker_qty != pos.get("quantity"):
@@ -1260,7 +1256,7 @@ class LiveSuperstructure(BaseSuperstructure):
                         "old_quantity": old_qty,
                         "new_quantity": broker_qty,
                     })
-                    print(f"ℹ️ [RECONCILIATION] Quantity Adjusted: {trading_sym} {old_qty} -> {broker_qty} to match broker.")
+                    _logger.info(f"[RECONCILIATION] Quantity Adjusted: {trading_sym} {old_qty} -> {broker_qty} to match broker.")
 
                 # Synchronize entry price if broker reports actual filled buy price
                 if bp and float(bp.get("buy_price", 0.0)) > 0:
@@ -1323,7 +1319,7 @@ class LiveSuperstructure(BaseSuperstructure):
                         "quantity": b_qty,
                         "buy_price": bp_price,
                     })
-                    print(f"🚨 [RECONCILIATION] Orphan Position Adopted: {tsym} (qty: {b_qty} @ ₹{bp_price}). Risk management attached.")
+                    _logger.warning(f"[RECONCILIATION] Orphan Position Adopted: {tsym} (qty: {b_qty} @ ₹{bp_price}). Risk management attached.")
 
             self._save_positions_state_under_lock()
 
@@ -1364,7 +1360,7 @@ class LiveSuperstructure(BaseSuperstructure):
                     os.makedirs("logs", exist_ok=True)
                     with open("logs/.freeze_live", "w", encoding="utf-8") as f:
                         f.write(f"frozen at {dt_ist.isoformat()} due to EOD {target_freeze} IST guard\n")
-                    print(f"⏰ [EOD GUARD] {target_freeze} IST reached ({dt_ist.strftime('%H:%M:%S')}). Auto-froze live execution to block new entries.")
+                    _logger.warning(f"[EOD GUARD] {target_freeze} IST reached ({dt_ist.strftime('%H:%M:%S')}). Auto-froze live execution to block new entries.")
                 except Exception:
                     pass
 
@@ -1388,7 +1384,7 @@ class LiveSuperstructure(BaseSuperstructure):
                     market_quote=q,
                 )
                 exited.append(res)
-                print(f"⏰ [EOD GUARD] {target_eod} IST Auto-Squareoff: Closed {sym} ({token}) to prevent broker RMS penalty.")
+                _logger.warning(f"[EOD GUARD] {target_eod} IST Auto-Squareoff: Closed {sym} ({token}) to prevent broker RMS penalty.")
 
         return exited
 
@@ -1512,7 +1508,7 @@ class LiveSuperstructure(BaseSuperstructure):
                 clean_sym = pos.get("instrument_token", "").split("|")[-1] or pos.get("symbol", "")
                 self._in_flight_exits[clean_sym.upper()] = now_ts
                 self._save_positions_state_under_lock()
-                print(f"🛑 [BROKER SL TRIGGERED] Stop-Loss filled for {pos.get('symbol')} @ ₹{fp:.2f}. Position closed ({exit_reason}).")
+                _logger.warning(f"[BROKER SL TRIGGERED] Stop-Loss filled for {pos.get('symbol')} @ ₹{fp:.2f}. Position closed ({exit_reason}).")
 
     def _start_order_polling_thread(self) -> None:
         """Background order polling thread to detect broker fills and update state."""
@@ -1541,7 +1537,7 @@ class LiveSuperstructure(BaseSuperstructure):
                     self.reconcile_broker_positions(quarantine_sec=self.settlement_quarantine_sec)
                     self.check_eod_squareoff(now_ts=now_ts)
                 except Exception as e:
-                    print(f"⚠️ [LIVE_SUPERSTRUCTURE] Background reconciliation error: {e}")
+                    _logger.error(f"Background reconciliation error: {e}")
 
             time.sleep(self.poll_interval_sec)
 

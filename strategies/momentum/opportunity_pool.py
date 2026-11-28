@@ -14,7 +14,10 @@ from typing import Dict, List, Optional
 import zmq
 
 from core.common.ipc_schemas import SetupAlert, pack_message
+from core.common.logging_utils import get_logger
 from core.common.time_utils import IST
+
+logger = get_logger("OPPORTUNITY_POOL")
 
 DEFAULT_ALERTS_PUB_IPC = "ipc:///tmp/scoring_alerts_pub.ipc"
 DEFAULT_COOLDOWN_SEC = 5.0
@@ -115,5 +118,5 @@ class OpportunityPool:
                 self.ctx.destroy(linger=0)
         except Exception:
             pass
-        print("[OPPORTUNITY_POOL] Stopped cleanly.")
+        logger.info("Stopped cleanly.")
 

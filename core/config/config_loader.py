@@ -8,6 +8,10 @@ import os
 import sys
 from typing import Any, Dict, Optional
 
+from core.common.logging_utils import get_logger
+
+_logger = get_logger("CONFIG")
+
 
 def load_env_file(env_path: str = ".env") -> None:
     """Load key-value pairs from .env into os.environ if present."""
@@ -25,7 +29,7 @@ def load_env_file(env_path: str = ".env") -> None:
                 if k not in os.environ:
                     os.environ[k] = v
     except Exception as e:
-        print(f"[CONFIG] Warning loading {env_path}: {e}", file=sys.stderr)
+        _logger.warning(f"Failed loading {env_path}: {e}")
 
 
 # Load default .env at module import

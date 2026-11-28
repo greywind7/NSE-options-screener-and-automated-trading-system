@@ -14,6 +14,10 @@ import sys
 from datetime import datetime
 from typing import List, Optional, Tuple
 
+from core.common.logging_utils import get_logger
+
+_logger = get_logger("MAINTENANCE")
+
 
 def prune_old_preparation_files(
     keep_session_date: Optional[str] = None,
@@ -57,7 +61,7 @@ def prune_old_preparation_files(
         entries = sorted(os.listdir(data_dir))
     except Exception as e:
         if not silent:
-            print(f"⚠️ Error reading directory '{data_dir}': {e}", file=sys.stderr)
+            _logger.warning(f"Error reading directory '{data_dir}': {e}")
         return []
 
     for fname in entries:
@@ -92,14 +96,14 @@ def prune_old_preparation_files(
                         pruned.append((fpath, sz))
                     except Exception as err:
                         if not silent:
-                            print(f"⚠️ Failed to remove stale file '{fpath}': {err}", file=sys.stderr)
+                            _logger.warning(f"Failed to remove stale file '{fpath}': {err}")
                 break
 
     if pruned and not silent:
         total_mb = sum(sz for _, sz in pruned) / (1024 * 1024)
-        print(f"🧹 [MAINTENANCE] Pruned {len(pruned)} stale preparation file(s) older than {target_date} ({total_mb:.2f} MB freed).")
+        _logger.info(f"Pruned {len(pruned)} stale preparation file(s) older than {target_date} ({total_mb:.2f} MB freed).")
         for fpath, sz in pruned:
-            print(f"   - Removed: {fpath} ({sz / (1024 * 1024):.2f} MB)")
+            _logger.info(f"Removed stale file: {fpath} ({sz / (1024 * 1024):.2f} MB)")
 
     return pruned
 

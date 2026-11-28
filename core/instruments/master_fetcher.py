@@ -21,7 +21,9 @@ import urllib.request
 from datetime import datetime
 from typing import Optional
 
+from core.common.logging_utils import get_logger
 
+_logger = get_logger("PREMARKET.MASTER")
 UPSTOX_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz"
 
 
@@ -40,16 +42,16 @@ def run_master_fetcher(
     if os.path.exists(target_csv) and not force_download:
         sz = os.path.getsize(target_csv)
         if sz > 100_000:  # Must be at least 100KB to be a valid instrument master
-            print(f"  ✓ Found existing Instrument Master at '{target_csv}' ({sz / (1024 * 1024):.2f} MB)")
+            _logger.info(f"Found existing Instrument Master at '{target_csv}' ({sz / (1024 * 1024):.2f} MB)")
             return target_csv
         else:
-            print(f"  ⚠️ Existing master file '{target_csv}' is incomplete or truncated ({sz} bytes). Re-downloading...")
+            _logger.warning(f"Existing master file '{target_csv}' is incomplete or truncated ({sz} bytes). Re-downloading...")
 
     # 2. Download from Upstox CDN
     gz_temp_path = f"{target_csv}.gz.tmp"
     csv_temp_path = f"{target_csv}.tmp"
 
-    print(f"  ⬇️ Downloading fresh instrument master from {UPSTOX_MASTER_URL}...")
+    _logger.info(f"Downloading fresh instrument master from {UPSTOX_MASTER_URL}...")
     try:
         req = urllib.request.Request(
             UPSTOX_MASTER_URL,
@@ -58,7 +60,7 @@ def run_master_fetcher(
         with urllib.request.urlopen(req, timeout=timeout_sec) as response, open(gz_temp_path, "wb") as out_gz:
             shutil.copyfileobj(response, out_gz)
 
-        print("  📦 Decompressing instrument master archive...")
+        _logger.info("Decompressing instrument master archive...")
         with gzip.open(gz_temp_path, "rb") as f_in, open(csv_temp_path, "wb") as f_out:
             shutil.copyfileobj(f_in, f_out)
 
@@ -71,14 +73,14 @@ def run_master_fetcher(
             os.remove(gz_temp_path)
 
         final_sz = os.path.getsize(target_csv)
-        print(f"  ✓ Downloaded and saved Instrument Master to '{target_csv}' ({final_sz / (1024 * 1024):.2f} MB)")
+        _logger.info(f"Downloaded and saved Instrument Master to '{target_csv}' ({final_sz / (1024 * 1024):.2f} MB)")
         return target_csv
 
     except Exception as e:
-        print(f"  ⚠️ Warning: Failed to download from Upstox CDN: {e}", file=sys.stderr)
+        _logger.error(f"Failed to download instrument master from Upstox CDN: {e}")
         # Check if an existing copy is available
         if os.path.exists(target_csv) and os.path.getsize(target_csv) > 0:
-            print(f"  ✓ Falling back to existing local copy at '{target_csv}'")
+            _logger.warning(f"Falling back to existing local copy at '{target_csv}'")
             return target_csv
         return None
 

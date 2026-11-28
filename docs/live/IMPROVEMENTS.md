@@ -19,26 +19,18 @@ Many of the remaining structural, operational, simulation, and alpha improvement
 
 ## Part 1 — Architecture, Data & Execution Infrastructure
 
-### 1. Deterministic `origin_track` Recording in Composite Trade Journals (`--continue`)
-- **Current Limitation**: [`CompositeTrack.add_recovered_trade()`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/composite_track.py#L159-L176) already supports restoring via `origin_track`, but relies on fallback metadata lookup if top-level `origin_track` is absent, and Web UI tables do not display both composite parent and `origin_track` consistently.
-- **Target Design**:
-  1. Promote `origin_track` and `sub_track_rule` to strict first-class immutable fields on `TradeState` (emitted on `TRADE_ENTRY_SUBMITTED` and `TRADE_FILLED`).
-  2. Fail loudly / quarantine legacy records missing `origin_track` rather than falling back or misattributing SL/target rules.
-  3. Expose both `track` (composite group) and `origin_track` (governing exit profile) consistently in Web UI Live and Historical tables.
+### 1. Deterministic `origin_track` Recording in Composite Trade Journals (`--continue`) — **[IMPLEMENTED 2026-11-28]**
+- **Implemented Design**:
+  1. Promoted `origin_track` and `sub_track_rule` to strict immutable fields on `TradeState` (emitted on `TRADE_ENTRY_SUBMITTED`, `TRADE_FILLED`, and `TRADE_EXIT`).
+  2. Strict validation in `CompositeTrack.add_recovered_trade()` and `BaseSuperstructure._recover_state_from_journals()` quarantines ambiguous/legacy records missing valid sub-track `origin_track` into `quarantined_legacy_trades.jsonl`.
+  3. Live Telemetry, Historical Review, and Trade Analysis Modals display the `Origin / Rule` column and badges.
 
-### 2. Web UI Admin Tab, Decoupled Core RMS, and Multi-Strategy Architecture
-- **Admin & Process Health Tab in Web UI**:
-  - Replace blind terminal inspection with an **Operations / Admin** tab backed by REST endpoints (`/api/admin/processes`, `/api/admin/action`, `/api/admin/logs`):
-    - **Process Matrix**: Reads `logs/pids.json`, verifies OS PID liveness, CPU/RSS usage, uptime, and ZMQ socket liveness (`quotes_heartbeat.pub`, `feed_equity.ipc`, `feed_options.ipc`, `rms_strike_pub.ipc`, `scoring_alerts_pub.ipc`), plus `shm_ohlc_221` write freshness (`last_update_ns`).
-    - **Safe Controls**: Freeze / Unfreeze per mode (`paper`, `paper_delayed`, `live`, `all`), Stop-Live emergency switch, Strategy restart (`--continue`) targeting a selected derived config profile (#3), Rest-Fallback toggle, and Groww TOTP token status / refresh trigger. All mutating admin actions on `live` require explicit typed confirmation + audit log entry in `logs/admin_audit.jsonl`.
-- **Decoupling RMS into Core**:
-  - Currently [`runner.py`](file:///Users/yorha/Documents/Trading%20Stuff/runner.py) starts `rms_service` inside `cmd_start_v2` (strategy start), coupling option contract selection to the momentum launch.
-  - Because `RMSService`'s true job—mapping `(symbol, direction)` to liquid, spread-checked candidate strikes (`ATM`, `ITM1`, `ITM2`, `OTM1`, `OTM2`) using `QuotesBroker`—is **strategy-agnostic**, promote `rms_service` into the **Core Tier** (`runner.py core --rms` or always-on with `--quotesbroker`).
-  - Attach `strategy_id` (e.g., `"momentum"`, `"mean_reversion"`) and optional `strategy_tags` to `SetupAlert` and `ActionableOpportunity`, and publish on topic `OPP.<strategy_id>` so multiple concurrent strategies share one RMS process cleanly without cross-talk.
-- **Modular Multi-Strategy Framework**:
-  - Define a clean `BaseStrategy` abstraction (`strategies/base_strategy.py`) and plugin registry (`strategies/registry.py`) decoupling:
-    - **Shared Feature State**: `CandleManager` SHM (`shm_ohlc_221`) stays focused on 5m OHLCV + ATR + rVOL (or expands reserved padding bytes carefully for VWAP / Day High-Low) so all strategies read the exact same zero-copy memory.
-    - **Strategy Detectors**: Each strategy (`strategies/momentum/`, `strategies/mean_reversion/`, etc.) binds its own isolated process (or vectorized simulation evaluator in `ColumnarSimEngine`) and declares which execution tracks it feeds.
+### 2. Web UI Admin Tab, Decoupled Core RMS, and Multi-Strategy Architecture — **[Admin/Health UI & Core RMS IMPLEMENTED 2026-11-28; Multi-Strategy Framework Deferred]**
+- **Implemented (`Admin Ops` & `System Health` Tabs + Core RMS Decoupling)**:
+  - Added [`web/admin_service.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/admin_service.py), [`web/health_service.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/health_service.py), [`core/ops/operations.py`](file:///Users/yorha/Documents/Trading%20Stuff/core/ops/operations.py), and vertical left-sidebar tabs **Admin Ops** (dropdown activity flow across Pre-Market, Core, Granular Mode-Track Strategy, Risk/Auth, Post-Market, Processes/Audit) and **System Health & Day's Log Inspector** (immediate `RED` banner/badge on today's `ERROR` logs or dead PIDs, dual `mmap` + POSIX SHM probe).
+  - Decoupled `RMSService` into the Core Tier (`runner.py core --rms` / `runner.py rmsservice`) with `strategy_id` & `strategy_tags` fields publishing on `OPP.<strategy_id>.<symbol>` while `cmd_start_v2()` / Admin attaches automatically when Core RMS is alive.
+- **Deferred for Later**:
+  - Modular multi-strategy `BaseStrategy` / `strategies/registry.py` plugin framework and second signal family (`mean_reversion`).
 
 ### 3. Web UI Config Manager with Immutable Presets (`base`, `live`, `simulation`)
 - **Current Limitation**: Configuration lives in flat JSON files (`config/execution.json`, `config/strategies.json`, `config/tracks/*.json`) edited manually; live parameters and experimental simulation tweaks risk colliding.
@@ -67,8 +59,8 @@ Many of the remaining structural, operational, simulation, and alpha improvement
   3. **Storage Layout**: Store compressed artifacts under `cache/simulations/<date>/<hash[:16]>.pkl.gz` with LRU size eviction (e.g., 500 MB cap).
 
 ### 7. Standardized Logging & Lock-Free Staged → Master Trade Journal Pipeline
-- **Logging Standardization**: Unify `print(...)` and logger calls into one structured format (`[YYYY-MM-DD HH:MM:SS.mmm IST] [LEVEL] [SERVICE] message`) with `RotatingFileHandler` and log subdir cleanup.
-- **Master Trade Journal Pipeline (`recordings/YYYY-MM-DD/`)**:
+- **Logging Standardization — [IMPLEMENTED 2026-11-28]**: All `core/`, `strategies/`, `execution/`, `web/`, and `scripts/` modules emit unified `[YYYY-MM-DD HH:MM:SS.mmm IST] [LEVEL] [LOGGER] message` format via [`core/common/logging_utils.py`](file:///Users/yorha/Documents/Trading%20Stuff/core/common/logging_utils.py) with `RotatingFileHandler` support.
+- **Master Trade Journal Pipeline (`recordings/YYYY-MM-DD/`)** *(Remaining)*:
   1. During market hours: each `exec_<mode>_<track>` process writes lock-free to `.staging/journal_<mode>_<track>.jsonl`.
   2. On exit / `runner.py post-market`: atomically merge into `master_trades.jsonl` (deduplicated by `(trade_id, event, timestamp)`) + normalized summary Parquet/JSON.
   3. Update unified journal reader (#15) to read seamlessly from both `master_trades.jsonl` and active `.staging/` files.
