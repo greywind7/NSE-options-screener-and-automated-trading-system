@@ -17,7 +17,9 @@ from common.tracks.delta_scalp import DeltaScalpTrack
 from common.tracks.micro_chandelier import MicroChandelierTrack
 from common.tracks.gamma_runner import GammaRunnerTrack
 from common.tracks.volatility_expansion import VolatilityExpansionTrack
+from common.tracks.volatility_expansion_ratchet import VolatilityExpansionRatchetTrack
 from common.tracks.adaptive_regime import AdaptiveRegimeTrack
+from common.tracks.adaptive_regime_ratchet import AdaptiveRegimeRatchetTrack
 from common.tracks.trend_pullback_v2 import TrendPullbackV2Track
 from core.common.ipc_schemas import ActionableOpportunity, OrderRequest
 from core.common.time_utils import IST
@@ -245,7 +247,9 @@ class TestNewExecutionTracks(unittest.TestCase):
         self.assertIn("micro_chandelier_ITM1", v2_names)
         self.assertNotIn("gamma_runner_OTM2", v2_names)
         self.assertIn("volatility_expansion_ATM", v2_names)
+        self.assertIn("volatility_expansion_ratchet_ATM", v2_names)
         self.assertIn("adaptive_regime_ATM", v2_names)
+        self.assertIn("adaptive_regime_ratchet_ATM", v2_names)
         self.assertIn("trend_pullback_v2_ITM1", v2_names)
         self.assertNotIn("fast_momentum_ATM", v2_names)
 
@@ -253,14 +257,73 @@ class TestNewExecutionTracks(unittest.TestCase):
         def_names = get_enabled_track_names(track_profile="default")
         self.assertIn("fast_momentum_ATM", def_names)
         self.assertIn("structural_convexity_ATM", def_names)
+        self.assertIn("volatility_expansion_ratchet_ATM", def_names)
+        self.assertIn("adaptive_regime_ratchet_ATM", def_names)
         self.assertNotIn("gamma_runner_OTM2", def_names)
 
         # 4. Instantiate v2 tracks via create_tracks
         tracks_v2 = create_tracks(context=self.context, track_profile="v2")
-        self.assertEqual(len(tracks_v2), 7)
+        self.assertEqual(len(tracks_v2), 9)
         self.assertIsInstance(tracks_v2["structural_convexity_ATM"], StructuralConvexityTrack)
         self.assertIsInstance(tracks_v2["delta_scalp_ITM2"], DeltaScalpTrack)
+        self.assertIsInstance(tracks_v2["volatility_expansion_ratchet_ATM"], VolatilityExpansionRatchetTrack)
+        self.assertIsInstance(tracks_v2["adaptive_regime_ratchet_ATM"], AdaptiveRegimeRatchetTrack)
         self.assertTrue(tracks_v2["structural_convexity_ATM"].option_scaling_cfg.get("enabled"))
+
+    def test_volatility_expansion_ratchet_progression(self):
+        track = VolatilityExpansionRatchetTrack(context=self.context)
+        opp = _make_dummy_opp()
+        trade = track.on_opportunity(opp)
+        self.assertIsNotNone(trade)
+        self.assertEqual(trade.token, "INFY_ATM")
+        self.assertEqual(trade.entry_price, 20.0)
+
+        # +5% gain (bid = 21.0) -> Level 1 BE + 0.5% buffer = 20.10
+        track.on_tick("INFY_ATM", ltp=21.0, bid=21.0, ask=21.1, ts=trade.entry_time + 10.0)
+        self.assertEqual(trade.ratchet_level, 1)
+        self.assertAlmostEqual(trade.stop_loss, 20.10, places=2)
+
+        # +10% gain (bid = 22.0) -> 2 steps above +5% (+5% lock = 21.00)
+        track.on_tick("INFY_ATM", ltp=22.0, bid=22.0, ask=22.1, ts=trade.entry_time + 20.0)
+        self.assertEqual(trade.ratchet_level, 3)
+        self.assertAlmostEqual(trade.stop_loss, 21.00, places=2)
+
+        # Peak +15% then pullback to +9.9% -> SL must stay locked at +10% floor (22.00) and exit on breach
+        track.on_tick("INFY_ATM", ltp=23.0, bid=23.0, ask=23.1, ts=trade.entry_time + 30.0)
+        self.assertEqual(trade.ratchet_level, 5)
+        self.assertAlmostEqual(trade.stop_loss, 22.00, places=2)
+
+        track.on_tick("INFY_ATM", ltp=21.95, bid=21.95, ask=22.05, ts=trade.entry_time + 40.0)
+        self.assertEqual(trade.status, "CLOSED")
+        self.assertEqual(trade.exit_reason, "SL_HIT")
+
+    def test_adaptive_regime_ratchet_all_phases(self):
+        track = AdaptiveRegimeRatchetTrack(context=self.context)
+
+        # Midday phase (11:30 IST): ITM1 (entry 35.0), tighter +3% BE and +1.5% steps
+        dt_mid = datetime(2026, 11, 20, 11, 30, 0, tzinfo=IST)
+        trade_mid = track.on_opportunity(_make_dummy_opp(timestamp=dt_mid.timestamp()))
+        self.assertIsNotNone(trade_mid)
+        self.assertEqual(trade_mid.metadata.get("regime_phase"), "MIDDAY")
+
+        # +4.6% gain (bid = 36.61) -> 1 step above +3% -> locks +1.5% (35.52)
+        track.on_tick("INFY_ITM1", ltp=36.61, bid=36.61, ask=36.70, ts=trade_mid.entry_time + 60.0)
+        self.assertGreaterEqual(trade_mid.ratchet_level, 2)
+        self.assertGreaterEqual(trade_mid.stop_loss, 35.50)
+
+        # Afternoon phase (14:00 IST): ATM (entry 20.0), combines stepped trail + 50% peak trail
+        dt_pm = datetime(2026, 11, 20, 14, 0, 0, tzinfo=IST)
+        trade_pm = track.on_opportunity(_make_dummy_opp(timestamp=dt_pm.timestamp()))
+        self.assertIsNotNone(trade_pm)
+        self.assertEqual(trade_pm.metadata.get("regime_phase"), "AFTERNOON")
+
+        track.on_tick("INFY_ATM", ltp=21.5, bid=21.5, ask=21.6, ts=trade_pm.entry_time + 20.0)  # +7.5%
+        self.assertGreaterEqual(trade_pm.ratchet_level, 2)
+        self.assertAlmostEqual(trade_pm.stop_loss, 20.50, places=2)  # +2.5% locked
+
+        track.on_tick("INFY_ATM", ltp=24.0, bid=24.0, ask=24.1, ts=trade_pm.entry_time + 40.0)  # +20%
+        # Stepped trail locks +15% (23.00), exceeding 50% trail (+10% / 22.00)
+        self.assertAlmostEqual(trade_pm.stop_loss, 23.00, places=2)
 
     def test_option_convexity_scaling_and_spread_sl_floor(self):
         # Expensive ITM2 option (ask = 50 on 1500 spot -> prem_pct = 3.33%, scale = 0.015 / 0.03333 = 0.45)

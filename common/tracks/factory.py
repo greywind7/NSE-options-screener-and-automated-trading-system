@@ -24,7 +24,9 @@ from common.tracks.delta_scalp import DeltaScalpTrack
 from common.tracks.micro_chandelier import MicroChandelierTrack
 from common.tracks.gamma_runner import GammaRunnerTrack
 from common.tracks.volatility_expansion import VolatilityExpansionTrack
+from common.tracks.volatility_expansion_ratchet import VolatilityExpansionRatchetTrack
 from common.tracks.adaptive_regime import AdaptiveRegimeTrack
+from common.tracks.adaptive_regime_ratchet import AdaptiveRegimeRatchetTrack
 from common.tracks.trend_pullback_v2 import TrendPullbackV2Track
 from core.config.config_loader import get_config_manager
 
@@ -41,7 +43,9 @@ TRACK_CLASS_MAP = {
     "micro_chandelier": MicroChandelierTrack,
     "gamma_runner": GammaRunnerTrack,
     "volatility_expansion": VolatilityExpansionTrack,
+    "volatility_expansion_ratchet": VolatilityExpansionRatchetTrack,
     "adaptive_regime": AdaptiveRegimeTrack,
+    "adaptive_regime_ratchet": AdaptiveRegimeRatchetTrack,
     "trend_pullback_v2": TrendPullbackV2Track,
 }
 
@@ -397,12 +401,43 @@ def _build_base_track_instance(
             entry_freeze_time=frz_time,
             eod_squareoff_time=eod_time,
         )
+    elif base_type == "volatility_expansion_ratchet":
+        return cls(
+            context=context,
+            track_name=track_name,
+            target_pct=float(p.get("target_pct", 0.25)),
+            sl_pct=float(p.get("sl_pct", 0.08)),
+            breakeven_trigger_pct=float(p.get("breakeven_trigger_pct", 0.05)),
+            trailing_step_pct=float(p.get("trailing_step_pct", 0.025)),
+            deceleration_timeout_sec=float(p.get("deceleration_timeout_sec", 300.0)),
+            preferred_mode=preferred_mode or "ATM",
+            parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
+        )
     elif base_type == "adaptive_regime":
         return cls(
             context=context,
             track_name=track_name,
             target_pct=float(p.get("target_pct", 0.18)),
             sl_pct=float(p.get("sl_pct", 0.07)),
+            parent_track=parent_track,
+            allocated_capital=cap,
+            entry_freeze_time=frz_time,
+            eod_squareoff_time=eod_time,
+        )
+    elif base_type == "adaptive_regime_ratchet":
+        return cls(
+            context=context,
+            track_name=track_name,
+            target_pct=float(p.get("target_pct", 0.18)),
+            sl_pct=float(p.get("sl_pct", 0.07)),
+            breakeven_trigger_pct=float(p.get("breakeven_trigger_pct", 0.05)),
+            trailing_step_pct=float(p.get("trailing_step_pct", 0.025)),
+            midday_breakeven_pct=float(p.get("midday_breakeven_pct", 0.03)),
+            midday_trailing_step_pct=float(p.get("midday_trailing_step_pct", 0.015)),
+            midday_timeout_sec=float(p.get("midday_timeout_sec", 600.0)),
             parent_track=parent_track,
             allocated_capital=cap,
             entry_freeze_time=frz_time,

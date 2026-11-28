@@ -625,7 +625,9 @@ window.SimulationTab = {
       micro_chandelier: { label: "🕯️ Micro-Chandelier Track (Rapid Micro-Trails)", color: "#fbbf24" },
       gamma_runner: { label: "🔥 Gamma Runner Track (OTM2 Convexity)", color: "#f43f5e" },
       volatility_expansion: { label: "🌊 Volatility Expansion Track (IV Thrust)", color: "#a855f7" },
+      volatility_expansion_ratchet: { label: "🌊 Volatility Expansion Ratchet Track (Stepped Profit Trail)", color: "#c084fc" },
       adaptive_regime: { label: "⏳ Adaptive Regime Track (Multi-Phase)", color: "#34d399" },
+      adaptive_regime_ratchet: { label: "⏳ Adaptive Regime Ratchet Track (Phase-Calibrated Trail)", color: "#10b981" },
       trend_pullback_v2: { label: "📈 Trend Pullback V2 Track (Spread-Calibrated SL)", color: "#2dd4bf" },
     };
 
@@ -746,8 +748,11 @@ window.SimulationTab = {
           const pKey = inp.dataset.param;
           const isPct = inp.dataset.isPct === "true";
           const rawVal = inp.value;
+          const isNumeric = inp.type === "number" || isPct;
           const numVal = parseFloat(rawVal);
-          params[pKey] = isPct ? (isNaN(numVal) ? 0.0 : numVal / 100.0) : (isNaN(numVal) ? rawVal : numVal);
+          params[pKey] = isPct
+            ? (isNaN(numVal) ? 0.0 : numVal / 100.0)
+            : (isNumeric && !isNaN(numVal) ? numVal : rawVal);
         });
         base_tracks[key] = params;
       });

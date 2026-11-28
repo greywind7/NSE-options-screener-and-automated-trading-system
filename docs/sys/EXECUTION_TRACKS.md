@@ -287,6 +287,37 @@ flowchart LR
 
 ---
 
+### 3.9 Volatility Expansion Ratchet Track (`volatility_expansion_ratchet`)
+
+> **Quadrant: High Risk, High Reward — Progressive Stepped Ratchet**
+
+- **Class**: [`VolatilityExpansionRatchetTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/volatility_expansion_ratchet.py)
+- **Moneyness**: `ATM` ($\Delta \approx 0.50$)
+- **Core Philosophy**:
+  Retains `VolatilityExpansionTrack`'s IV-thrust entry profile and 300s deceleration filter, while eliminating flat breakeven plateaus and late-day givebacks through monotonic stepped profit ratcheting.
+- **Target / SL**: Target `+25.0%`, Initial SL `-8.0%`.
+- **Progressive Stepped Ratchet**:
+  - **Level 1 (`+5.0%` peak gain)**: Locks `entry_price * 1.005` (breakeven + `0.5%` brokerage buffer).
+  - **Levels 2+ (every `+2.5%` step above `+5.0%`)**: Advances SL upward monotonically (`+2.5%` at `+7.5%`, `+5.0%` at `+10.0%`, `+7.5%` at `+12.5%`, …, up to `+17.5%` at `+22.5%`), so stalling momentum realizes stepped gains instead of waiting passively for EOD or deceleration exits.
+- **Early Deceleration Timeout**: `300s` if profit `< +3.0%` and `ratchet_level < 2`.
+
+---
+
+### 3.10 Adaptive Regime Ratchet Track (`adaptive_regime_ratchet`)
+
+> **Quadrant: Dynamic Time Regime — Per-Phase Stepped Ratchet**
+
+- **Class**: [`AdaptiveRegimeRatchetTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/adaptive_regime_ratchet.py)
+- **Moneyness**: Dynamic (`ATM` Morning/Afternoon, `ITM1` Midday)
+- **Core Philosophy**:
+  Preserves `AdaptiveRegimeTrack`'s three intraday time regimes while adding consistent regime-calibrated stepped ratcheting across every clock phase so midday chop and morning thrusts lock incremental gains instead of decaying into timeout exits.
+- **Phase Ratchet Mechanics**:
+  1. **Morning (`09:15 – 10:30` IST)**: Target `+18%`, SL `-7%`; Level 1 (`+0.5%` buffer) at `+5.0%`, stepped SL every `+2.5%` advance.
+  2. **Midday (`10:30 – 13:30` IST)**: `ITM1`, Target `+8%`, SL `-5%`; tighter Level 1 (`+0.5%` buffer) at `+3.0%`, stepped SL every `+1.5%` advance; `MIDDAY_CONSOLIDATION_TIMEOUT` at `600s` only if profit `< +2.0%` and `ratchet_level < 2`.
+  3. **Afternoon (`13:30 – 15:00+` IST)**: Target `+25%`, SL `-7%`; Level 1 at `+5.0%`, `+2.5%` steps above `+5.0%`, unified with the `50%` asymmetric peak trail above `+10.0%` (taking the stricter SL floor).
+
+---
+
 ## 4. Summary Matrix & Historical Simulation Benchmark
 
 The table below compares the performance of all 8 new `v2` tracks against the full historical simulation dataset of **2026-11-19** (3,594,170 equity ticks, 7,312,841 option depth ticks, ₹250,000 capital per track, ₹30/order round-trip brokerage deducted):
@@ -348,8 +379,8 @@ Enabled globally via [`config/strategies.json`](file:///Users/yorha/Documents/Tr
 ### 6.1 Profile Directory (`config/tracks/` & `config/strategies.json`)
 Track configurations are isolated in dedicated profile JSON files (`gamma_runner_OTM2` retired from active profiles on `2026-11-26`):
 - `config/tracks/v1.json`: The `12` baseline legacy tracks + composite tracks.
-- `config/tracks/v2.json`: The `7` active multi-regime tracks (`gamma_runner_OTM2` retired).
-- `config/tracks/default.json`: Active `19`-track ensemble combining `12 v1` + `7 v2` runnable tracks (`12 v1` + `7 v2`, plus 3 `composite_shared_*` ensembles depending on profile selection).
+- `config/tracks/v2.json`: The `9` active multi-regime tracks (`7` original active v2 tracks + `volatility_expansion_ratchet_ATM` & `adaptive_regime_ratchet_ATM`; `gamma_runner_OTM2` retired).
+- `config/tracks/default.json`: Active `21`-track ensemble combining `12 v1` + `9 v2` runnable tracks (plus 3 `composite_shared_*` ensembles included in `default` and `v1`).
 
 ### 6.2 Command Line Interface (`runner.py`) & Admin Ops UI
 Run simulations or live trading with profile presets or individual tracks:

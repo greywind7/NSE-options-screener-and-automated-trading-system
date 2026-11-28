@@ -203,7 +203,14 @@ def resolve_track_cache_specs(
     glob = params.get("global_settings") or {}
     modes = [str(m).strip() for m in (glob.get("modes") or ["paper", "paper_delayed"]) if str(m).strip()]
 
-    mom_cfg = _get_momentum_config(strategy_cfg, track_profile=params.get("track_profile"))
+    # Use strategy_cfg as authoritative when it explicitly defines enabled_tracks (avoids overwriting
+    # user track toggles or parameter overrides with the static preset JSON file).
+    s_mom = (strategy_cfg or {}).get("strategies", {}).get("momentum", {}) if isinstance(strategy_cfg, dict) else {}
+    has_explicit_spec = bool(s_mom and _get_enabled_tracks_spec(s_mom))
+    mom_cfg = _get_momentum_config(
+        strategy_cfg,
+        track_profile=None if has_explicit_spec else params.get("track_profile"),
+    )
     enabled_spec = _get_enabled_tracks_spec(mom_cfg) or []
     tracks_dict = mom_cfg.get("tracks") or {}
 

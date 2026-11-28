@@ -16,6 +16,7 @@ from web.sim_disk_cache import (
     HEADER_BYTES,
     HEADER_STRUCT,
     SimDiskCache,
+    resolve_track_cache_specs,
 )
 from web.simulation_service import SimulationService
 
@@ -268,3 +269,40 @@ class TestSimDiskCacheAndPaths(unittest.TestCase):
         self.assertTrue(any(d["date"] == "2026-11-28" and d["has_journals"] for d in dates))
         ov = hist_svc.get_historical_overview("2026-11-28")
         self.assertEqual(ov["modes"]["paper"]["tracks"]["fast_momentum_ATM"]["trades"], 1)
+
+    def test_resolve_specs_respects_disabled_tracks_and_param_overrides_and_appends_new_track(self):
+        sim_svc = SimulationService(recordings_dir=self.rec_dir, cache_dir=self.cache_dir)
+        cfg = sim_svc.get_default_config("default")
+        base_tracks = {
+            k: {**v, "enabled": (k == "volatility_expansion")}
+            for k, v in cfg["base_tracks"].items()
+        }
+        p1 = {
+            "date": "2026-11-19",
+            "track_profile": "default",
+            "global_settings": {**cfg["global_settings"], "modes": ["paper"]},
+            "base_tracks": base_tracks,
+            "composite_tracks": [],
+            "custom_tracks": [],
+        }
+        sc1 = sim_svc._build_custom_strategy_cfg(p1)
+        specs1 = resolve_track_cache_specs("2026-11-19", p1, sc1, self.rec_dir)
+        self.assertEqual([s["track_name"] for s in specs1], ["volatility_expansion_ATM"])
+
+        # Changing a parameter on the enabled track must produce a distinct cache_key even with track_profile="default"
+        p2 = json.loads(json.dumps(p1))
+        p2["base_tracks"]["volatility_expansion"]["target_pct"] = 0.35
+        sc2 = sim_svc._build_custom_strategy_cfg(p2)
+        specs2 = resolve_track_cache_specs("2026-11-19", p2, sc2, self.rec_dir)
+        self.assertNotEqual(specs1[0]["cache_key"], specs2[0]["cache_key"])
+
+        # Adding a newly enabled track later keeps original track's key identical for disk reuse + appends new track
+        p3 = json.loads(json.dumps(p1))
+        p3["base_tracks"]["volatility_expansion_ratchet"]["enabled"] = True
+        sc3 = sim_svc._build_custom_strategy_cfg(p3)
+        specs3 = resolve_track_cache_specs("2026-11-19", p3, sc3, self.rec_dir)
+        self.assertEqual(
+            [s["track_name"] for s in specs3],
+            ["volatility_expansion_ATM", "volatility_expansion_ratchet_ATM"],
+        )
+        self.assertEqual(specs3[0]["cache_key"], specs1[0]["cache_key"])

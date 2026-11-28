@@ -40,7 +40,21 @@
     },
     {
       "type": "base",
+      "name": "volatility_expansion_ratchet",
+      "modes": [
+        "ATM"
+      ]
+    },
+    {
+      "type": "base",
       "name": "adaptive_regime",
+      "modes": [
+        "ATM"
+      ]
+    },
+    {
+      "type": "base",
+      "name": "adaptive_regime_ratchet",
       "modes": [
         "ATM"
       ]
@@ -93,10 +107,28 @@
       "deceleration_timeout_sec": 300.0,
       "capital": 250000.0
     },
+    "volatility_expansion_ratchet": {
+      "target_pct": 0.25,
+      "sl_pct": 0.08,
+      "breakeven_trigger_pct": 0.05,
+      "trailing_step_pct": 0.025,
+      "deceleration_timeout_sec": 300.0,
+      "capital": 250000.0
+    },
     "adaptive_regime": {
       "target_pct": 0.18,
       "sl_pct": 0.07,
       "breakeven_trigger_pct": 0.07,
+      "capital": 250000.0
+    },
+    "adaptive_regime_ratchet": {
+      "target_pct": 0.18,
+      "sl_pct": 0.07,
+      "breakeven_trigger_pct": 0.05,
+      "trailing_step_pct": 0.025,
+      "midday_breakeven_pct": 0.03,
+      "midday_trailing_step_pct": 0.015,
+      "midday_timeout_sec": 600.0,
       "capital": 250000.0
     },
     "trend_pullback_v2": {

@@ -706,7 +706,10 @@ class AnalyticsWebServer:
 
     def run(self) -> None:
         """Run web server synchronously."""
-        get_logger("WEB_SERVER", log_file="logs/exec_logs/web_server.log")
+        log_path = os.path.join(self.logs_dir, "exec_logs", "web_server.log")
+        get_logger("WEB_SERVER", log_file=log_path)
+        get_logger("SIMULATION_SERVICE", log_file=log_path)
+        get_logger("SIM_DISK_CACHE", log_file=log_path)
         _logger.info(f"ANTIGRAVITY ANALYTICS & SIMULATION WEB UI listening at http://localhost:{self.port} (http://{self.host}:{self.port})")
 
         def _sig_handler(sig, frame):
