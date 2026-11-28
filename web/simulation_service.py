@@ -382,6 +382,27 @@ class SimulationService:
         risk_cfg = momentum.get("risk", {})
         scoring_cfg = momentum.get("scoring_engine_3_0", {})
         opt_scale_cfg = momentum.get("option_convexity_scaling", {})
+        from core.config.config_loader import get_config_manager
+        cfg_mgr = get_config_manager()
+        paper_exec = cfg_mgr.get_execution_mode_config("paper")
+        delayed_exec = cfg_mgr.get_execution_mode_config("paper_delayed")
+        sim_exec = cfg_mgr.get_execution_mode_config("sim")
+        comp_cap = tracks_cfg.get("composite", {}).get("capital")
+        default_capital = float(
+            comp_cap
+            if comp_cap is not None
+            else paper_exec.get("starting_capital_per_sim", 250000.0)
+        )
+        default_min_delay = float(
+            sim_exec["min_delay_ms"]
+            if sim_exec.get("min_delay_ms") is not None
+            else delayed_exec.get("min_delay_ms", 200.0)
+        )
+        default_max_delay = float(
+            sim_exec["max_delay_ms"]
+            if sim_exec.get("max_delay_ms") is not None
+            else delayed_exec.get("max_delay_ms", 500.0)
+        )
         available_dates = self.get_simulation_dates()
         default_date = available_dates[-1]["date"] if available_dates else "2026-11-19"
 
@@ -392,11 +413,15 @@ class SimulationService:
             "cached_date": self.cached_date,
             "available_dates": available_dates,
             "global_settings": {
-                "capital": 250000.0,
+                "capital": default_capital,
                 "modes": ["paper", "paper_delayed"],
-                "min_delay_ms": 200.0,
-                "max_delay_ms": 500.0,
-                "brokerage_per_order": float(momentum.get("brokerage_per_order", 30.0)),
+                "min_delay_ms": default_min_delay,
+                "max_delay_ms": default_max_delay,
+                "brokerage_per_order": float(
+                    momentum["brokerage_per_order"]
+                    if momentum.get("brokerage_per_order") is not None
+                    else cfg_mgr.execution.get("execution", {}).get("brokerage_per_order", 30.0)
+                ),
                 "min_pole_pct": float(scoring_cfg.get("min_pole_pct", 0.005)),
                 "min_candle_elapsed_sec": float(scoring_cfg.get("min_candle_elapsed_sec", 15.0)),
                 "flag_pole_buffer_pct": float(scoring_cfg.get("flag_pole_buffer_pct", 0.25)),
@@ -877,11 +902,11 @@ class SimulationService:
         data_path = self._resolve_data_path(target_date)
         glob = params.get("global_settings", {})
         modes = glob.get("modes") or ["paper", "paper_delayed"]
-        capital = float(glob.get("capital", 250000.0))
-        min_delay_ms = float(glob.get("min_delay_ms", 200.0))
-        max_delay_ms = float(glob.get("max_delay_ms", 500.0))
-        brokerage = float(glob.get("brokerage_per_order", 30.0))
-        min_pole_pct = float(glob.get("min_pole_pct", 0.005))
+        capital = float(glob["capital"]) if glob.get("capital") is not None else 250000.0
+        min_delay_ms = float(glob["min_delay_ms"]) if glob.get("min_delay_ms") is not None else 200.0
+        max_delay_ms = float(glob["max_delay_ms"]) if glob.get("max_delay_ms") is not None else 500.0
+        brokerage = float(glob["brokerage_per_order"]) if glob.get("brokerage_per_order") is not None else 30.0
+        min_pole_pct = float(glob["min_pole_pct"]) if glob.get("min_pole_pct") is not None else 0.005
         freeze_time = glob.get("entry_freeze_time", "15:00")
         squareoff_time = glob.get("eod_squareoff_time", "15:15")
 
@@ -1074,6 +1099,12 @@ class SimulationService:
                 })
 
         # 2. Custom tracks (composed by user)
+        glob = params.get("global_settings", {})
+        from core.config.config_loader import get_config_manager
+        cfg_mgr = get_config_manager()
+        mom_cfg = cfg_mgr.strategy.get("strategies", {}).get("momentum", {})
+        glob_cap = glob.get("capital")
+
         for c in custom_tracks:
             c_type = c.get("type", "base")
             c_name = c.get("name")
@@ -1088,34 +1119,35 @@ class SimulationService:
                     "name": arch,
                     "modes": [mode],
                 })
-                # If specific overrides given for custom track
                 custom_p = dict(track_params_dict.get(arch, {}))
                 for k in ["target_pct", "sl_pct", "trailing_step_pct", "timeout_sec", "fixed_target_inr"]:
                     if k in c and c[k] is not None:
                         custom_p[k] = float(c[k])
                 track_params_dict[c_name] = custom_p
             elif c_type == "composite":
+                c_cap = c["capital"] if c.get("capital") is not None else (glob_cap if glob_cap is not None else 250000.0)
                 enabled_spec.append({
                     "type": "composite",
                     "name": c_name,
                     "shared_pool": bool(c.get("shared_pool", True)),
-                    "capital": float(c.get("capital", 250000.0)),
+                    "capital": float(c_cap),
                     "composition": c.get("composition", []),
                 })
 
         # 3. Enabled composites
         for comp in composite_tracks:
             if comp.get("enabled", True):
-                enabled_spec.append({
+                comp_entry: Dict[str, Any] = {
                     "type": "composite",
                     "name": comp.get("name"),
                     "shared_pool": comp.get("shared_pool", True),
                     "composition": comp.get("composition", []),
-                })
+                }
+                comp_cap = comp.get("capital") if comp.get("capital") is not None else glob_cap
+                if comp_cap is not None:
+                    comp_entry["capital"] = float(comp_cap)
+                enabled_spec.append(comp_entry)
 
-        glob = params.get("global_settings", {})
-        from core.config.config_loader import get_config_manager
-        cfg_mgr = get_config_manager()
         base_risk = dict(cfg_mgr.get_risk_config())
         if "enable_circuit_breaker" in glob:
             base_risk["enable_circuit_breaker"] = bool(glob["enable_circuit_breaker"])
@@ -1143,13 +1175,18 @@ class SimulationService:
         if "opt_scale_enabled" in glob:
             base_opt_scale["enabled"] = bool(glob["opt_scale_enabled"])
 
+        brok_val = (
+            float(glob["brokerage_per_order"])
+            if glob.get("brokerage_per_order") is not None
+            else float(mom_cfg.get("brokerage_per_order", 30.0))
+        )
         return {
             "strategies": {
                 "momentum": {
                     "enabled_tracks": enabled_spec,
                     "tracks": track_params_dict,
                     "track_profile": params.get("track_profile", "default"),
-                    "brokerage_per_order": float(glob.get("brokerage_per_order", 30.0)),
+                    "brokerage_per_order": brok_val,
                     "entry_freeze_time": glob.get("entry_freeze_time", "15:00"),
                     "eod_squareoff_time": glob.get("eod_squareoff_time", "15:15"),
                     "scoring_engine_3_0": base_scoring,

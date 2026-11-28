@@ -48,6 +48,9 @@ class BaseSuperstructure(ExecutionContext, ABC):
         recordings_dir: Optional[str] = None,
         ctx: Optional[zmq.Context] = None,
         continue_state: bool = False,
+        starting_capital: Optional[float] = None,
+        daily_loss_limit_inr: Optional[float] = None,
+        max_capital_per_trade_pct: Optional[float] = None,
     ):
         from core.config.config_loader import get_config_manager
         from common.tracks.factory import get_enabled_track_names, create_tracks
@@ -71,9 +74,21 @@ class BaseSuperstructure(ExecutionContext, ABC):
         from core.rms.mode_risk import ModeRiskManager
         risk_cfg = self._cfg.get_risk_config()
         exec_mode_cfg = self._cfg.get_execution_mode_config(self.mode)
-        starting_cap = float(exec_mode_cfg.get("starting_capital_per_sim", 250000.0))
-        daily_loss = float(risk_cfg.get("daily_loss_limit_inr", exec_mode_cfg.get("daily_loss_limit_inr", 10000.0)))
-        max_cap_pct = float(risk_cfg.get("max_capital_allocation_pct", exec_mode_cfg.get("max_capital_per_trade_pct", 0.50)))
+        starting_cap = float(
+            starting_capital
+            if starting_capital is not None
+            else exec_mode_cfg.get("starting_capital_per_sim", 250000.0)
+        )
+        daily_loss = float(
+            daily_loss_limit_inr
+            if daily_loss_limit_inr is not None
+            else risk_cfg.get("daily_loss_limit_inr", exec_mode_cfg.get("daily_loss_limit_inr", 10000.0))
+        )
+        max_cap_pct = float(
+            max_capital_per_trade_pct
+            if max_capital_per_trade_pct is not None
+            else risk_cfg.get("max_capital_allocation_pct", exec_mode_cfg.get("max_capital_per_trade_pct", 0.50))
+        )
         enable_cb = bool(risk_cfg.get("enable_circuit_breaker", False))
         self.risk_mgr = ModeRiskManager(
             mode=self.mode,

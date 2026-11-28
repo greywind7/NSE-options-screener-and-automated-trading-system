@@ -185,17 +185,22 @@ class ColumnarSimEngine:
         paper_cfg = exec_cfg.get("paper", {})
         sim_cfg = exec_cfg.get("sim", {})
 
-        self.brokerage_per_order = (
-            float(brokerage_per_order)
-            if brokerage_per_order is not None
-            else float(
-                strat_momentum.get("brokerage_per_order")
-                or exec_cfg.get("brokerage_per_order")
-                or sim_cfg.get("brokerage_per_order")
-                or paper_cfg.get("brokerage_per_order")
-                or delayed_cfg.get("brokerage_per_order", 30.0)
-            )
+        brok_cand = next(
+            (
+                v
+                for v in (
+                    brokerage_per_order,
+                    strat_momentum.get("brokerage_per_order"),
+                    exec_cfg.get("brokerage_per_order"),
+                    sim_cfg.get("brokerage_per_order"),
+                    paper_cfg.get("brokerage_per_order"),
+                    delayed_cfg.get("brokerage_per_order"),
+                )
+                if v is not None
+            ),
+            30.0,
         )
+        self.brokerage_per_order = float(brok_cand)
 
         self.entry_freeze_time = (
             entry_freeze_time
@@ -250,11 +255,19 @@ class ColumnarSimEngine:
             self.min_delay_ms = float(delay_sec) * 1000.0
             self.max_delay_ms = float(delay_sec) * 1000.0
         elif min_delay_ms is not None or max_delay_ms is not None:
-            self.min_delay_ms = float(min_delay_ms or 200.0)
-            self.max_delay_ms = float(max_delay_ms or 500.0)
+            self.min_delay_ms = float(min_delay_ms if min_delay_ms is not None else delayed_cfg.get("min_delay_ms", 200.0))
+            self.max_delay_ms = float(max_delay_ms if max_delay_ms is not None else delayed_cfg.get("max_delay_ms", 500.0))
         else:
-            self.min_delay_ms = float(sim_cfg.get("min_delay_ms") or delayed_cfg.get("min_delay_ms", 200.0))
-            self.max_delay_ms = float(sim_cfg.get("max_delay_ms") or delayed_cfg.get("max_delay_ms", 500.0))
+            self.min_delay_ms = float(
+                sim_cfg["min_delay_ms"]
+                if sim_cfg.get("min_delay_ms") is not None
+                else delayed_cfg.get("min_delay_ms", 200.0)
+            )
+            self.max_delay_ms = float(
+                sim_cfg["max_delay_ms"]
+                if sim_cfg.get("max_delay_ms") is not None
+                else delayed_cfg.get("max_delay_ms", 500.0)
+            )
         self.delay_sec = (self.min_delay_ms + self.max_delay_ms) / 2000.0
         self.shm_name = shm_name
 
@@ -643,8 +656,16 @@ class ColumnarSimEngine:
             eod_squareoff_time=self.eod_squareoff_time,
         )
         if self.capital:
+            cap_val = float(self.capital)
             for t in tracks.values():
-                t.allocated_capital = float(self.capital)
+                if hasattr(t, "total_capital"):
+                    t.total_capital = cap_val
+                    if not getattr(t, "shared_pool", True) and getattr(t, "sub_tracks", None):
+                        share = cap_val / len(t.sub_tracks)
+                        for st in t.sub_tracks:
+                            st.allocated_capital = share
+                else:
+                    t.allocated_capital = cap_val
         return tracks
 
     def run_simulation(self) -> Dict[str, Dict[str, Any]]:
@@ -701,9 +722,17 @@ class ColumnarSimEngine:
 
         for m in self.modes:
             exec_mode_cfg = cfg.get_execution_mode_config(m)
-            mode_start_cap = float(self.capital or exec_mode_cfg.get("starting_capital_per_sim", 250000.0))
+            mode_start_cap = float(
+                self.capital
+                if self.capital is not None
+                else exec_mode_cfg.get("starting_capital_per_sim", 250000.0)
+            )
             mode_max_cap_pct = float(exec_mode_cfg.get("max_capital_per_trade_pct", 0.50))
-            mode_daily_loss = float(self.daily_loss_limit_inr or exec_mode_cfg.get("daily_loss_limit_inr", 10000.0))
+            mode_daily_loss = float(
+                self.daily_loss_limit_inr
+                if self.daily_loss_limit_inr is not None
+                else exec_mode_cfg.get("daily_loss_limit_inr", 10000.0)
+            )
             if m == "paper_delayed":
                 ctx_delayed = SimDelayedExecutionContext(
                     min_delay_ms=self.min_delay_ms,
@@ -1117,10 +1146,19 @@ class ColumnarSimEngine:
 
         tokens = df["token"].unique().to_list() if "token" in df.columns else []
         cfg = get_config_manager()
-        t_cfg = cfg.strategy.get("strategies", {}).get("momentum", {}).get("tracks", {})
+        strat_mom = (
+            self.strategy_cfg.get("strategies", {}).get("momentum", {})
+            if self.strategy_cfg and "strategies" in self.strategy_cfg
+            else cfg.strategy.get("strategies", {}).get("momentum", {})
+        )
+        t_cfg = strat_mom.get("tracks", {}) or cfg.strategy.get("strategies", {}).get("momentum", {}).get("tracks", {})
         round_trip_brokerage = 2.0 * self.brokerage_per_order
         mode_start_caps = {
-            m: float(cfg.get_execution_mode_config(m).get("starting_capital_per_sim", 250000.0))
+            m: float(
+                self.capital
+                if self.capital is not None
+                else cfg.get_execution_mode_config(m).get("starting_capital_per_sim", 250000.0)
+            )
             for m in self.modes
         }
         results: Dict[str, Dict[str, Any]] = {
@@ -1142,11 +1180,15 @@ class ColumnarSimEngine:
             }
             for m in self.modes
         }
-        track_configs = {
-            "fast_momentum": {"target_pct": float(t_cfg.get("fast_momentum", {}).get("target_pct", 0.12)), "sl_pct": float(t_cfg.get("fast_momentum", {}).get("sl_pct", 0.08)), "lot_size": 250},
-            "trend_pullback": {"target_pct": float(t_cfg.get("trend_pullback", {}).get("target_pct", 0.25)), "sl_pct": float(t_cfg.get("trend_pullback", {}).get("sl_pct", 0.12)), "lot_size": 250},
-            "fixed_target": {"target_pct": float(t_cfg.get("fixed_target", {}).get("target_pct", 0.15)), "sl_pct": float(t_cfg.get("fixed_target", {}).get("sl_pct", 0.10)), "lot_size": 250},
-        }
+        track_configs: Dict[str, Dict[str, Any]] = {}
+        for tr in self.tracks:
+            base_key = tr.rsplit("_", 1)[0] if any(tr.endswith(f"_{m}") for m in ("ATM", "ITM", "ITM1", "OTM", "OTM1", "OTM2")) else tr
+            tc = t_cfg.get(tr) or t_cfg.get(base_key) or {}
+            track_configs[tr] = {
+                "target_pct": float(tc.get("target_pct", 0.15)),
+                "sl_pct": float(tc.get("sl_pct", tc.get("sl_floor_pct", 0.08))),
+                "lot_size": int(tc.get("lot_size", 250)),
+            }
 
         for token in tokens:
             contract_ticks = df.filter(pl.col("token") == token)
@@ -1225,6 +1267,13 @@ class ColumnarSimEngine:
 
     def _build_results(self) -> Dict[str, Dict[str, Any]]:
         """Aggregate closed trades into performance metrics per mode and track."""
+        cfg = get_config_manager()
+        fallback_mode = self.modes[0] if self.modes else "paper"
+        default_cap = float(
+            self.capital
+            if self.capital is not None
+            else cfg.get_execution_mode_config(fallback_mode).get("starting_capital_per_sim", 250000.0)
+        )
         results: Dict[str, Dict[str, Any]] = {
             m: {
                 tr: {
@@ -1236,8 +1285,8 @@ class ColumnarSimEngine:
                     "total_brokerage": 0.0,
                     "net_pnl": 0.0,
                     "win_rate": 0.0,
-                    "start_capital": 250000.0,
-                    "end_capital": 250000.0,
+                    "start_capital": default_cap,
+                    "end_capital": default_cap,
                     "return_pct": 0.0,
                 }
                 for tr in self.tracks
@@ -1251,12 +1300,22 @@ class ColumnarSimEngine:
             track_instances = self.tracks_by_mode.get(mode, {})
             for tr in self.tracks:
                 inst = track_instances.get(tr)
-                start_cap = float(getattr(inst, "allocated_capital", 250000.0)) if inst else 250000.0
+                start_cap = (
+                    float(getattr(inst, "total_capital", getattr(inst, "allocated_capital", default_cap)))
+                    if inst is not None
+                    else default_cap
+                )
                 results[mode][tr]["start_capital"] = start_cap
 
             for trade in self.closed_trades.get(mode, []):
                 tr = trade.track
                 if tr not in results[mode]:
+                    inst = track_instances.get(tr)
+                    inst_cap = (
+                        float(getattr(inst, "total_capital", getattr(inst, "allocated_capital", default_cap)))
+                        if inst is not None
+                        else default_cap
+                    )
                     results[mode][tr] = {
                         "trades": 0,
                         "wins": 0,
@@ -1266,8 +1325,8 @@ class ColumnarSimEngine:
                         "total_brokerage": 0.0,
                         "net_pnl": 0.0,
                         "win_rate": 0.0,
-                        "start_capital": 250000.0,
-                        "end_capital": 250000.0,
+                        "start_capital": inst_cap,
+                        "end_capital": inst_cap,
                         "return_pct": 0.0,
                     }
                 st = results[mode][tr]

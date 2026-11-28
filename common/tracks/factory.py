@@ -525,12 +525,19 @@ def create_tracks(
         or "15:15"
     )
 
-    eff_brokerage = (
-        momentum_cfg.get("brokerage_per_order")
-        or exec_cfg.get("brokerage_per_order")
-        or exec_cfg.get(f"{context.mode}", {}).get("brokerage_per_order")
-        or 30.0
-    )
+    eff_brokerage = 30.0
+    for brok_cand in (
+        momentum_cfg.get("brokerage_per_order"),
+        exec_cfg.get("brokerage_per_order"),
+        exec_cfg.get(f"{context.mode}", {}).get("brokerage_per_order"),
+    ):
+        if brok_cand is not None:
+            eff_brokerage = float(brok_cand)
+            break
+
+    ctx_risk_mgr = getattr(context, "risk_mgr", None)
+    ctx_capital_raw = getattr(ctx_risk_mgr, "starting_capital", None) if ctx_risk_mgr is not None else None
+    ctx_capital = float(ctx_capital_raw) if ctx_capital_raw is not None else None
 
     active_filter: Optional[set] = None
     if track_filter:
@@ -549,6 +556,8 @@ def create_tracks(
             p = dict(track_params_dict.get(t_name, {}))
             p.setdefault("brokerage_per_order", eff_brokerage)
             p.setdefault("option_scaling_cfg", eff_option_scaling)
+            if ctx_capital is not None:
+                p["capital"] = ctx_capital
             tracks[t_name] = _instantiate_base_track(
                 base_type=t_name,
                 track_name=t_name,
@@ -573,8 +582,10 @@ def create_tracks(
             base_params = dict(track_params_dict.get(t_name, {}))
             base_params.setdefault("brokerage_per_order", eff_brokerage)
             base_params.setdefault("option_scaling_cfg", eff_option_scaling)
-            if "capital" in entry:
-                base_params["capital"] = entry["capital"]
+            if "capital" in entry and entry["capital"] is not None:
+                base_params["capital"] = float(entry["capital"])
+            elif ctx_capital is not None:
+                base_params["capital"] = ctx_capital
             # If the exact base name was explicitly requested in filter (e.g. track_filter=["fast_momentum"])
             if active_filter and t_name in active_filter:
                 tracks[t_name] = _instantiate_base_track(
@@ -621,6 +632,8 @@ def create_tracks(
                         p = dict(track_params_dict.get(sub_base, {}))
                         p.setdefault("brokerage_per_order", eff_brokerage)
                         p.setdefault("option_scaling_cfg", eff_option_scaling)
+                        if ctx_capital is not None:
+                            p["capital"] = ctx_capital
                         tracks[sub_key] = _instantiate_base_track(
                             base_type=sub_base,
                             track_name=sub_key,
@@ -657,7 +670,15 @@ def create_tracks(
                 sub_instances.append(sub_inst)
 
             comp_params = track_params_dict.get("composite", {})
-            total_cap = float(entry.get("capital") or comp_params.get("capital") or 250000.0)
+            total_cap = 250000.0
+            for cap_cand in (
+                entry.get("capital"),
+                ctx_capital,
+                comp_params.get("capital"),
+            ):
+                if cap_cand is not None:
+                    total_cap = float(cap_cand)
+                    break
 
             composite_inst = CompositeTrack(
                 context=context,

@@ -194,7 +194,7 @@ def cmd_feed(args: argparse.Namespace) -> int:
         print(f"  • Market Recorder   : Spawned (PID: {p_rec.pid})")
 
     feed_cmd = [py_bin, "-m", "core.feed.feed_handler", "--mode", feed_mode]
-    p_feed = spawn_process(feed_cmd, "feed_handler")
+    p_feed = spawn_process(feed_cmd, "feed_handler", "logs/exec_logs/feed_handler.log", tier="CORE")
     procs.append(p_feed)
     print(f"  • Feed Handler      : Spawned (PID: {p_feed.pid}, Mode: {feed_mode})")
     return supervise_processes(procs)
@@ -354,10 +354,13 @@ def cmd_start_v2(args: argparse.Namespace) -> int:
         cls_name = "PaperSuperstructure" if m == "paper" else "DelayedSuperstructure" if m == "paper_delayed" else "LiveSuperstructure"
         for tr in tracks_by_mode.get(m, []):
             extra_kwargs = ""
+            if cap_override is not None:
+                if m == "live":
+                    extra_kwargs += f", initial_capital={float(cap_override)}"
+                else:
+                    extra_kwargs += f", starting_capital={float(cap_override)}"
             if m == "live":
                 extra_kwargs += f", live_confirmed={confirm_live}"
-                if cap_override is not None:
-                    extra_kwargs += f", initial_capital={float(cap_override)}"
                 if eod_freeze_override:
                     extra_kwargs += f", eod_freeze_time={repr(str(eod_freeze_override))}"
                 if eod_time_override:

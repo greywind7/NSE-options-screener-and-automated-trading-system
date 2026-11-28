@@ -375,6 +375,11 @@ All inter-process messages utilize MessagePack (`msgpack`) for sub-microsecond b
     $$\text{keys\_to\_remove} = \text{keys\_to\_remove} - \text{protected\_keys}$$
     $$\text{keys\_to\_add} = \text{keys\_to\_add} \cup (\text{protected\_keys} \cap \text{all\_options\_for\_symbol})$$
   - Open positions are NEVER unsubscribed until the trade exits and position registry clears.
+- **Resilience, Watchdog & Stale-Feed Telemetry**:
+  - `websockets.connect(...)` configures protocol keepalive (`ws_ping_interval_sec = 20.0`, `ws_ping_timeout_sec = 10.0`) from `config/system.json` (`system.feed`) and wraps `ws.recv()` in `asyncio.wait_for(..., timeout=...)` using market-hours-aware watchdogs (`30.0s` during active `TradingSchedule` hours, `120.0s` off-hours).
+  - Authorization (`_fetch_authorized_ws_url`) runs via `asyncio.to_thread` inside `_ws_connection_worker()` retry backoff so transient boot/network glitches do not fatally abort `FeedHandler` (and cleanly fail over to `_run_poll_stream()` if `allow_rest_fallback` is enabled).
+  - On every connect/reconnect, `_sync_protected_keys_for_connection()` refreshes `ProtectedPositionRegistry` and prioritizes protected options + underlyings before slicing to `max_contracts`.
+  - Unbuffered `FlushingStreamHandler` + `FlushingRotatingFileHandler` emit structured IST `WARN`/`ERROR` timeout logs directly to `logs/exec_logs/feed_handler.log`, while `get_feed_health()` persists `logs/feed_status.json` for `HealthService` visibility.
 - **Depth Preservation**:
   - Full 5-level market depth arrays (`bids: [[p, q, o], ...]`, `asks: [[p, q, o], ...]`) are extracted from Protobuf `MarketLevel` and serialized in `OptionDepthTickEvent` for archival and simulation parity.
 

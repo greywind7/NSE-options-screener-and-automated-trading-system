@@ -40,7 +40,9 @@ from core.common.ipc_schemas import (
 )
 from core.common.logging_utils import get_logger
 from core.common.symbol_utils import normalize_instrument_token, is_option_contract
+from core.common.time_utils import IST
 from core.config.config_loader import get_config_manager
+from core.config.trading_schedule import get_trading_schedule
 from core.feed.position_registry import ProtectedPositionRegistry
 
 _logger = get_logger("FEED_HANDLER")
@@ -76,6 +78,19 @@ class ConnectionState:
     max_contracts: int = 1800  # Upstox WS limit: 2000 keys per connection
     total_ticks_received: int = 0
     total_ticks_published: int = 0
+    connected: bool = False
+    has_connected_once: bool = False
+    last_connect_ts: float = 0.0
+    last_disconnect_ts: float = 0.0
+    last_tick_ts: float = 0.0
+    last_timeout_ts: float = 0.0
+    reconnect_count: int = 0
+    timeout_count: int = 0
+    consecutive_timeouts: int = 0
+    consecutive_auth_failures: int = 0
+    is_stale: bool = False
+    stale_since_ts: float = 0.0
+    last_error: str = ""
 
 
 class FeedHandler:
@@ -100,14 +115,25 @@ class FeedHandler:
         poll_interval: float = 1.0,
         ctx: Optional[zmq.Context] = None,
         num_connections: int = 2,
+        ws_ping_interval: Optional[float] = None,
+        ws_ping_timeout: Optional[float] = None,
+        ws_recv_timeout_market: Optional[float] = None,
+        ws_recv_timeout_offhours: Optional[float] = None,
+        stale_feed_threshold_sec: Optional[float] = None,
+        max_auth_retries_before_fallback: Optional[int] = None,
+        feed_status_file: Optional[str] = None,
     ):
         cfg = get_config_manager()
         ipc_endpoints = cfg.get_ipc_endpoints()
-        sys_feed_cfg = cfg.system.get("system", {}).get("feed", {})
+        sys_cfg = cfg.system.get("system", {})
+        sys_feed_cfg = sys_cfg.get("feed", {})
+        sys_log_cfg = sys_cfg.get("logging", {})
+        opts_sub_cfg = cfg.instruments.get("instruments", {}).get("options_subscription", {})
         cfg_max_contracts = sys_feed_cfg.get("max_websocket_keys")
 
         self.mode = mode.lower()
         self.exchange = exchange.upper()
+        self.schedule = get_trading_schedule(self.exchange)
         self.feed_equity_ipc = feed_equity_ipc or ipc_endpoints.get("feed_equity_ipc", DEFAULT_FEED_EQ_IPC)
         self.feed_options_ipc = feed_options_ipc or ipc_endpoints.get("feed_options_ipc", DEFAULT_FEED_OPT_IPC)
         self.access_token = access_token or get_access_token()
@@ -118,7 +144,48 @@ class FeedHandler:
             self.max_stream_contracts = max(1, int(max_stream_contracts))
         self.silent = bool(silent)
         self.allow_rest_fallback = bool(allow_rest_fallback)
-        self.debug_log = "logs/exec_logs/debug.log"
+        self.debug_log = str(sys_log_cfg.get("debug_log", "logs/exec_logs/debug.log"))
+
+        self.ws_ping_interval = float(
+            ws_ping_interval if ws_ping_interval is not None else sys_feed_cfg.get("ws_ping_interval_sec", 20.0)
+        )
+        self.ws_ping_timeout = float(
+            ws_ping_timeout if ws_ping_timeout is not None else sys_feed_cfg.get("ws_ping_timeout_sec", 10.0)
+        )
+        self.ws_recv_timeout_market = float(
+            ws_recv_timeout_market
+            if ws_recv_timeout_market is not None
+            else sys_feed_cfg.get("ws_recv_timeout_market_sec", 30.0)
+        )
+        self.ws_recv_timeout_offhours = float(
+            ws_recv_timeout_offhours
+            if ws_recv_timeout_offhours is not None
+            else sys_feed_cfg.get("ws_recv_timeout_offhours_sec", 120.0)
+        )
+        self.stale_feed_threshold_sec = float(
+            stale_feed_threshold_sec
+            if stale_feed_threshold_sec is not None
+            else sys_feed_cfg.get("stale_feed_threshold_sec", 30.0)
+        )
+        self.max_auth_retries_before_fallback = max(
+            1,
+            int(
+                max_auth_retries_before_fallback
+                if max_auth_retries_before_fallback is not None
+                else sys_feed_cfg.get("max_auth_retries_before_fallback", 3)
+            ),
+        )
+        in_test_mode = os.environ.get("TRADING_TEST_MODE") == "1" or "unittest" in sys.modules
+        if feed_status_file is not None:
+            self.feed_status_file: Optional[str] = feed_status_file or None
+        elif in_test_mode:
+            self.feed_status_file = None
+        else:
+            log_dir = str(sys_log_cfg.get("log_dir", "logs"))
+            self.feed_status_file = os.path.join(log_dir, "feed_status.json")
+        self._last_status_write_ts: float = 0.0
+        self._last_parse_warn_ts: float = 0.0
+        self._fallback_to_rest_requested: bool = False
 
         if manifest_path:
             self.manifest_path = manifest_path
@@ -181,7 +248,7 @@ class FeedHandler:
 
         # Dynamic popular options tracking state
         self.enable_dynamic_options: bool = True
-        self.dynamic_popular_strikes: int = 3
+        self.dynamic_popular_strikes: int = int(opts_sub_cfg.get("popular_strikes_above_atm", 3))
         self.dynamic_hysteresis_strikes: int = 1
         self.options_map: Dict[str, Any] = {}
         self.available_strikes_by_symbol: Dict[str, List[float]] = {}
@@ -210,14 +277,6 @@ class FeedHandler:
     @running.setter
     def running(self, val: bool) -> None:
         self._running = bool(val)
-
-    @property
-    def _active_ws(self) -> Any:
-        """Backwards compatibility accessor for active websocket connection."""
-        for c in self.connections:
-            if c.ws is not None:
-                return c.ws
-        return None
 
     def _sync_global_option_keys(self) -> None:
         """Synchronize feed-level sets from per-connection state for backwards compatibility."""
@@ -295,7 +354,7 @@ class FeedHandler:
 
         if not self.connections:
             return 0
-        c_id = abs(hash(key)) % len(self.connections)
+        c_id = zlib.crc32(key.encode("utf-8")) % len(self.connections)
         self._register_key_to_conn(key, c_id)
         return c_id
 
@@ -307,19 +366,180 @@ class FeedHandler:
 
     def get_connection_stats(self) -> List[Dict[str, Any]]:
         """Return runtime diagnostic telemetry for each connection."""
+        now_ts = time.time()
         stats = []
         for c in self.connections:
+            stale_age = (now_ts - c.last_tick_ts) if c.last_tick_ts > 0 else 0.0
             stats.append({
                 "conn_id": c.conn_id,
-                "connected": c.ws is not None,
+                "connected": bool(c.connected or c.ws is not None),
                 "subscribed_keys_count": len(c.subscribed_keys),
                 "underlying_keys_count": len(c.underlying_keys),
                 "underlying_symbols_count": len(c.underlying_symbols),
                 "active_options_count": len(c.active_option_keys),
                 "ticks_received": c.total_ticks_received,
                 "ticks_published": c.total_ticks_published,
+                "last_connect_ts": c.last_connect_ts,
+                "last_disconnect_ts": c.last_disconnect_ts,
+                "last_tick_ts": c.last_tick_ts,
+                "tick_age_sec": round(stale_age, 2) if c.last_tick_ts > 0 else None,
+                "reconnect_count": c.reconnect_count,
+                "timeout_count": c.timeout_count,
+                "consecutive_timeouts": c.consecutive_timeouts,
+                "consecutive_auth_failures": c.consecutive_auth_failures,
+                "is_stale": c.is_stale,
+                "stale_since_ts": c.stale_since_ts,
+                "last_error": c.last_error,
             })
         return stats
+
+    def get_feed_health(self, now_ts: Optional[float] = None) -> Dict[str, Any]:
+        """Compute aggregate feed health and stale-feed status across connections."""
+        ts = float(now_ts if now_ts is not None else time.time())
+        now_dt = datetime.fromtimestamp(ts, tz=IST)
+        is_mkt = self.schedule.is_market_open(now_dt)
+        conn_stats = self.get_connection_stats()
+        stale_conns = []
+        for c in self.connections:
+            tick_age = (ts - c.last_tick_ts) if c.last_tick_ts > 0 else 0.0
+            idle_stale = (
+                is_mkt
+                and c.connected
+                and c.last_tick_ts > 0
+                and tick_age >= self.stale_feed_threshold_sec
+            )
+            if c.is_stale or idle_stale:
+                stale_conns.append(c.conn_id)
+        return {
+            "mode": self.mode,
+            "exchange": self.exchange,
+            "market_open": is_mkt,
+            "timestamp": ts,
+            "stale": bool(stale_conns),
+            "stale_connections": stale_conns,
+            "total_eq_published": self.total_eq_published,
+            "total_opt_published": self.total_opt_published,
+            "connections": conn_stats,
+        }
+
+    def _write_feed_status_snapshot(self, force: bool = False) -> None:
+        """Atomically persist feed health snapshot for HealthService inspection."""
+        if not self.feed_status_file:
+            return
+        now_ts = time.time()
+        if not force and (now_ts - self._last_status_write_ts) < 2.0:
+            return
+        self._last_status_write_ts = now_ts
+        try:
+            payload = self.get_feed_health(now_ts=now_ts)
+            parent = os.path.dirname(os.path.abspath(self.feed_status_file))
+            os.makedirs(parent, exist_ok=True)
+            tmp_path = f"{self.feed_status_file}.tmp.{os.getpid()}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp_path, self.feed_status_file)
+        except Exception:
+            pass
+
+    def _get_ws_recv_watchdog_timeout(self, now_dt: Optional[datetime] = None) -> float:
+        """Return market-hours-aware WebSocket recv watchdog timeout in seconds."""
+        dt = now_dt or datetime.now(IST)
+        if self.schedule.is_market_open(dt):
+            return max(0.01, float(self.ws_recv_timeout_market))
+        return max(0.01, float(self.ws_recv_timeout_offhours))
+
+    def _record_tick_received(self, conn_id: Optional[int], now_ts: float) -> None:
+        """Update per-connection tick timestamps and clear stale flags on recovery."""
+        if conn_id is None or not (0 <= conn_id < len(self.connections)):
+            return
+        conn = self.connections[conn_id]
+        conn.last_tick_ts = now_ts
+        conn.consecutive_timeouts = 0
+        if conn.is_stale:
+            stale_gap = max(0.0, now_ts - conn.stale_since_ts) if conn.stale_since_ts > 0 else 0.0
+            conn.is_stale = False
+            conn.stale_since_ts = 0.0
+            conn.last_error = ""
+            _logger.info(
+                f"[CONN-{conn_id}] Feed recovered after {stale_gap:.1f}s stale window (ticks streaming cleanly)."
+            )
+            self._write_feed_status_snapshot(force=True)
+        elif (now_ts - self._last_status_write_ts) >= 5.0:
+            self._write_feed_status_snapshot(force=False)
+
+    def _sync_protected_keys_for_connection(self, conn_id: int) -> List[str]:
+        """
+        Refresh ProtectedPositionRegistry from disk and ensure every active open
+        position assigned to `conn_id` is included in subscriptions on reconnect.
+        Returns newly added canonical keys for this connection.
+        """
+        conn = self.connections[conn_id]
+        added: List[str] = []
+        protected_keys = self.position_registry.get_protected_keys()
+        if not protected_keys:
+            return added
+
+        # Group canonical keys (prefer pipe form if both pipe and colon variants exist)
+        summary = {}
+        try:
+            summary = self.position_registry.get_protected_summary()
+        except Exception:
+            summary = {}
+
+        canonical_protected: Set[str] = set()
+        for pk in protected_keys:
+            canonical_protected.add(pk.replace(":", "|"))
+
+        for pk in sorted(canonical_protected):
+            info = summary.get(pk, {})
+            sym = self.option_name_map.get(pk) or self.symbol_map.get(pk) or info.get("contract_symbol") or pk
+            u_sym: Optional[str] = info.get("symbol") or None
+            if not u_sym:
+                for usym, opt_set in self.active_options_by_symbol.items():
+                    if pk in opt_set or pk.replace("|", ":") in opt_set:
+                        u_sym = usym
+                        break
+            if not u_sym and " " in sym:
+                u_sym = sym.split()[0]
+
+            if pk in self.key_to_conn or pk.replace("|", ":") in self.key_to_conn:
+                target_cid = self.get_connection_for_key(pk)
+            elif u_sym:
+                target_cid = self.get_connection_for_symbol(u_sym)
+            else:
+                target_cid = zlib.crc32(pk.encode("utf-8")) % self.num_connections
+
+            if target_cid != conn_id:
+                continue
+
+            if pk not in conn.subscribed_keys and pk.replace("|", ":") not in conn.subscribed_keys:
+                conn.subscribed_keys.add(pk)
+                added.append(pk)
+            conn.active_option_keys.add(pk)
+            if u_sym:
+                conn.active_options_by_symbol[u_sym].add(pk)
+            self.symbol_map[pk] = sym
+            self.symbol_map[pk.replace("|", ":")] = sym
+            self._register_key_to_conn(pk, conn_id)
+
+        if added:
+            self._sync_global_option_keys()
+            _logger.info(
+                f"[CONN-{conn_id}] Refreshed ProtectedPositionRegistry on (re)connect: "
+                f"ensured {len(added)} newly protected contract(s) stay subscribed ({added[:5]})."
+            )
+        return added
+
+    def _build_prioritized_stream_keys(self, conn_id: int) -> List[str]:
+        """Prioritize protected positions and cash underlyings before non-held options within max_contracts."""
+        conn = self.connections[conn_id]
+        protected_norm = {pk.replace(":", "|") for pk in self.position_registry.get_protected_keys()}
+        protected_list = sorted(k for k in conn.subscribed_keys if k.replace(":", "|") in protected_norm)
+        prot_set = set(protected_list)
+        underlying_list = sorted(k for k in conn.underlying_keys if k in conn.subscribed_keys and k not in prot_set)
+        und_set = set(underlying_list)
+        other_opts = sorted(k for k in conn.subscribed_keys if k not in prot_set and k not in und_set)
+        return (protected_list + underlying_list + other_opts)[: conn.max_contracts]
 
     def _log(self, msg: str, force: bool = False) -> None:
         if not self.silent or force:
@@ -525,7 +745,7 @@ class FeedHandler:
                         break
                 if not u_sym and " " in sym:
                     u_sym = sym.split()[0]
-                c_id = self.get_connection_for_symbol(u_sym) if u_sym else (abs(hash(pk)) % self.num_connections)
+                c_id = self.get_connection_for_symbol(u_sym) if u_sym else (zlib.crc32(pk.encode("utf-8")) % self.num_connections)
 
                 if pk_pipe not in existing_keys:
                     instruments.append({"key": pk, "symbol": sym, "conn_id": c_id})
@@ -837,13 +1057,18 @@ class FeedHandler:
                             asyncio.run_coroutine_threadsafe(
                                 self._dispatch_ws_subscription_update(c_id, to_add, to_remove), self._ws_loop
                             )
-                        elif self._active_ws:
-                            asyncio.run_coroutine_threadsafe(
-                                self._dispatch_ws_subscription_update(c_id, to_add, to_remove), self._ws_loop
-                            )
+                        else:
+                            first_active = next((c for c in self.connections if c.ws is not None), None)
+                            if first_active is not None:
+                                asyncio.run_coroutine_threadsafe(
+                                    self._dispatch_ws_subscription_update(first_active.conn_id, to_add, to_remove),
+                                    self._ws_loop,
+                                )
                     elif self.mode != "mock" and not getattr(self, "_warned_missing_ws_loop", False):
                         self._warned_missing_ws_loop = True
                         log_debug("[FEED] Dynamic option update computed without active _ws_loop; skipped WS dispatch.", self.debug_log)
+
+        self._record_tick_received(conn_id, float(received_ts or time.time()))
 
     async def _dispatch_ws_subscription_update(
         self,
@@ -864,7 +1089,8 @@ class FeedHandler:
         if conn_id is not None and 0 <= conn_id < len(self.connections):
             target_ws = self.connections[conn_id].ws
         else:
-            target_ws = self._active_ws
+            first_conn = next((c for c in self.connections if c.ws is not None), None)
+            target_ws = first_conn.ws if first_conn is not None else None
 
         if not target_ws:
             return
@@ -975,6 +1201,229 @@ class FeedHandler:
 
             time.sleep(self.poll_interval)
 
+    def _fetch_authorized_ws_url(self) -> Optional[str]:
+        """Fetch a single-use authorized Upstox V3 WebSocket URL."""
+        auth_url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+        try:
+            res = http_get_json(auth_url, access_token=self.access_token, timeout=10, debug_file=self.debug_log)
+            if isinstance(res, dict) and res.get("status") == "success" and "data" in res:
+                return res["data"].get("authorized_redirect_uri") or res["data"].get("authorizedRedirectUri")
+        except Exception as e:
+            _logger.warning(f"Upstox WS authorization request failed: {e}")
+        return None
+
+    def _connect_websocket(self, ws_url: str, ssl_ctx: ssl.SSLContext):
+        """Open Upstox WebSocket with protocol keepalive ping/timeout enabled."""
+        return websockets.connect(
+            ws_url,
+            ssl=ssl_ctx,
+            ping_interval=self.ws_ping_interval,
+            ping_timeout=self.ws_ping_timeout,
+            max_size=10 * 1024 * 1024,
+        )
+
+    def _parse_and_publish_ws_message(self, conn_id: int, msg: Any, now_ts: float) -> None:
+        """Decode binary Upstox V3 protobuf FeedResponse packet and publish normalized ticks."""
+        if not isinstance(msg, bytes):
+            return
+        try:
+            feed_resp = pb.FeedResponse()
+            feed_resp.ParseFromString(msg)
+            for k, feed in feed_resp.feeds.items():
+                canonical_key = k.replace(":", "|")
+                sym = self.symbol_map.get(canonical_key) or canonical_key.split("|")[-1]
+                ltp, bid, ask = 0.0, 0.0, 0.0
+                bids, asks = [], []
+                vol = 0
+                is_opt = is_option_contract(canonical_key)
+                feed_union = feed.WhichOneof("FeedUnion")
+                if feed_union == "fullFeed":
+                    ff = feed.fullFeed
+                    which = ff.WhichOneof("FullFeedUnion")
+                    if which == "marketFF":
+                        m = ff.marketFF
+                        ltp = float(m.ltpc.ltp or 0.0)
+                        vol = int(m.vtt or (m.marketOHLC.ohlc[0].vol if m.marketOHLC and m.marketOHLC.ohlc else 0))
+                        if m.marketLevel and m.marketLevel.bidAskQuote:
+                            for ba in m.marketLevel.bidAskQuote:
+                                bp, bq = float(ba.bidP or 0.0), int(ba.bidQ or 0)
+                                ap, aq = float(ba.askP or 0.0), int(ba.askQ or 0)
+                                if bp > 0:
+                                    bids.append([bp, bq, 1])
+                                if ap > 0:
+                                    asks.append([ap, aq, 1])
+                            bid = bids[0][0] if bids else (0.0 if is_opt else ltp)
+                            ask = asks[0][0] if asks else (0.0 if is_opt else ltp)
+                        else:
+                            bid = 0.0 if is_opt else ltp
+                            ask = 0.0 if is_opt else ltp
+                elif feed_union == "firstLevelWithGreeks":
+                    fl = feed.firstLevelWithGreeks
+                    ltp = float(fl.ltpc.ltp or 0.0)
+                    vol = int(fl.vtt or 0)
+                    if fl.firstDepth:
+                        bid = float(fl.firstDepth.bidP or 0.0)
+                        ask = float(fl.firstDepth.askP or 0.0)
+                    else:
+                        bid = 0.0 if is_opt else ltp
+                        ask = 0.0 if is_opt else ltp
+                elif feed_union == "ltpc":
+                    ltp = float(feed.ltpc.ltp or 0.0)
+                    bid = 0.0 if is_opt else ltp
+                    ask = 0.0 if is_opt else ltp
+
+                if vol > 0:
+                    self.last_seen_volume[canonical_key] = vol
+                else:
+                    vol = self.last_seen_volume.get(canonical_key, 0)
+
+                if ltp > 0:
+                    bid_q = int(bids[0][1]) if bids else 0
+                    ask_q = int(asks[0][1]) if asks else 0
+                    self.publish_tick(
+                        token=canonical_key,
+                        symbol=sym,
+                        ltp=ltp,
+                        volume=vol,
+                        bid=bid if is_opt else (bid or ltp),
+                        ask=ask if is_opt else (ask or ltp),
+                        bid_qty=bid_q,
+                        ask_qty=ask_q,
+                        exchange_ts=now_ts,
+                        received_ts=now_ts,
+                        bids=bids,
+                        asks=asks,
+                        conn_id=conn_id,
+                    )
+        except Exception as parse_err:
+            if (now_ts - self._last_parse_warn_ts) >= 30.0:
+                self._last_parse_warn_ts = now_ts
+                _logger.warning(f"[CONN-{conn_id}] Protobuf parse error: {parse_err}")
+
+    async def _ws_connection_worker(self, conn_id: int) -> None:
+        """Maintain a single resilient WebSocket connection with startup retry, watchdog, and reconnect."""
+        conn = self.connections[conn_id]
+        backoff = 1.0
+
+        while self._running:
+            try:
+                conn_ws_url = await asyncio.to_thread(self._fetch_authorized_ws_url)
+                if not conn_ws_url:
+                    conn.connected = False
+                    conn.ws = None
+                    conn.consecutive_auth_failures += 1
+                    conn.last_error = "ws_auth_failed"
+                    self._write_feed_status_snapshot(force=True)
+
+                    if conn.consecutive_auth_failures >= self.max_auth_retries_before_fallback:
+                        if self.is_rest_fallback_allowed():
+                            _logger.warning(
+                                f"[CONN-{conn_id}] WebSocket auth failed {conn.consecutive_auth_failures}x; "
+                                f"switching to REST fallback poller."
+                            )
+                            self._fallback_to_rest_requested = True
+                            break
+                        _logger.error(
+                            f"[CONN-{conn_id}] WebSocket authorization failed {conn.consecutive_auth_failures} "
+                            f"consecutive attempt(s) and REST fallback is disabled. Retrying in {backoff:.1f}s..."
+                        )
+                    else:
+                        _logger.warning(
+                            f"[CONN-{conn_id}] Cannot obtain WebSocket authorization URL "
+                            f"(attempt {conn.consecutive_auth_failures}). Retrying in {backoff:.1f}s..."
+                        )
+                    await asyncio.sleep(backoff)
+                    backoff = min(15.0, backoff * 1.5)
+                    continue
+
+                conn.consecutive_auth_failures = 0
+                ssl_ctx = ssl.create_default_context()
+
+                async with self._connect_websocket(conn_ws_url, ssl_ctx) as ws:
+                    conn.ws = ws
+                    conn.connected = True
+                    conn.last_connect_ts = time.time()
+                    if conn.has_connected_once:
+                        conn.reconnect_count += 1
+                    conn.has_connected_once = True
+                    conn.last_error = ""
+
+                    # Refresh active protected positions before subscribing on connect/reconnect
+                    self._sync_protected_keys_for_connection(conn_id)
+                    stream_keys = self._build_prioritized_stream_keys(conn_id)
+                    conn.subscribed_keys = set(stream_keys)
+                    conn.active_option_keys = {k for k in conn.active_option_keys if k in conn.subscribed_keys}
+                    for sym in list(conn.active_options_by_symbol.keys()):
+                        conn.active_options_by_symbol[sym] = {
+                            k for k in conn.active_options_by_symbol[sym] if k in conn.subscribed_keys
+                        }
+                    self._sync_global_option_keys()
+
+                    sub_payload = {
+                        "guid": f"feed_v2_c{conn_id}",
+                        "method": "sub",
+                        "data": {"mode": "full", "instrumentKeys": stream_keys},
+                    }
+                    await ws.send(json.dumps(sub_payload).encode("utf-8"))
+                    _logger.info(
+                        f"[CONN-{conn_id}] Upstox V3 WebSocket connected (reconnects={conn.reconnect_count}). "
+                        f"Subscribed to {len(stream_keys):,} contracts "
+                        f"(Underlyings: {len(conn.underlying_keys):,}, Options: {len(conn.active_option_keys):,})."
+                    )
+                    self._write_feed_status_snapshot(force=True)
+                    backoff = 1.0
+
+                    while self._running:
+                        watchdog_sec = self._get_ws_recv_watchdog_timeout()
+                        try:
+                            msg = await asyncio.wait_for(ws.recv(), timeout=watchdog_sec)
+                        except asyncio.TimeoutError:
+                            now_ts = time.time()
+                            conn.timeout_count += 1
+                            conn.consecutive_timeouts += 1
+                            conn.last_timeout_ts = now_ts
+                            conn.is_stale = True
+                            if conn.stale_since_ts <= 0.0:
+                                conn.stale_since_ts = now_ts
+                            conn.last_error = f"ws_recv_watchdog_timeout_{watchdog_sec:.0f}s"
+                            stale_dur = max(0.0, now_ts - conn.stale_since_ts)
+                            is_mkt = self.schedule.is_market_open(datetime.fromtimestamp(now_ts, tz=IST))
+                            log_msg = (
+                                f"[CONN-{conn_id}] WebSocket recv watchdog timeout after {watchdog_sec:.1f}s "
+                                f"(market_open={is_mkt}, timeouts={conn.timeout_count}, "
+                                f"consecutive={conn.consecutive_timeouts}, stale={stale_dur:.1f}s). "
+                                f"Closing half-open socket and reconnecting..."
+                            )
+                            if is_mkt and conn.consecutive_timeouts >= 2:
+                                _logger.error(log_msg)
+                            else:
+                                _logger.warning(log_msg)
+                            self._write_feed_status_snapshot(force=True)
+                            break
+
+                        now_ts = time.time()
+                        conn.total_ticks_received += 1
+                        self._record_tick_received(conn_id, now_ts)
+                        self._parse_and_publish_ws_message(conn_id, msg, now_ts)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if not self._running:
+                    break
+                conn.ws = None
+                conn.connected = False
+                conn.last_disconnect_ts = time.time()
+                conn.last_error = str(e)
+                self._write_feed_status_snapshot(force=True)
+                _logger.warning(
+                    f"[CONN-{conn_id}] WebSocket disconnected/error: {e}. Retrying connection in {backoff:.1f}s..."
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(15.0, backoff * 1.5)
+            finally:
+                conn.ws = None
+                conn.connected = False
+
     def _run_websocket_stream(self) -> None:
         """Connect to Upstox V3 Market Data WebSocket and decode binary protobuf packets across dual connections."""
         if pb is None:
@@ -984,147 +1433,10 @@ class FeedHandler:
             _logger.error("Protobuf decoder module not found and REST fallback is disabled.")
             return
 
-        auth_url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-
-        def get_authorized_ws_url() -> Optional[str]:
-            try:
-                res = http_get_json(auth_url, access_token=self.access_token, timeout=10, debug_file=self.debug_log)
-                if res.get("status") == "success" and "data" in res:
-                    return res["data"].get("authorized_redirect_uri") or res["data"].get("authorizedRedirectUri")
-            except Exception as e:
-                log_debug(f"Upstox WS auth error: {e}", self.debug_log)
-            return None
-
-        # Verify initial authorization
-        initial_url = get_authorized_ws_url()
-        if not initial_url:
-            if self.is_rest_fallback_allowed():
-                self._run_poll_stream()
-                return
-            _logger.error("Failed to authorize WebSocket connection and REST fallback is disabled.")
-            return
-
-        async def ws_connection_worker(conn_id: int):
-            conn = self.connections[conn_id]
-            backoff = 1.0
-
-            while self._running:
-                try:
-                    conn_ws_url = get_authorized_ws_url()
-                    if not conn_ws_url:
-                        _logger.warning(f"[CONN-{conn_id}] Cannot obtain WebSocket authorization URL. Retrying in {backoff:.1f}s...")
-                        await asyncio.sleep(backoff)
-                        backoff = min(15.0, backoff * 1.5)
-                        continue
-
-                    ssl_ctx = ssl.create_default_context()
-
-                    async with websockets.connect(conn_ws_url, ssl=ssl_ctx, ping_interval=None, max_size=10 * 1024 * 1024) as ws:
-                        conn.ws = ws
-                        # Slice subscriptions to max_contracts limit
-                        stream_keys = sorted(list(conn.subscribed_keys))[:conn.max_contracts]
-                        conn.subscribed_keys = set(stream_keys)
-                        conn.active_option_keys = {k for k in conn.active_option_keys if k in conn.subscribed_keys}
-                        for sym in list(conn.active_options_by_symbol.keys()):
-                            conn.active_options_by_symbol[sym] = {k for k in conn.active_options_by_symbol[sym] if k in conn.subscribed_keys}
-                        self._sync_global_option_keys()
-
-                        sub_payload = {
-                            "guid": f"feed_v2_c{conn_id}",
-                            "method": "sub",
-                            "data": {"mode": "full", "instrumentKeys": stream_keys},
-                        }
-                        await ws.send(json.dumps(sub_payload).encode("utf-8"))
-                        _logger.info(
-                            f"[CONN-{conn_id}] Upstox V3 WebSocket connected. Subscribed to {len(stream_keys):,} contracts "
-                            f"(Underlyings: {len(conn.underlying_keys):,}, Options: {len(conn.active_option_keys):,})."
-                        )
-                        backoff = 1.0
-
-                        while self._running:
-                            msg = await ws.recv()
-                            conn.total_ticks_received += 1
-                            now_ts = time.time()
-                            if isinstance(msg, bytes):
-                                try:
-                                    feed_resp = pb.FeedResponse()
-                                    feed_resp.ParseFromString(msg)
-                                    for k, feed in feed_resp.feeds.items():
-                                        canonical_key = k.replace(":", "|")
-                                        sym = self.symbol_map.get(canonical_key) or canonical_key.split("|")[-1]
-                                        ltp, bid, ask = 0.0, 0.0, 0.0
-                                        bids, asks = [], []
-                                        vol = 0
-                                        is_opt = is_option_contract(canonical_key)
-                                        feed_union = feed.WhichOneof("FeedUnion")
-                                        if feed_union == "fullFeed":
-                                            ff = feed.fullFeed
-                                            which = ff.WhichOneof("FullFeedUnion")
-                                            if which == "marketFF":
-                                                m = ff.marketFF
-                                                ltp = float(m.ltpc.ltp or 0.0)
-                                                vol = int(m.vtt or (m.marketOHLC.ohlc[0].vol if m.marketOHLC and m.marketOHLC.ohlc else 0))
-                                                if m.marketLevel and m.marketLevel.bidAskQuote:
-                                                    for ba in m.marketLevel.bidAskQuote:
-                                                        bp, bq = float(ba.bidP or 0.0), int(ba.bidQ or 0)
-                                                        ap, aq = float(ba.askP or 0.0), int(ba.askQ or 0)
-                                                        if bp > 0: bids.append([bp, bq, 1])
-                                                        if ap > 0: asks.append([ap, aq, 1])
-                                                    bid = bids[0][0] if bids else (0.0 if is_opt else ltp)
-                                                    ask = asks[0][0] if asks else (0.0 if is_opt else ltp)
-                                                else:
-                                                    bid = 0.0 if is_opt else ltp
-                                                    ask = 0.0 if is_opt else ltp
-                                        elif feed_union == "firstLevelWithGreeks":
-                                            fl = feed.firstLevelWithGreeks
-                                            ltp = float(fl.ltpc.ltp or 0.0)
-                                            vol = int(fl.vtt or 0)
-                                            if fl.firstDepth:
-                                                bid = float(fl.firstDepth.bidP or 0.0)
-                                                ask = float(fl.firstDepth.askP or 0.0)
-                                            else:
-                                                bid = 0.0 if is_opt else ltp
-                                                ask = 0.0 if is_opt else ltp
-                                        elif feed_union == "ltpc":
-                                            ltp = float(feed.ltpc.ltp or 0.0)
-                                            bid = 0.0 if is_opt else ltp
-                                            ask = 0.0 if is_opt else ltp
-
-                                        if vol > 0:
-                                            self.last_seen_volume[canonical_key] = vol
-                                        else:
-                                            vol = self.last_seen_volume.get(canonical_key, 0)
-
-                                        if ltp > 0:
-                                            bid_q = int(bids[0][1]) if bids else 0
-                                            ask_q = int(asks[0][1]) if asks else 0
-                                            self.publish_tick(
-                                                token=canonical_key,
-                                                symbol=sym,
-                                                ltp=ltp,
-                                                volume=vol,
-                                                bid=bid if is_opt else (bid or ltp),
-                                                ask=ask if is_opt else (ask or ltp),
-                                                bid_qty=bid_q,
-                                                ask_qty=ask_q,
-                                                exchange_ts=now_ts,
-                                                received_ts=now_ts,
-                                                bids=bids,
-                                                asks=asks,
-                                                conn_id=conn_id,
-                                            )
-                                except Exception as parse_err:
-                                    log_debug(f"[CONN-{conn_id}] Protobuf parse error: {parse_err}", self.debug_log)
-                except Exception as e:
-                    if not self._running:
-                        break
-                    conn.ws = None
-                    _logger.warning(f"[CONN-{conn_id}] WebSocket disconnected/error: {e}. Retrying connection in {backoff:.1f}s...")
-                    await asyncio.sleep(backoff)
-                    backoff = min(15.0, backoff * 1.5)
+        self._fallback_to_rest_requested = False
 
         async def dual_runner():
-            await asyncio.gather(*(ws_connection_worker(i) for i in range(self.num_connections)))
+            await asyncio.gather(*(self._ws_connection_worker(i) for i in range(self.num_connections)))
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -1133,6 +1445,9 @@ class FeedHandler:
             while self._running:
                 try:
                     loop.run_until_complete(dual_runner())
+                    if self._fallback_to_rest_requested and self._running and self.is_rest_fallback_allowed():
+                        _logger.warning("WebSocket workers requested REST poller failover; starting _run_poll_stream().")
+                        break
                 except Exception as e:
                     if not self._running:
                         break
@@ -1149,6 +1464,9 @@ class FeedHandler:
                 pass
             loop.close()
             self._ws_loop = None
+
+        if self._fallback_to_rest_requested and self._running and self.is_rest_fallback_allowed():
+            self._run_poll_stream()
 
     def _run_poll_stream(self) -> None:
         """Fallback REST poller in batches of 500 contracts."""
@@ -1177,6 +1495,11 @@ class FeedHandler:
 
 
 def main():
+    global _logger
+    cfg = get_config_manager()
+    log_dir = cfg.system.get("system", {}).get("logging", {}).get("log_dir", "logs")
+    _logger = get_logger("FEED_HANDLER", log_file=os.path.join(log_dir, "exec_logs", "feed_handler.log"))
+
     parser = argparse.ArgumentParser(description="Core Market Data Feed Handler")
     parser.add_argument("--mode", default="mock", choices=["ws", "poll", "mock", "auto"], help="Feed ingestion mode")
     parser.add_argument("--exchange", default="NSE", choices=["NSE", "MCX"], help="Target exchange")

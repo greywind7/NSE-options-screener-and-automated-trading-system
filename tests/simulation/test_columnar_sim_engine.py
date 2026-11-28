@@ -553,6 +553,27 @@ class TestColumnarSimEngine(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(prep_dir, "subscription_manifest_mcx_20261120.json")))
         self.assertTrue(os.path.exists(os.path.join(prep_dir, "filtered_20261128.csv")))
 
+    def test_custom_capital_applies_to_base_and_composite_tracks(self):
+        """Verify ColumnarSimEngine propagates capital override to both BaseTrack and CompositeTrack."""
+        from simulation.columnar_sim_engine import SimExecutionContext
+
+        sim = ColumnarSimEngine(
+            data_path=self.parquet_path,
+            modes=["paper"],
+            capital=75000.0,
+            tracks=["fast_momentum_ATM", "composite_shared_ATM"],
+        )
+        ctx = SimExecutionContext(mode="paper", starting_capital=75000.0)
+        tracks = sim._init_tracks_for_mode("paper", ctx)
+        self.assertEqual(tracks["fast_momentum_ATM"].allocated_capital, 75000.0)
+        self.assertEqual(tracks["composite_shared_ATM"].total_capital, 75000.0)
+        self.assertEqual(tracks["composite_shared_ATM"].available_capital, 75000.0)
+
+        sim.tracks_by_mode = {"paper": tracks}
+        res = sim._build_results()
+        self.assertEqual(res["paper"]["fast_momentum_ATM"]["start_capital"], 75000.0)
+        self.assertEqual(res["paper"]["composite_shared_ATM"]["start_capital"], 75000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

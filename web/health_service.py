@@ -14,6 +14,7 @@ import subprocess
 from typing import Any, Dict, List, Optional
 
 from core.common.time_utils import IST
+from core.config.config_loader import get_config_manager
 from core.ops.operations import get_freeze_status
 from scripts.run_distributed import infer_process_tier, is_pid_alive, load_pids
 
@@ -49,13 +50,40 @@ class HealthService:
         logs_dir: str = "logs",
         pids_file: Optional[str] = None,
         ipc_paths: Optional[List[str]] = None,
-        shm_name: str = "shm_ohlc_221",
+        shm_name: Optional[str] = None,
         skip_system_probes: Optional[bool] = None,
     ):
         self.logs_dir = logs_dir
         self.pids_file = pids_file or os.path.join(logs_dir, "pids.json")
-        self.ipc_paths = ipc_paths if ipc_paths is not None else list(DEFAULT_IPC_PATHS)
-        self.shm_name = shm_name
+        if ipc_paths is not None:
+            self.ipc_paths = ipc_paths
+        else:
+            try:
+                ipc_cfg = get_config_manager().get_ipc_endpoints()
+                resolved_ipcs = []
+                for k in (
+                    "feed_equity_ipc",
+                    "feed_options_ipc",
+                    "quotes_router_ipc",
+                    "heartbeat_ipc",
+                    "scoring_alerts_ipc",
+                    "rms_strike_ipc",
+                ):
+                    ep = ipc_cfg.get(k)
+                    if ep and ep.startswith("ipc://"):
+                        resolved_ipcs.append(ep[6:])
+                self.ipc_paths = resolved_ipcs or list(DEFAULT_IPC_PATHS)
+            except Exception:
+                self.ipc_paths = list(DEFAULT_IPC_PATHS)
+        if shm_name is not None:
+            self.shm_name = shm_name
+        else:
+            try:
+                self.shm_name = str(
+                    get_config_manager().system.get("system", {}).get("shm", {}).get("shm_name", "shm_ohlc_221")
+                )
+            except Exception:
+                self.shm_name = "shm_ohlc_221"
         if skip_system_probes is None:
             self.skip_system_probes = os.environ.get("TRADING_TEST_MODE") == "1"
         else:
@@ -392,6 +420,24 @@ class HealthService:
         freeze_state = get_freeze_status(logs_dir=self.logs_dir)
         any_frozen = any(bool(v) for v in freeze_state.values())
 
+        feed_health: Optional[Dict[str, Any]] = None
+        feed_status_path = os.path.join(self.logs_dir, "feed_status.json")
+        if os.path.exists(feed_status_path):
+            try:
+                import json
+                with open(feed_status_path, "r", encoding="utf-8") as f:
+                    raw_fh = json.load(f)
+                fh_date = datetime.fromtimestamp(float(raw_fh.get("timestamp") or 0.0), tz=IST).strftime("%Y-%m-%d")
+                if fh_date == today_str:
+                    feed_health = raw_fh
+            except Exception:
+                pass
+        feed_stale = bool(
+            feed_health
+            and feed_health.get("stale")
+            and alive_map.get("feed_handler", True)
+        )
+
         reasons: List[str] = []
         if total_errors_today > 0 or dead_roles:
             overall = "RED"
@@ -399,10 +445,13 @@ class HealthService:
                 reasons.append(f"{total_errors_today} ERROR/CRITICAL log line(s) detected today ({today_str})")
             if dead_roles:
                 reasons.append(f"{len(dead_roles)} registered process(es) DEAD: {', '.join(dead_roles)}")
-        elif total_warns_today > 0 or any_frozen:
+        elif total_warns_today > 0 or any_frozen or feed_stale:
             overall = "YELLOW"
             if total_warns_today > 0:
                 reasons.append(f"{total_warns_today} WARN log line(s) detected today")
+            if feed_stale:
+                stale_cids = feed_health.get("stale_connections", []) if feed_health else []
+                reasons.append(f"FeedHandler reports stale WebSocket connection(s): {stale_cids}")
             if any_frozen:
                 frozen_modes = [k.upper() for k, v in freeze_state.items() if v and k != "all"]
                 reasons.append(f"Execution frozen for: {', '.join(frozen_modes) or 'ALL'}")
@@ -427,6 +476,7 @@ class HealthService:
                 "log_files_count": len(log_file_summaries),
             },
             "freeze_state": freeze_state,
+            "feed_health": feed_health,
             "processes": processes,
             "ipc_sockets": infra["ipc_sockets"],
             "shm": infra["shm"],

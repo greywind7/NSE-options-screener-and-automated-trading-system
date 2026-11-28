@@ -28,6 +28,7 @@ class PaperSuperstructure(BaseSuperstructure):
         recordings_dir: Optional[str] = None,
         ctx: Optional[zmq.Context] = None,
         continue_state: bool = False,
+        starting_capital: Optional[float] = None,
     ):
         super().__init__(
             mode="paper",
@@ -40,6 +41,7 @@ class PaperSuperstructure(BaseSuperstructure):
             recordings_dir=recordings_dir,
             ctx=ctx,
             continue_state=continue_state,
+            starting_capital=starting_capital,
         )
 
     def submit_order(self, request: OrderRequest) -> None:

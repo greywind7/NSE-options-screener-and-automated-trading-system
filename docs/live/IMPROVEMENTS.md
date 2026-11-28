@@ -93,26 +93,21 @@ Before allocating real capital to [`LiveSuperstructure`](file:///Users/yorha/Doc
 
 ## Part 4 — Codebase Efficiency, Hardening & Operational Lifecycle
 
-### 1. [CRITICAL] `FeedHandler` Half-Open Socket Detection, Startup Retry & Unbuffered Reconnect Logging
-- **Current State (`core/feed/feed_handler.py:996-1121`)**:
-  1. Line `1020` sets `ping_interval=None` and line `1040` awaits `ws.recv()` without `asyncio.wait_for` timeout, risking silent indefinite hangs on half-open Wi-Fi/NAT drops.
-  2. Line `996` calls `get_authorized_ws_url()` once before launching `dual_runner()` (fatal exit if network is transiently down on boot).
-  3. Reconnect prints omit `flush=True` (invisible under buffered stdout logging) and should refresh `ProtectedPositionRegistry` keys upon reconnect.
-- **Required Fix**: Set `ping_interval=20, ping_timeout=10`, wrap `ws.recv()` with a market-hours watchdog timeout, move WS auth retry inside `ws_connection_worker`, add unbuffered structured logging, and publish stale-feed telemetry.
+> *Note*: Part 4 Item 1 (`FeedHandler` Half-Open Socket Detection, Startup Retry & Unbuffered Reconnect Logging), `_run_direct_option_simulation` capital parity (`MED-08`), cross-system config propagation, and `FeedHandler._active_ws` cleanup (`DEAD-001`) were completed and logged in [`TASKS_DONE.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/TASKS_DONE.md).
 
-### 2. Fast Shard-Based `MarketRecorder`, Explicit Collation CLI & Web UI Tasks Tab
+### 1. Fast Shard-Based `MarketRecorder`, Explicit Collation CLI & Web UI Tasks Tab
 - Replace the $O(N^2)$ `read_parquet + pl.concat + rewrite` loop in [`MarketRecorder`](file:///Users/yorha/Documents/Trading%20Stuff/core/recorder/market_recorder.py#L163-L214) (`MED-04`) with `<5ms` immutable part-file shards (`*_part_0001.parquet`) collated cleanly on exit / `runner.py collate --date YYYY-MM-DD`, plus a **Web UI Tasks Tab** exposing pre-market and post-market actions.
 
-### 3. Streamlined `ColumnarSimEngine` Internal Layout & Warm Workers
-- *Remaining after `4761ebb` / `96f0c51`*: Replace the ~10,000 `partition_by` sub-DataFrames + ~60,000 NumPy array allocations in [`_build_options_index`](file:///Users/yorha/Documents/Trading%20Stuff/simulation/columnar_sim_engine.py#L438-L494) with a single sort + 6 flat contiguous NumPy arrays indexed by `(start_idx, end_idx)` slice bounds; remove duplicate `ITM`/`ITM1` & `OTM`/`OTM1` lookups (`5` binary searches vs `7`); convert per-tick `datetime.fromtimestamp()` calls in the inner loop to integer IST epoch math; reuse shared memory buffers across Web UI worker runs; and verify `_run_direct_option_simulation` synthetic fallback reads config capital cleanly (`MED-08`).
+### 2. Streamlined `ColumnarSimEngine` Internal Layout & Warm Workers
+- *Remaining after `4761ebb` / `96f0c51`*: Replace the ~10,000 `partition_by` sub-DataFrames + ~60,000 NumPy array allocations in [`_build_options_index`](file:///Users/yorha/Documents/Trading%20Stuff/simulation/columnar_sim_engine.py#L438-L494) with a single sort + 6 flat contiguous NumPy arrays indexed by `(start_idx, end_idx)` slice bounds; remove duplicate `ITM`/`ITM1` & `OTM`/`OTM1` lookups (`5` binary searches vs `7`); convert per-tick `datetime.fromtimestamp()` calls in the inner loop to integer IST epoch math; and reuse shared memory buffers across Web UI worker runs.
 
-### 4. `CandleManager`, `ScoringEngine3`, `BaseTrack` & `LiveService` Hot-Path Speedups
+### 3. `CandleManager`, `ScoringEngine3`, `BaseTrack` & `LiveService` Hot-Path Speedups
 - **`CandleManager`**: Precompute `(221, 75)` 5m baseline volume sums at `__init__`, replace per-tick `datetime` creation with integer IST arithmetic, and cache `raw_token -> sym_idx`.
 - **`ScoringEngine3`**: Track `last_seen_seq[idx]` per symbol to skip unchanged SHM rows (~80–95% of 200 Hz idle spin work) and cache recent-pole flags across bars.
 - **`BaseTrack` & Superstructures**: Maintain `O(1)` `trades_by_token` / `trades_by_underlying` indices, attach read-only to `shm_ohlc_221` for underlying equity LTP updates instead of empty `QuotesBroker` equity subscriptions, and evaluate an optional per-mode multi-track worker mode.
 - **`LiveService` & WebSocket Transport**: Tail journals incrementally via byte offsets instead of re-reading from byte `0`, coalesce parquet LVC fallback into one cooldown-gated `group_by("token").last()`, and skip idle WebSocket JSON broadcasts via a lightweight `state_version` hash.
 
-### 5. Canonical Shared Helpers, Exception Hygiene & Modular `cli/`
+### 4. Canonical Shared Helpers, Exception Hygiene & Modular `cli/`
 - **Single Canonical Strike Resolver (`common/options/strike_resolver.py`)**: Deduplicate strike lookup/liquidity gates across `RMSService` and `ColumnarSimEngine` with strict zero-fabrication enforcement.
 - **Single Canonical Journal Reader (`common/journals/reader.py`)**: Unify journal folding across `BaseSuperstructure`, `LiveService`, `HistoricalService`, and `runner.py report`.
 - **Eliminate Silent `except Exception: pass` Handlers**: Audit and replace silent passes with rate-limited structured logging and atomic per-component health/drop counters exposed in the Web UI Admin Health panel.
@@ -128,4 +123,4 @@ All `CRIT-01..05`, `HIGH-01..07`, and most `MED` items from [`2026-11-25_SYSTEM_
 |---|---|---|---|
 | **MED-03 (p4)** | `QuotesBroker` | [`core/quotes/quotes_broker.py:61`](file:///Users/yorha/Documents/Trading%20Stuff/core/quotes/quotes_broker.py#L61) | Prune evicted / stale option tokens from `self._lvc` periodically so dict cardinality stays bounded across dynamic strike rolls. |
 | **MED-09 (rem)** | `CandleService` & `LiveService` | [`candle_service.py:55`](file:///Users/yorha/Documents/Trading%20Stuff/web/candle_service.py#L55), [`live_service.py:49`](file:///Users/yorha/Documents/Trading%20Stuff/web/live_service.py#L49) | Tighten `CandleService` `token OR symbol` filter precedence (`token` match first, fallback `symbol`) and make `LiveService.start()` idempotent if called twice. |
-| **DEAD-001..003** | `FeedHandler` | [`core/feed/feed_handler.py:210`](file:///Users/yorha/Documents/Trading%20Stuff/core/feed/feed_handler.py#L210), [`L909`](file:///Users/yorha/Documents/Trading%20Stuff/core/feed/feed_handler.py#L909) | Remove legacy `_active_ws` property, unused `_run_poll_stream` stub, and unused imports left after dual-WebSocket migration. |
+| **DEAD-002..003** | `FeedHandler` | [`core/feed/feed_handler.py`](file:///Users/yorha/Documents/Trading%20Stuff/core/feed/feed_handler.py) | Prune unused imports/helpers left after dual-WebSocket migration (`_active_ws` removed; `_run_poll_stream` intentionally retained for `allow_rest_fallback`). |

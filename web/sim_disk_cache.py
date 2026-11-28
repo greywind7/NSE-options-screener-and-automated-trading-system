@@ -160,14 +160,21 @@ def _normalize_global_settings_for_mode(mode: str, params: Dict[str, Any]) -> Di
     base_risk = dict(cfg_mgr.get_risk_config() or {})
     mom = (cfg_mgr.strategy.get("strategies", {}).get("momentum") or {}) if isinstance(cfg_mgr.strategy, dict) else {}
     base_scale = dict(mom.get("option_convexity_scaling") or {})
+    paper_exec = cfg_mgr.get_execution_mode_config("paper") or {}
+    delayed_exec = cfg_mgr.get_execution_mode_config("paper_delayed") or {}
+    sim_exec = cfg_mgr.get_execution_mode_config("sim") or {}
+    comp_cap = (mom.get("tracks") or {}).get("composite", {}).get("capital")
+    default_cap = float(comp_cap if comp_cap is not None else paper_exec.get("starting_capital_per_sim", 250000.0))
+    default_min_delay = float(sim_exec["min_delay_ms"] if sim_exec.get("min_delay_ms") is not None else delayed_exec.get("min_delay_ms", 200.0))
+    default_max_delay = float(sim_exec["max_delay_ms"] if sim_exec.get("max_delay_ms") is not None else delayed_exec.get("max_delay_ms", 500.0))
 
     shared = {
-        "capital": float(glob.get("capital", 250000.0)),
-        "brokerage_per_order": float(glob.get("brokerage_per_order", mom.get("brokerage_per_order", 30.0))),
-        "min_pole_pct": float(glob.get("min_pole_pct", base_scoring.get("min_pole_pct", 0.005))),
-        "min_candle_elapsed_sec": float(glob.get("min_candle_elapsed_sec", base_scoring.get("min_candle_elapsed_sec", 15.0))),
-        "flag_pole_buffer_pct": float(glob.get("flag_pole_buffer_pct", base_scoring.get("flag_pole_buffer_pct", 0.25))),
-        "pure_3bar_expansion_pct": float(glob.get("pure_3bar_expansion_pct", base_scoring.get("pure_3bar_expansion_pct", 0.0045))),
+        "capital": float(glob["capital"]) if glob.get("capital") is not None else default_cap,
+        "brokerage_per_order": float(glob["brokerage_per_order"]) if glob.get("brokerage_per_order") is not None else float(mom.get("brokerage_per_order", 30.0)),
+        "min_pole_pct": float(glob["min_pole_pct"]) if glob.get("min_pole_pct") is not None else float(base_scoring.get("min_pole_pct", 0.005)),
+        "min_candle_elapsed_sec": float(glob["min_candle_elapsed_sec"]) if glob.get("min_candle_elapsed_sec") is not None else float(base_scoring.get("min_candle_elapsed_sec", 15.0)),
+        "flag_pole_buffer_pct": float(glob["flag_pole_buffer_pct"]) if glob.get("flag_pole_buffer_pct") is not None else float(base_scoring.get("flag_pole_buffer_pct", 0.25)),
+        "pure_3bar_expansion_pct": float(glob["pure_3bar_expansion_pct"]) if glob.get("pure_3bar_expansion_pct") is not None else float(base_scoring.get("pure_3bar_expansion_pct", 0.0045)),
         "max_alerts_per_symbol_per_day": (
             int(glob["max_alerts_per_symbol_per_day"])
             if glob.get("max_alerts_per_symbol_per_day") is not None
@@ -176,16 +183,16 @@ def _normalize_global_settings_for_mode(mode: str, params: Dict[str, Any]) -> Di
         "entry_freeze_time": str(glob.get("entry_freeze_time", mom.get("entry_freeze_time", "15:00"))),
         "eod_squareoff_time": str(glob.get("eod_squareoff_time", mom.get("eod_squareoff_time", "15:15"))),
         "enable_circuit_breaker": bool(glob.get("enable_circuit_breaker", base_risk.get("enable_circuit_breaker", False))),
-        "daily_loss_limit_inr": float(glob.get("daily_loss_limit_inr", base_risk.get("daily_loss_limit_inr", 10000.0))),
-        "max_spread_pct": float(glob.get("max_spread_pct", base_risk.get("max_spread_pct", 0.03))),
+        "daily_loss_limit_inr": float(glob["daily_loss_limit_inr"]) if glob.get("daily_loss_limit_inr") is not None else float(base_risk.get("daily_loss_limit_inr", 10000.0)),
+        "max_spread_pct": float(glob["max_spread_pct"]) if glob.get("max_spread_pct") is not None else float(base_risk.get("max_spread_pct", 0.03)),
         "atr_spread_gate_enabled": bool(glob.get("atr_spread_gate_enabled", base_risk.get("atr_spread_gate_enabled", True))),
-        "atr_spread_gate_mult": float(glob.get("atr_spread_gate_mult", base_risk.get("atr_spread_gate_mult", 2.0))),
+        "atr_spread_gate_mult": float(glob["atr_spread_gate_mult"]) if glob.get("atr_spread_gate_mult") is not None else float(base_risk.get("atr_spread_gate_mult", 2.0)),
         "opt_scale_enabled": bool(glob.get("opt_scale_enabled", base_scale.get("enabled", True))),
         "option_convexity_scaling": base_scale,
     }
     if mode == "paper_delayed":
-        shared["min_delay_ms"] = float(glob.get("min_delay_ms", 200.0))
-        shared["max_delay_ms"] = float(glob.get("max_delay_ms", 500.0))
+        shared["min_delay_ms"] = float(glob["min_delay_ms"]) if glob.get("min_delay_ms") is not None else default_min_delay
+        shared["max_delay_ms"] = float(glob["max_delay_ms"]) if glob.get("max_delay_ms") is not None else default_max_delay
     return shared
 
 

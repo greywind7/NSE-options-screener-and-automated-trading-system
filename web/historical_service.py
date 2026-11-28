@@ -412,7 +412,11 @@ class HistoricalService:
 
         win_rate = (wins / trades_count * 100.0) if trades_count > 0 else 0.0
         net_pnl = gross_pnl - brokerage
-        start_budget = 250000.0
+        try:
+            from core.config.config_loader import get_config_manager
+            start_budget = float(get_config_manager().get_execution_mode_config(mode).get("starting_capital_per_sim", 250000.0))
+        except Exception:
+            start_budget = 250000.0
         end_budget = round(start_budget + net_pnl, 2)
 
         return {

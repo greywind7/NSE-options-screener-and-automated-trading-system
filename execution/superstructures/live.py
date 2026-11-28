@@ -108,12 +108,22 @@ class LiveSuperstructure(BaseSuperstructure):
             recordings_dir=recordings_dir,
             ctx=ctx,
             continue_state=continue_state,
+            starting_capital=initial_capital,
         )
 
         live_cfg = self._cfg.get_execution_mode_config("live")
         root_exec_cfg = self._cfg.execution.get("execution", {})
-        eff_brok = float(brokerage_per_order if brokerage_per_order is not None else live_cfg.get("brokerage_per_order", root_exec_cfg.get("brokerage_per_order", 30.0)))
-        eff_cap = float(initial_capital if initial_capital is not None else live_cfg.get("starting_capital_per_sim", 250000.0))
+        brok_cand = (
+            brokerage_per_order
+            if brokerage_per_order is not None
+            else (
+                live_cfg["brokerage_per_order"]
+                if "brokerage_per_order" in live_cfg
+                else root_exec_cfg.get("brokerage_per_order", 30.0)
+            )
+        )
+        eff_brok = float(brok_cand)
+        eff_cap = float(self.risk_mgr.starting_capital)
         eff_recon_sec = float(reconciliation_interval_sec if reconciliation_interval_sec is not None else live_cfg.get("reconciliation_interval_sec", 30.0))
         eff_quar_sec = float(settlement_quarantine_sec if settlement_quarantine_sec is not None else live_cfg.get("settlement_quarantine_sec", 10.0))
         eff_eod_freeze = eod_freeze_time or live_cfg.get("live_entry_freeze_time") or root_exec_cfg.get("live_entry_freeze_time", "15:10")

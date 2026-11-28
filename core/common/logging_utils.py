@@ -40,6 +40,17 @@ class FlushingStreamHandler(logging.StreamHandler):
             pass
 
 
+class FlushingRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that flushes immediately so Health Tab reads fresh logs."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        try:
+            self.flush()
+        except Exception:
+            pass
+
+
 def setup_standard_logging(
     level: int = logging.INFO,
     log_file: Optional[str] = None,
@@ -68,7 +79,7 @@ def setup_standard_logging(
         )
         if not has_file:
             os.makedirs(os.path.dirname(abs_log), exist_ok=True)
-            fh = RotatingFileHandler(abs_log, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8")
+            fh = FlushingRotatingFileHandler(abs_log, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8")
             fh.setFormatter(formatter)
             logger.addHandler(fh)
 
