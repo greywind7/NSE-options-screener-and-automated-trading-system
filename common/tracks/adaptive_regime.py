@@ -87,21 +87,21 @@ class AdaptiveRegimeTrack(BaseTrack):
         if bid <= trade.stop_loss:
             return "SL_HIT"
 
-        # Regime-Specific Logic
+        # Regime-Specific Logic (scaled by option convexity factor)
         if phase == "MORNING":
-            # Breakeven at +7%
-            if profit_pct >= 0.07 - 1e-6 and trade.ratchet_level < 1:
+            # Breakeven at scaled +7%
+            if profit_pct >= self._scaled_pct(trade, 0.07) - 1e-6 and trade.ratchet_level < 1:
                 trade.stop_loss = max(trade.stop_loss, trade.entry_price)
                 trade.ratchet_level = 1
 
         elif phase == "MIDDAY":
             # 10-minute timeout for midday consolidation
-            if elapsed >= 600.0 and profit_pct < 0.02:
+            if elapsed >= 600.0 and profit_pct < self._scaled_pct(trade, 0.02):
                 return "MIDDAY_CONSOLIDATION_TIMEOUT"
 
         elif phase == "AFTERNOON":
-            # Asymmetric 50% peak profit trail above +10%
-            if peak_profit_pct >= 0.10 - 1e-6:
+            # Asymmetric 50% peak profit trail above scaled +10%
+            if peak_profit_pct >= self._scaled_pct(trade, 0.10) - 1e-6:
                 trail_sl = round(trade.entry_price * (1.0 + 0.50 * peak_profit_pct), 2)
                 trade.stop_loss = max(trade.stop_loss, trail_sl)
                 trade.ratchet_level = max(trade.ratchet_level, 2)

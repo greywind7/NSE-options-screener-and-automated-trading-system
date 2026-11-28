@@ -183,11 +183,11 @@ python3 runner.py post-market --date 20261125
 ### Source-of-Truth Specifications (`docs/sys/`)
 | Document | Scope |
 |---|---|
-| [`docs/sys/ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/ARCHITECTURE_SPEC_2_0.md) | System-level ADRs, IPC topology, Shared Memory design, and execution guarantees |
-| [`docs/sys/LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/LOW_LEVEL_DESIGN_2_0.md) | Struct definitions, MessagePack schemas, interfaces, and module contracts |
+| [`docs/sys/HIGH_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/HIGH_LEVEL_DESIGN_2_0.md) | System-level HLD, process topology, Shared Memory/IPC flow, storage layout & operations |
+| [`docs/sys/LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/LOW_LEVEL_DESIGN_2_0.md) | Struct definitions, MessagePack schemas, track interfaces, and module contracts |
 | [`docs/sys/SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/SCORING_ENGINE_3_0.md) | Qualitative signal invariants (`E10_W3_CAP3`: 15s elapsed, Top-25% Flag, `0.45%` 3-Bar expansion) |
-| [`docs/sys/EXECUTION_TRACKS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/EXECUTION_TRACKS.md) | Active 19-track catalog (`12 v1` + `7 v2`, `gamma_runner_OTM2` retired) & `OptScale` rules |
-| [`docs/sys/WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/WEB_VIEW_FLOW.md) | Web UI tabs, REST/WebSocket APIs, and multiprocessing simulation flow |
+| [`docs/sys/EXECUTION_TRACKS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/EXECUTION_TRACKS.md) | Active 21-track catalog (`12 v1` + `9 v2`, including ratcheted variants; `gamma_runner_OTM2` retired) & `OptScale` rules |
+| [`docs/sys/WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/WEB_VIEW_FLOW.md) | Web UI tabs (Admin, Health, Sim Lab + Disk Cache), REST/WebSocket APIs, and multiprocessing simulation flow |
 
 ### Live Operations, Tasks & Research (`docs/live/`)
 | Document | Scope |

@@ -1,11 +1,11 @@
 # Low-Level Design (LLD) Specification 2.0: Modular Distributed Trading Engine
 
 > **Document Type**: Low-Level Engineering & Implementation Specification  
-> **Version**: 2.0 (Track C Production Architecture & Scoring Engine 3.0)  
-> **Status**: Ready for Implementation Planning  
-> **Master Architecture**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/ARCHITECTURE_SPEC_2_0.md)  
-> **Signal & Strategy Spec**: [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/SCORING_ENGINE_3_0.md)  
-> **Last Updated**: 2026-11-26 | **Archived Audit**: [`2026-11-25_SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive/2026-11-25_SYSTEM_AUDIT_2_0.md)  
+> **Version**: 2.1 (Distributed Multi-Process, Core-Decoupled RMS, Scoring Engine 3.0 & Sim Disk Cache)  
+> **Status**: Active Implementation Specification  
+> **Master HLD**: [`HIGH_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/HIGH_LEVEL_DESIGN_2_0.md)  
+> **Signal & Track Specs**: [`SCORING_ENGINE_3_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/SCORING_ENGINE_3_0.md) | [`EXECUTION_TRACKS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/EXECUTION_TRACKS.md) | [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/WEB_VIEW_FLOW.md)  
+> **Last Updated**: 2026-11-28 | **Archived ADRs / Audits**: [`2026-11-28_ADR_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive/2026-11-28_ADR_SPEC_2_0.md), [`2026-11-25_SYSTEM_AUDIT_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive/2026-11-25_SYSTEM_AUDIT_2_0.md)
 
 ---
 
@@ -36,11 +36,11 @@ flowchart TD
 
     subgraph SignalRisk ["Signal & Risk Tier"]
         SHM -->|"Microsecond Spin-Loop (< 2 us)"| ScoringEng["Scoring Engine 3.0 Process"]
-        ScoringEng -->|"PUSH: alerts_breakout.ipc"| ZMQ_ALERTS[("ZeroMQ Alerts Queue")]
+        ScoringEng -->|"PUB: scoring_alerts_pub.ipc"| ZMQ_ALERTS[("ZeroMQ Alerts PUB/SUB")]
 
-        ZMQ_ALERTS --> RMS["RMS & Option Resolver Process"]
+        ZMQ_ALERTS --> RMS["Core RMS & Option Resolver Process"]
         QuotesSnap <-->|"Snapshot Check"| RMS
-        RMS -->|"PUB: rms_strike_pub.ipc"| ZMQ_RMS[("ZeroMQ Candidate Strikes")]
+        RMS -->|"PUB: rms_strike_pub.ipc (OPP.*)"| ZMQ_RMS[("ZeroMQ Actionable Opportunities")]
     end
 
     subgraph ExecTier ["Execution Tier (Concurrent Multi-Mode Superstructures)"]
@@ -70,102 +70,77 @@ flowchart TD
 ```
 Trading Stuff/
 ├── core/
-│   ├── __init__.py
-│   ├── shm/
-│   │   ├── __init__.py
-│   │   ├── layout.py                  # CandleStruct NumPy dtype, symbol offsets, memory mapping
-│   │   └── candle_shm.py              # PosixSharedMemory writer/reader with atomic fences
+│   ├── auth/
+│   │   ├── upstox_auth.py             # Upstox OAuth token lifecycle & REST rate-limit helpers
+│   │   └── groww_auth.py              # Groww TOTP / access-token refresh helper
+│   ├── common/
+│   │   ├── ipc_schemas.py             # MessagePack wire dataclasses (Tick/Quote/Alert/Opportunity/Order)
+│   │   ├── logging_utils.py           # Standardized IST logger ([YYYY-MM-DD HH:MM:SS.mmm IST] [LEVEL])
+│   │   ├── symbol_utils.py            # Canonical instrument keys & strike parsing
+│   │   └── time_utils.py              # IST timezone helpers & strict HH:MM time normalization
+│   ├── config/
+│   │   ├── config_loader.py           # Unified ConfigManager loading config/*.json & config/tracks/*.json
+│   │   └── trading_schedule.py        # NSE/MCX session schedule helpers
 │   ├── feed/
-│   │   ├── __init__.py
-│   │   ├── feed_handler.py            # Splits equity cash vs derivatives into separate IPC sockets
-│   │   ├── upstox_feed.py             # Upstox WebSocket v2/v3 market data client
-│   │   └── replay_feed.py             # High-speed deterministic tick replay from recordings
+│   │   ├── event_schema.py            # Normalized feed event models
+│   │   ├── feed_handler.py            # Dual-WS Upstox ingestion (TICK.EQ / TICK.OPT), REST & mock modes
+│   │   ├── upstox_listener.py         # Upstox WS/REST feed transport & dynamic ATM windowing
+│   │   ├── historical_replay.py       # Deterministic Parquet tick playback into IPC
+│   │   └── position_registry.py       # ProtectedPositionRegistry persisted in logs/active_positions.json
+│   ├── instruments/
+│   │   ├── master_fetcher.py          # Upstox instrument CSV download & validation
+│   │   ├── instrument_filter.py       # NSE/MCX F&O active universe filter (data/filtered.csv)
+│   │   ├── subscription_manifest.py   # Sharded WS & poll manifest builder (data/manifest/)
+│   │   └── cleanup.py                 # Stale CSV/log maintenance helper
+│   ├── ops/
+│   │   └── operations.py              # Shared operational routines (CLI + Web Admin control plane)
 │   ├── recorder/
-│   │   ├── __init__.py
-│   │   ├── market_recorder.py         # Subscribes to feeds, writes chunked compressed Parquet
-│   │   └── parquet_writer.py          # PyArrow chunked table stream writer
+│   │   └── market_recorder.py         # Dual-stream Parquet MarketRecorder (equity_ticks & option_depth)
 │   ├── candles/
-│   │   ├── __init__.py
-│   │   ├── candle_manager.py          # Aggregates 5m candles, ATR(14), strict current candle rVOL
-│   │   └── volume_profile.py          # 20-day historical time-of-day volume lookup
+│   │   ├── shm_layout.py              # CANDLE_DTYPE (48B), SEQLOCK_DTYPE (16B), MmapAdapter & SHM signals
+│   │   └── candle_manager.py          # 5m OHLCV builder, Wilder ATR(14), linear-extrapolated rVOL
 │   ├── quotes/
-│   │   ├── __init__.py
-│   │   ├── quotes_broker.py           # Ticker plant: REQ/REP snapshots + XPUB stream
-│   │   └── lvc_cache.py               # In-memory last-value depth cache with heartbeat pulse
-│   ├── scoring/
-│   │   ├── __init__.py
-│   │   ├── engine.py                  # Spin-loop engine over POSIX SHM
-│   │   ├── archetypes.py              # Pure functions: flag_breakout & pure_impulse
-│   │   └── metadata.py                # SymbolMetadata, status caching, cooldown tracking
-│   └── rms/
-│       ├── __init__.py
-│       ├── option_resolver.py         # Instrument token resolver (ITM/ATM/OTM strikes)
-│       ├── risk_manager.py            # Pre-trade risk, spread filter, liquidity gating
-│       └── rms_service.py             # Subscribes to alerts, queries broker, pubs to tracks
+│   │   └── quotes_broker.py           # Ticker plant: LVC, ref-counted XPUB + EQ/OPT, REQ/REP snapshots
+│   ├── rms/
+│   │   ├── rms_service.py             # Core-decoupled RMS: strike grid, 3%/ATR spread gates, 3/sym/day cap
+│   │   └── mode_risk.py               # Per-mode drawdown tracking & circuit-breaker guard
+│   └── volume/
+│       └── volume_index.py            # 30-day 1m median volume profiler -> data/index/index*.json
+├── strategies/
+│   └── momentum/
+│       ├── scoring_engine.py          # 200Hz SHM spin-loop detector (Flag & Pure 3-Bar Impulse)
+│       └── opportunity_pool.py        # Deduplication & rVOL priority ranking
 ├── execution/
-│   ├── __init__.py
-│   ├── superstructures/
-│   │   ├── __init__.py
-│   │   ├── base.py                    # BaseSuperstructure lifecycle & socket bindings
-│   │   ├── delayed.py                 # DelayedSuperstructure: prevailing cached quote fills
-│   │   ├── paper.py                   # PaperSuperstructure: real-time zero-delay paper trading
-│   │   └── live.py                    # LiveSuperstructure: live broker order reconciliation
-│   └── adapters/
-│       ├── __init__.py
-│       ├── groww_live_adapter.py      # Groww API SDK live execution adapter (TOTP, SL, reconciliation)
-│       └── mock_adapter.py            # Paper execution ledger adapter
+│   └── superstructures/
+│       ├── base_superstructure.py     # IPC subscriber, --continue recovery & legacy quarantine
+│       ├── paper.py                   # Immediate Best-Ask paper superstructure
+│       ├── delayed.py                 # Stream-driven delayed superstructure with prevailing quote fills
+│       └── live.py                    # GrowwAPI SDK live superstructure (resting SL, 25-mod replace, reconcile)
 ├── web/
-│   ├── __init__.py
-│   ├── server.py                      # AnalyticsWebServer (aiohttp, REST, WebSockets, teardown)
-│   ├── live_service.py                # LiveService (ZeroMQ LVC, real-time MTM, active cash)
-│   ├── simulation_service.py          # SimulationService (isolated worker process, batch queue, Parquet cache)
-│   ├── batch_analytics.py             # Cross-session batch leaderboard, DD/Calmar/retention metrics & exporters
-│   ├── regime_classifier.py           # F&O synthetic basket + 5m breadth market regime classifier & cache
-│   ├── candle_service.py              # CandleService (OHLCV scanning & aggregation)
-│   ├── alert_service.py               # AlertService (direct POSIX SHM read & trigger overlays)
-│   ├── historical_service.py          # HistoricalService (multi-session discovery & journal parsing)
-│   └── static/                        # SPA web assets (HTML, CSS, ChartEngine, UI tabs)
-├── ui/
-│   ├── __init__.py
-│   ├── dashboard.py                   # Universal Terminal Dashboard (ANSI / Rich live telemetry, retired in favor of web)
-│   └── views/
-│       ├── alerts_view.py             # Active alerts, time created, elapsed counters, strikes
-│       └── performance_matrix.py      # Live trackwise P&L matrix per mode (Paper, Delayed, Live)
+│   ├── server.py                      # AnalyticsWebServer (aiohttp HTTP + WS server)
+│   ├── live_service.py                # LiveService (ZeroMQ LVC, real-time MTM, budget tracking)
+│   ├── historical_service.py          # HistoricalService (session & journal parser under recordings/<date>/journal/)
+│   ├── alert_service.py               # AlertService (SHM candle read + logs/alerts/ overlay)
+│   ├── candle_service.py              # CandleService (5m OHLCV aggregation)
+│   ├── simulation_service.py          # Multiprocess simulation & batch orchestrator
+│   ├── sim_disk_cache.py              # Fixed-slot append-only binary disk cache (cache/simulations/*.dat/.idx.json)
+│   ├── batch_analytics.py             # Cross-session leaderboard, drawdown, Calmar & CSV/MD exporters
+│   ├── regime_classifier.py           # Session market regime classifier & cache
+│   ├── admin_service.py               # Operational Web UI control plane (logs/admin_audit.jsonl)
+│   ├── health_service.py              # Process/IPC/SHM liveness probes & IST log inspector
+│   └── static/                        # Browser SPA (collapsible sidebar, Admin Ops, System Health, Sim Lab)
 ├── common/
-│   ├── __init__.py
-│   ├── tracks/
-│   │   ├── __init__.py
-│   │   ├── base_track.py              # BaseTrack state machine (PENDING, ACTIVE, EXITING)
-│   │   ├── composite_track.py         # CompositeTrack: pooled capital sharing container
-│   │   ├── track1_fast_momentum.py    # Archetype 2 impulse track
-│   │   ├── track2_trend_pullback.py   # Archetype 1 flag breakout track
-│   │   └── factory.py                 # Track factory instantiating from strategy YAML
-│   ├── models/
-│   │   ├── __init__.py
-│   │   ├── messages.py                # Msgpack serialization schemas & dataclasses
-│   │   └── instruments.py             # Instrument token database, lot sizes, tick sizes
-│   └── utils/
-│       ├── __init__.py
-│       ├── clock.py                   # Replay vs wall-clock time abstraction
-│       ├── affinity.py                # Linux sched_setaffinity / macOS QoS nice pinning
-│       └── logging.py                 # Structured JSON zero-overhead logger
+│   ├── interfaces.py                  # ExecutionContext, OrderRequest/Result, TradeState (origin_track)
+│   └── tracks/                        # BaseTrack (convexity_scale propagation), CompositeTrack, v1 & v2 tracks, factory.py
 ├── simulation/
-│   ├── __init__.py
-│   ├── columnar_sim_engine.py         # Polars/Arrow memory-mapped columnar backtester
-│   └── asof_matcher.py                # Binary search ASOF join fill evaluator
+│   └── columnar_sim_engine.py         # Event-driven chronological min-heap backtester (Polars + isolated SHM)
 ├── config/
-│   ├── settings.yaml                  # Global configuration (symbols, limits, delays)
-│   ├── instruments.json               # Master contract specification file
-│   └── strategies/
-│       └── momentum_3_0.yaml          # Strategy tracks, capital allocations, scoring config
-├── docs/
-│   ├── sys/                           # Source-of-truth technical specs (Architecture, LLD, Scoring 3.0, Tracks, Web)
-│   ├── live/                          # Active roadmap (IMPROVEMENTS), audit, task docs, reports & experiment snapshots
-│   └── archive/                       # Historical brainstorms, evolution logs & superseded audits
-├── runner.py                          # Unified CLI Orchestrator (prepare, start, sim, replay, status, stop)
-├── scripts/
-│   ├── run_distributed.py             # Process supervisor (orchestrates core & mode processes)
-│   └── run_45_experiments.py          # 45-variant tick-by-tick batch hypothesis runner & report generator
+│   ├── system.json, instruments.json, execution.json, strategies.json
+│   └── tracks/                        # Presets: default.json (21), v1.json (12), v2.json (9)
+├── data/, logs/, recordings/, cache/  # Runtime artifacts: index/, manifest/, alerts/, exec_logs/, journal/, simulations/
+├── docs/                              # sys/ (HLD, LLD, Scoring, Tracks, Web), live/, archive/
+├── runner.py                          # Unified CLI Orchestrator
+└── scripts/                           # run_distributed.py process supervisor & experiment harnesses
 ```
 
 ---
@@ -189,16 +164,17 @@ CANDLE_DTYPE = np.dtype([
     ('volume',    '<u8'),   # 8 bytes: Cumulative bar volume (uint64)
     ('rvol',      '<f4'),   # 4 bytes: Strict Current Candle rVOL (float32)
     ('atr',       '<f4'),   # 4 bytes: 14-period Average True Range (float32)
-    ('is_closed', '?'),     # 1 byte:  Boolean flag (True if bar finished, False if active)
-    ('_reserved', 'V7')     # 7 bytes: Explicit padding to align struct to 48 bytes
-], align=True)
+    ('is_closed', '?'),       # 1 byte:  Boolean flag (True if bar finished, False if active)
+    ('reserved', '<u1', (7,)) # 7 bytes: Explicit padding to align struct to 48 bytes
+], align=False)
 
 assert CANDLE_DTYPE.itemsize == 48, f"DType size must be 48 bytes, got {CANDLE_DTYPE.itemsize}"
 ```
 
 #### Memory Sizing & Slicing:
-$$\text{Total Memory} = 221 \text{ symbols} \times 75 \text{ bars} \times 48 \text{ bytes} = \mathbf{795,600\text{ bytes} \approx 777\text{ KB}}$$
-- Fits completely inside the CPU's **L2 cache** (typical core L2: 1–2 MB; Apple Silicon: 4–16 MB).
+$$\text{Candle Data} = 221 \times 75 \times 48 = 795,600\text{ bytes}, \quad \text{Headers} = 221 \times 16 = 3,536\text{ bytes}, \quad \text{Total SHM} = \mathbf{799,136\text{ bytes} \approx 780\text{ KB}}$$
+- Fits inside L2 cache when run with POSIX shared memory (`FORCE_POSIX_SHM=1` under Linux `/dev/shm`); defaults cleanly to `/tmp/shm_ohlc_221.shm` via `MmapSharedMemoryAdapter` on macOS/sandboxes.
+- **Signal-Driven Consumer Lifecycle**: [`core/candles/shm_layout.py`](file:///Users/yorha/Documents/Trading%20Stuff/core/candles/shm_layout.py) defines `SHM_SIGNAL_DETACH = SIGUSR1`, `SHM_SIGNAL_REATTACH = SIGUSR2`, and `SHM_CONSUMER_ROLES = {"scoring_engine", "web_server"}`. On `CandleManager` start/restart/stop (or health probe cleanup when `candle_manager` is offline), live SHM consumers detach and reattach safely without affecting `exec_*` processes.
 - **Zero Cache Thrashing**: Data for all 221 symbols across the entire trading day resides directly within the CPU's fastest on-die cache.
 - **Index Lookup Formula**:
   $$\text{Row Index} = \text{Symbol Index} \times 75 + \text{Bar Index}$$
@@ -299,17 +275,20 @@ All inter-process messages utilize MessagePack (`msgpack`) for sub-microsecond b
   }
   ```
 
-#### C. Scoring Alerts (`alerts_breakout.ipc`)
-- **Pattern**: ZeroMQ `PUSH` (Scoring Engine) / `PULL` (RMS)
-- **Payload (`msgpack`)**:
+#### C. Scoring Alerts (`scoring_alerts_pub.ipc`)
+- **Pattern**: ZeroMQ `PUB` (Scoring Engine) / `SUB` (RMS Service & Web Alerts)
+- **Topic / Payload (`SetupAlert` Msgpack)**:
   ```python
   {
+      "alert_id": "ALT_RELIANCE_1700000300",
       "symbol": "TATAMOTORS",
-      "archetype": "FLAG_BULL_BREAKOUT", # or "PURE_BULL_BREAKOUT", etc.
       "direction": "BULL",               # "BULL" or "BEAR"
-      "rvol": 3.42,                      # float: Relative Volume
-      "trigger_price": 685.20,           # float: Underlying cash trigger price
-      "trigger_ts": 1700000300.5         # float: Unix timestamp with millisecond precision
+      "archetype": "FLAG_BULL_BREAKOUT", # or "PURE_BULL_BREAKOUT", etc.
+      "trigger_price": 685.20,
+      "rvol": 3.42, "clv": 0.85, "atr": 4.2,
+      "flag_high": 686.0, "flag_low": 682.5,
+      "timestamp": 1700000300.5,
+      "strategy_id": "momentum", "strategy_tags": {}
   }
   ```
 
@@ -363,26 +342,10 @@ All inter-process messages utilize MessagePack (`msgpack`) for sub-microsecond b
     ```
 
 #### E. RMS Resolved Candidate Strikes (`rms_strike_pub.ipc`)
-- **Pattern**: ZeroMQ `PUB` (RMS) / `SUB` (Superstructure)
-- **Topic**: `STRIKE.<symbol>`
-- **Payload (`msgpack`)**:
-  ```python
-  {
-      "alert_id": "TATAMOTORS_1700000300",
-      "symbol": "TATAMOTORS",
-      "direction": "BULL",
-      "archetype": "FLAG_BULL_BREAKOUT",
-      "underlying_price": 685.20,
-      "trigger_ts": 1700000300.5,
-      "strikes": {
-          "ITM": {"token": 45119, "strike": 680.0, "type": "CE", "ltp": 12.5, "bid": 12.4, "ask": 12.55},
-          "ATM": {"token": 45120, "strike": 685.0, "type": "CE", "ltp": 8.5,  "bid": 8.45, "ask": 8.55},
-          "OTM": {"token": 45121, "strike": 690.0, "type": "CE", "ltp": 5.2,  "bid": 5.15, "ask": 5.25}
-      },
-      "lot_size": 1425,
-      "max_lots": 2
-  }
-  ```
+- **Pattern**: ZeroMQ `PUB` (RMS) / `SUB` (Superstructures & Web Server)
+- **Topic**: `OPP.<strategy_id>.<symbol>` (e.g. `OPP.momentum.TATAMOTORS`)
+- **Payload (`ActionableOpportunity` Msgpack)**:
+  Includes `opp_id`, `alert_id`, `symbol`, `direction`, `archetype`, `trigger_price`, `strikes` (`ITM2`, `ITM1`, `ATM`, `OTM1`, `OTM2`), `timestamp`, `flag_high`/`flag_low`, `pole_high`/`pole_low`, `atr`, `rvol`, `clv`, `strategy_id`, and `strategy_tags` ([`core/common/ipc_schemas.py`](file:///Users/yorha/Documents/Trading%20Stuff/core/common/ipc_schemas.py)).
 
 ---
 
@@ -449,7 +412,7 @@ class FeedHandler:
 ### 4.2 CandleManager (`core/candles/candle_manager.py`)
 - **Objective**: Aggregates 5-minute candles (75 bars/day) in RAM, computes incremental ATR(14) and strict current candle rVOL with linear minute-boundary extrapolation, and commits atomic rows into `shm_ohlc_221`.
 - **Key Modules**:
-  - `VolumeProfileTable`: Holds pre-calculated 20-day median volume for each of the 375 one-minute buckets of the day for all 221 stocks (shape: `[221, 375]`).
+  - Baseline Profile Matrix: Holds pre-calculated **30-day** median volume (`data/index/index.json`) for each of the 375 one-minute buckets of the day across all 221 F&O universe slots (shape: `[221, 375]`).
   - `IncrementalATR`: Running 14-period Wilder ATR:
     $$\text{ATR}_t = \frac{\text{ATR}_{t-1} \times 13 + \text{TR}_t}{14}$$
   - **Strict Current Candle rVOL with Minute-Boundary Linear Extrapolation**:
@@ -658,195 +621,55 @@ def check_flag_breakout(shm_reader, symbol: str, current_candle) -> Optional[dic
 ---
 
 ### 4.5 RMS & Option Resolver (`core/rms/rms_service.py`)
-- **Objective**: Consumes breakout alerts, resolves ITM/ATM/OTM option contracts, performs pre-trade risk and liquidity checks against QuotesBroker snapshot, and publishes qualified strike bundles.
+- **Objective**: Decoupled Core-tier service subscribing to `scoring_alerts_pub.ipc`, resolving `ITM2`/`ITM1`/`ATM`/`OTM1`/`OTM2` option contracts, enforcing spread/ATR/daily-cap gates against `QuotesBroker`, and publishing qualified `ActionableOpportunity` packets on `OPP.<strategy_id>.<symbol>`.
 - **Workflow**:
-  1. Pulls alert from `alerts_breakout.ipc`.
-  2. Resolves strikes for underlying symbol:
-     - Strike interval determined from instrument master (e.g. ₹5 for Tata Motors, ₹20 for Reliance).
-     - Resolves ITM (1 strike deep), ATM (closest strike), and OTM (1 strike out).
-  3. Queries `QuotesBroker` snapshot:
-     ```python
-     snap_req.send_json({"cmd": "SNAPSHOT", "tokens": [itm_token, atm_token, otm_token]})
-     resp = snap_req.recv_json()
-     ```
-  4. **Liquidity & Spread Gating**:
-     - $\text{Spread} = \frac{\text{Ask} - \text{Bid}}{\text{LTP}} \le 1.5\%$
-     - $\text{Bid Qty} \ge 500$ contracts, $\text{Ask Qty} \ge 500$ contracts
-     - If spread exceeds $1.5\%$ or liquidity is insufficient, reject candidate (log reason: `SPREAD_REJECT` / `ILLIQUID_REJECT`).
-  5. **Risk Budget & Account Limit Checks**:
-     - Check current open margin utilization against max account limit.
-     - Check sector concentration limits.
-  6. If all checks pass, publish resolved strikes bundle to `ipc:///tmp/rms_strike_pub.ipc`.
+  1. Subscribes to `scoring_alerts_pub.ipc` (`SetupAlert`) and enforces `max_alerts_per_symbol_per_day = 3` (`E10_W3_CAP3`).
+  2. Resolves strikes (`ITM2`, `ITM1`, `ATM`, `OTM1`, `OTM2`) using `data/manifest/subscription_manifest.json` and configured strike intervals (`get_strike_step`).
+  3. Queries `QuotesBroker` snapshot (`GET_QUOTES` over `ipc:///tmp/quotes_router.ipc`) via MessagePack.
+  4. **Spread & ATR-Move Gating (`passes_spread_gate`, `passes_atr_spread_gate`)**:
+     - Rejects strikes missing valid `bid > 0` / `ask > 0` (zero synthetic quote fallback).
+     - Enforces $\text{Spread\%} = \frac{\text{Ask} - \text{Bid}}{\text{Ask}} \le 3.0\%$ (`max_spread_pct = 0.03`).
+     - Enforces ATR-to-spread edge check (`atr_spread_gate_mult = 2.0`): rejects contracts whose ask-bid rupees exceed expected half-ATR move tolerance.
+  5. **Publishing**: Broadcasts validated `ActionableOpportunity` to `ipc:///tmp/rms_strike_pub.ipc` (`OPP.<strategy_id>.<symbol>`).
 
 ---
 
 ### 4.6 Strategy Configuration & Dynamic Track Architecture
 
-To support multiple independent strategies and pluggable execution tracks without hardcoded coupling, the system utilizes a **Strategy-Track-Mode Inversion of Control (IoC)** design.
+To support multiple independent strategies and pluggable execution tracks without hardcoded coupling, the system utilizes a **Strategy-Track-Mode Inversion of Control (IoC)** design driven by [`common/tracks/factory.py`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/factory.py).
 
 ```mermaid
 flowchart TD
     subgraph StrategyConfig ["Strategy Configuration (config/strategies.json & config/tracks/)"]
-        Config["strategies.json + tracks/default.json\n• Scoring Engine: MomentumScoringEngine3\n• Core Tracks: FastMomentum, TrendPullback, FixedTarget\n• Composite Tracks: SharedPool Composites"]
+        Config["strategies.json + tracks/{default,v1,v2}.json\n• Scoring Engine: ScoringEngine3 (E10_W3_CAP3)\n• option_convexity_scaling + Track Parameters"]
     end
 
-    subgraph Factory ["Track Factory & Registry (common/tracks/factory.py)"]
-        Config --> FactoryBuild["build_track_portfolio(config, execution_context)"]
-        Registry[("TRACK_REGISTRY\n• fast_momentum: FastMomentumTrack\n• trend_pullback: TrendPullbackTrack\n• composite: CompositeTrack")] -.-> FactoryBuild
+    subgraph Factory ["Track Factory (common/tracks/factory.py)"]
+        Config --> FactoryBuild["create_tracks(context, track_filter, strategy_cfg, track_profile)"]
+        Registry[("TRACK_CLASS_MAP (13 Track Archetypes + CompositeTrack)")] -.-> FactoryBuild
     end
 
     subgraph TrackHierarchy ["Pluggable Track Instances (common/tracks/)"]
-        FactoryBuild --> TrackA["Core Track 1: FastMomentumTrack"]
-        FactoryBuild --> TrackB["Core Track 2: TrendPullbackTrack"]
-        FactoryBuild --> CompTrack["CompositeTrack: Shared Capital Pool"]
-        CompTrack --> SubTrack1["Sub-Track: ATMTrack"]
-        CompTrack --> SubTrack2["Sub-Track: ITMTrack"]
+        FactoryBuild --> TrackA["BaseTrack Subclasses (v1 & v2 + Ratchet Variants)"]
+        FactoryBuild --> CompTrack["CompositeTrack (Shared / Equal Pool)"]
     end
 
     subgraph ModeSuperstructure ["Mode Superstructure (Live / Paper / Delayed)"]
-        Context["ExecutionContext / ExecutionInterface\n• place_order()\n• modify_order()\n• cancel_order()"]
-        Quotes["Latest Quotes Cache + Stream Listener"]
+        Context["ExecutionContext (BaseSuperstructure)\n• submit_order() / subscribe_quotes() / record_trade_event()"]
+        Quotes["QuotesBroker LVC + Stream Subscriber"]
 
-        Quotes -->|"on_tick"| TrackA & TrackB & CompTrack
-        TrackA & TrackB & SubTrack1 & SubTrack2 -->|"Order Signals via Parent Interface"| Context
+        Quotes -->|"on_tick / on_heartbeat"| TrackA & CompTrack
+        TrackA & CompTrack -->|"OrderRequest via ExecutionContext"| Context
     end
 ```
 
-#### A. The Track Hierarchy & Composite Pattern (Zero Metaprogramming)
-Dynamic behavior does **not** require runtime class synthesis (`type()`). Instead, it uses the **Composite Design Pattern**:
-- Every track implements `BaseTrack`.
-- A `CompositeTrack` is *itself* a `BaseTrack`. To the superstructure, a composite track behaves identically to any core track.
-- The `CompositeTrack` wraps child core tracks, manages a shared capital pool (`total_capital`, `allocated_capital`), and enforces capital-sharing rules across its sub-tracks.
+#### A. Actual Track Hierarchy, Convexity Scaling & Composite Attribution
+Every executable track inherits from [`BaseTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py) (capital accounting via `allocated_capital + realized_pnl - committed_capital`, strict Ask-based target/SL anchoring, and exit rules returning a reason string in `evaluate_exit_rules(trade, ltp, bid, ask, ts)`). [`CompositeTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/composite_track.py) wraps constituent `BaseTrack` sub-tracks with optional shared-pool capital gating (`shared_pool=True|False`), enforces strict `origin_track` matching on `--continue` recovery, and quarantines ambiguous legacy records into `quarantined_legacy_trades.jsonl`.
 
-```python
-class ExecutionContext(ABC):
-    """Abstract interface provided by Mode Superstructures to Tracks."""
-    @abstractmethod
-    def place_order(self, track_id: str, symbol: str, token: int, side: str, 
-                    qty: int, order_type: str = "MARKET", price: float = 0.0) -> str:
-        """Submits an order; returns order_id."""
-        pass
+When `option_convexity_scaling.enabled` is active in [`config/strategies.json`](file:///Users/yorha/Documents/Trading%20Stuff/config/strategies.json), `BaseTrack.on_opportunity()` records `convexity_scale` and scaled `target_pct`, `sl_pct`, and `breakeven_trigger_pct` into `TradeState.metadata`; subclasses query `self._scaled_pct(trade, pct)` so breakevens, trailing steps, tiered ratchets, decay slopes, and timeout profit floors scale uniformly across pre-expiry and post-expiry contracts.
 
-    @abstractmethod
-    def modify_order(self, order_id: str, new_price: float, new_qty: int) -> bool:
-        """Modifies active limit or trailing stop order."""
-        pass
-
-    @abstractmethod
-    def cancel_order(self, order_id: str) -> bool:
-        """Cancels an outstanding order."""
-        pass
-
-    @abstractmethod
-    def get_latest_quote(self, token: int) -> Optional[dict]:
-        """Queries the in-memory quotes cache."""
-        pass
-
-
-class BaseTrack(ABC):
-    """Abstract State Machine for all trading tracks."""
-    def __init__(self, track_id: str, capital: float, params: dict):
-        self.track_id = track_id
-        self.capital = capital
-        self.params = params
-        self.state = "IDLE"  # IDLE, PENDING_ENTRY, ACTIVE, EXITING, CLOSED
-        self.active_order_id = None
-        self.position = None
-
-    @abstractmethod
-    def on_alert(self, alert: dict, ctx: ExecutionContext):
-        """Called when a qualified setup alert arrives from RMS."""
-        pass
-
-    @abstractmethod
-    def on_tick(self, token: int, quote: dict, ctx: ExecutionContext):
-        """Called when a subscribed option tick arrives."""
-        pass
-
-    @abstractmethod
-    def on_fill(self, order_id: str, fill_price: float, fill_qty: int, fill_ts: float):
-        """Called when an order fill is confirmed."""
-        pass
-
-
-class CompositeTrack(BaseTrack):
-    """
-    Composite Pattern: Groups multiple core tracks with pooled capital sharing.
-    """
-    def __init__(self, track_id: str, shared_capital: float, sub_track_configs: list[dict]):
-        super().__init__(track_id, shared_capital, {})
-        self.sub_tracks: list[BaseTrack] = []
-        self.capital_sharing = True
-        self.available_capital = shared_capital
-        
-        # Instantiate child tracks via factory registry
-        for cfg in sub_track_configs:
-            child = TRACK_REGISTRY[cfg["type"]](
-                track_id=f"{track_id}_{cfg['name']}",
-                capital=shared_capital * cfg.get("weight", 0.5),
-                params=cfg.get("params", {})
-            )
-            self.sub_tracks.append(child)
-
-    def on_alert(self, alert: dict, ctx: ExecutionContext):
-        # Enforce pooled capital constraint before delegating to children
-        if self.available_capital <= 0:
-            return  # Capital pool exhausted
-            
-        for child in self.sub_tracks:
-            child.on_alert(alert, ctx)
-
-    def on_tick(self, token: int, quote: dict, ctx: ExecutionContext):
-        for child in self.sub_tracks:
-            child.on_tick(token, quote, ctx)
-
-    def on_fill(self, order_id: str, fill_price: float, fill_qty: int, fill_ts: float):
-        for child in self.sub_tracks:
-            child.on_fill(order_id, fill_price, fill_qty, fill_ts)
-```
-
-#### B. Strategy Configuration Schema (`config/strategies/momentum_3_0.yaml`)
-```yaml
-strategy:
-  name: "momentum_3_0"
-  scoring_engine: "MomentumScoringEngine3"
-  timeframe: "5m"
-  min_rvol: 2.0
-  cooldown_bars: 3
-  
-  tracks:
-    core:
-      - name: "fast_scalp"
-        type: "FastMomentumTrack"
-        capital: 50000
-        strike_selection: "ATM"
-        params:
-          target_pct: 0.08
-          stop_pct: 0.04
-          trail_at_1r: true
-
-      - name: "trend_pullback"
-        type: "TrendPullbackTrack"
-        capital: 75000
-        strike_selection: "ITM1"
-        params:
-          target_pct: 0.15
-          stop_pct: 0.06
-          trail_ema_period: 9
-
-    composite:
-      - name: "dynamic_trio"
-        type: "CompositeTrack"
-        shared_capital: 150000
-        capital_sharing: true
-        sub_tracks:
-          - name: "atm_leg"
-            type: "ATMTrack"
-            weight: 0.50
-          - name: "itm_leg"
-            type: "ITMTrack"
-            weight: 0.50
-```
+#### B. JSON Profile Schema (`config/tracks/default.json`, `v1.json`, `v2.json` + `config/strategies.json`)
+Track presets live in JSON under `config/tracks/` (`21` active tracks in `default`: `12 v1` + `9 v2` including `volatility_expansion_ratchet` and `adaptive_regime_ratchet`; global scoring `E10_W3_CAP3` and `option_convexity_scaling` live in [`config/strategies.json`](file:///Users/yorha/Documents/Trading%20Stuff/config/strategies.json)). See [`EXECUTION_TRACKS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/EXECUTION_TRACKS.md) for all parameters.
 
 #### C. Mode Superstructure Responsibilities
 The Mode Superstructure is strictly the **Execution Host**:
@@ -868,74 +691,31 @@ The Mode Superstructure is strictly the **Execution Host**:
 
 ---
 
-### 4.7 Columnar Simulation Engine (`simulation/columnar_sim_engine.py`)
+### 4.7 Columnar Simulation Engine & Fixed-Slot Disk Cache (`simulation/columnar_sim_engine.py`, `web/sim_disk_cache.py`)
 
-- **Objective**: Monolithic high-performance simulation testing strategies across 221 stocks in seconds without running multi-process IPC.
+- **Objective**: Tick-by-tick chronological simulation engine reproducing exact live `CandleManager`, `ScoringEngine3`, `RMSService`, and `common/tracks/` behavior in a single process without ZMQ IPC overhead.
 - **Mechanism**:
-  - Memory-maps option quote recordings using **Polars / Apache Arrow**:
-    ```python
-    df_options = pl.scan_parquet("recordings/options_2026_11_15.parquet")
-    ```
-  - Streams cash equity bars sequentially through `ScoringEngine3` logic.
-  - When an alert triggers, calls `asof_join` or binary search `np.searchsorted` to extract the option quote at $T_{\text{trigger}} + \Delta t$ instantaneously.
-  - Full trading day simulation completes in 3–5 seconds.
+  - Ingests `recordings/YYYY-MM-DD/{equity_ticks,option_depth}.parquet` via Polars once per worker run (`SimulationService._ensure_cache()`), indexing options per token with `np.searchsorted`.
+  - Runs an event-driven min-heap interleaving every equity tick, active option depth tick, delayed order fill (`paper_delayed`), and 1.0s heartbeat across all requested modes and tracks.
+  - Persists results per `(date, mode, track_name, track_config, mode_global_settings, data_fingerprint)` (`cache_schema = 2`) under `cache/simulations/<YYYY-MM-DD>.dat` (256-byte `HEADER_STRUCT` + CRC32 + 256 KiB fixed `zlib` frames) and `<YYYY-MM-DD>.idx.json` so subset track runs hit disk and Cold Runs overwrite slots in place.
 
 ---
 
 ### 4.8 Market Data Recorder (`core/recorder/market_recorder.py`)
 
-- **Objective**: Lossless streaming recorder capturing every raw equity and option tick from the local ZeroMQ bus to disk without introducing backpressure or latency to trading components.
-- **Mechanism**:
-  - Runs as an independent process subscribing to `feed_equity.ipc` and `feed_options.ipc`.
-  - Buffers incoming ticks in memory in 5,000-tick chunks.
-  - Uses `pyarrow.parquet.ParquetWriter` with Snappy compression to write partitioned files:
-    `recordings/<YYYYMMDD>/equity_ticks_<chunk>.parquet` and `recordings/<YYYYMMDD>/option_ticks_<chunk>.parquet`.
-  - Completely non-blocking and decoupled; does not affect live order execution.
-
-```python
-class MarketRecorder:
-    def __init__(self, session_date: str, chunk_size: int = 5000):
-        self.session_dir = f"recordings/{session_date}"
-        os.makedirs(self.session_dir, exist_ok=True)
-        self.ctx = zmq.Context()
-        self.sub = self.ctx.socket(zmq.SUB)
-        self.sub.connect("ipc:///tmp/feed_equity.ipc")
-        self.sub.connect("ipc:///tmp/feed_options.ipc")
-        self.sub.setsockopt(zmq.SUBSCRIBE, b"")
-        self.chunk_size = chunk_size
-        self.buffer = []
-
-    def run(self):
-        while True:
-            topic, payload = self.sub.recv_multipart()
-            tick = msgpack.unpackb(payload)
-            self.buffer.append(tick)
-            if len(self.buffer) >= self.chunk_size:
-                self._flush_chunk()
-
-    def _flush_chunk(self):
-        # Convert buffer to Arrow Table and append to session parquet
-        table = pa.Table.from_pylist(self.buffer)
-        pq.write_to_dataset(table, root_path=self.session_dir)
-        self.buffer.clear()
-```
-
-- **Guaranteed Flush Invariants**:
-  - `atexit.register(self.flush)` ensures buffers are flushed upon unexpected exit.
-  - Event loop in `start()` is wrapped in `try ... finally: self.flush()`.
-  - Graceful `stop()` flushes before ZeroMQ context termination.
+- **Objective**: Lossless streaming recorder subscribing to `feed_equity.ipc` (`TICK.EQ`) and `feed_options.ipc` (`TICK.OPT`) and writing dual Parquet streams (`recordings/YYYY-MM-DD/equity_ticks.parquet` and `option_depth.parquet`) via Polars without blocking execution.
+- **Guaranteed Flush Invariants**: Registers `atexit.register(self.flush)`, wraps the ingestion loop in `try ... finally: self.flush()`, and explicitly flushes inside `stop()` before closing ZeroMQ sockets.
 
 ---
 
-### 4.9 Modern Analytics & Simulation Web UI (`web/server.py`)
+### 4.9 Modern Analytics & Simulation Web UI (`web/`)
 
-- **Objective**: Full-featured institutional browser observability and backtesting command center. Full details in [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/WEB_VIEW_FLOW.md).
-- **Core Architecture**:
-  - `AnalyticsWebServer`: `aiohttp` web server hosting static assets, REST APIs, and WebSockets.
-  - `LiveService`: Subscribes to `feed_options.ipc` and `quotes_stream.ipc`, updates Latest Value Cache (LVC), computes dynamic MTM, and streams updates every 1.0s over `/api/live/ws`.
-  - `SimulationService`: Spawns independent OS process (`multiprocessing.Process` executing `_simulation_worker_process`), completely bypassing the Python GIL to prevent UI freezing. Implements columnar DataFrame caching (`cached_equity_df`, `cached_options_df`) for sub-second re-runs, and manages batch simulation queues, cross-session [`batch_analytics.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/batch_analytics.py) reports, and [`regime_classifier.py`](file:///Users/yorha/Documents/Trading%20Stuff/web/regime_classifier.py) daily/window regime tagging.
-  - `AlertService` & `CandleService`: Directly accesses `shm_ohlc_221` (POSIX Shared Memory) in $< 2\ \mu\text{s}$ to render live candlestick charts with alert breakout trigger overlays.
-  - `HistoricalService`: Scans historical directories, parses trade journals, and delivers closed-trade analytics.
+- **Objective**: Browser observability, operational control plane, and columnar backtesting center. Full APIs & flows live in [`WEB_VIEW_FLOW.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/WEB_VIEW_FLOW.md).
+- **Backend Services**:
+  - `AnalyticsWebServer` (`web/server.py`): `aiohttp` server attaching `logs/exec_logs/web_server.log` across `WEB_SERVER`, `SIMULATION_SERVICE`, and `SIM_DISK_CACHE`, and handling `SIGUSR1`/`SIGUSR2` SHM detach/reattach signals gracefully.
+  - `LiveService` & `HistoricalService`: Real-time LVC/MTM WebSocket streaming (`/api/live/ws`) and historical parsing under `recordings/<date>/journal/`.
+  - `SimulationService` & `SimDiskCache`: Multiprocess isolated simulation execution, subset/partial cache reuse, `BatchAnalytics` & `RegimeClassifier`.
+  - `AdminService` & `HealthService`: Web Admin UI delegating to `core/ops/operations.py`, process/IPC/SHM liveness gating (`shm_ohlc_221` active iff `candle_manager` alive), and IST log inspection with RED error banners.
 
 ---
 
@@ -1017,235 +797,27 @@ To prevent any regression against the verified baseline code while maintaining c
 
 ## 5. System Runner, Process Supervisor & Operational Lifecycle
 
-### 5.1 Central Operational Runner (`runner.py`)
+### 5.1 Central Operational Runner (`runner.py`) & Shared Ops (`core/ops/operations.py`)
 
-The system is operated via a unified CLI entry point (`runner.py`) orchestrating all pre-market, live, replay, simulation, and teardown workflows.
+Both CLI (`runner.py`) and Web Admin (`web/admin_service.py`) delegate operational primitives to [`core/ops/operations.py`](file:///Users/yorha/Documents/Trading%20Stuff/core/ops/operations.py), ensuring identical validation, auditability, and process registry state (`logs/pids.json`):
 
-```mermaid
-flowchart TD
-    CLI["runner.py CLI"] --> CMD_PREP["prepare\n• Fetch Master & Filter Universe\n• Build 1m Volume Profile\n• Stateless: Exits Cleanly"]
-    CLI --> CMD_CORE["core --feed ws|mock --candlemanager --quotesbroker --record\n• Starts Full Core Data Ingestion Tier\n• Supports starting services independently"]
-    CLI --> CMD_START["start --strategy NAME --mode paper,delayed,live\n• Starts ScoringEngine3 & RMSResolver\n• Starts Specified Tracks per Mode"]
-    CLI --> CMD_WEB["web --host 0.0.0.0 --port 8080\n• Analytics & Simulation Web UI\n• Live WS, Batch Reports & Regime Tagging"]
-    CLI --> CMD_SIM["sim --date YYYYMMDD --strategy NAME\n• Monolithic Columnar Tick Replay"]
-    CLI --> CMD_STOP["stop --strategy | --core | --all\n• Graceful Process Teardown & SHM Unlink"]
-```
+1. **`prepare [--reset] [--date YYYYMMDD] [--volume-days 30]`**: Downloads `data/instrument.csv`, filters active F&O equities to `data/filtered.csv`, builds 30-day 1m baseline volume profiles in `data/index/index*.json`, generates sharded WS/poll manifest in `data/manifest/subscription_manifest*.json`, and prunes stale CSVs without touching SHM.
+2. **`core --feed ws|mock --candlemanager --quotesbroker --rms [--record]`**: Launches Core Data Tier (`FeedHandler`, `CandleManager` owning `shm_ohlc_221` + signal lifecycle, `QuotesBroker`, decoupled `RMSService`, and optional `MarketRecorder`). Individual daemons can also be started via `feed`, `candlemanager`, `quotesbroker`, `rmsservice`, and `record`.
+3. **`start --mode paper,paper_delayed,live [--track ...] [--continue] [--confirm-live] [--no-rms]`**: Detects active Core `RMSService` via `is_core_rms_running()`, launches `ScoringEngine3` + one isolated superstructure process per `(mode, track)`, and supports `--continue` recovery from `recordings/<date>/journal/`.
+4. **`web [--host 0.0.0.0] [--port 8080]`**: Launches `AnalyticsWebServer` (Live WS, Historical Explorer, Simulation Lab + Fixed-Slot Disk Cache, Live Alerts, Admin Control Plane, System Health + IST Log Inspector).
+5. **`sim --date YYYY-MM-DD --track <default|v1|v2|name> --mode paper,paper_delayed`**: Runs offline `ColumnarSimEngine` against recorded Parquet files.
+6. **`replay --date YYYY-MM-DD [--speed 1.0]`**: Replays Parquet streams onto live ZeroMQ sockets.
+7. **`status` / `stop [--core | --strategy | --all]`**: Inspects `logs/pids.json` + SHM liveness (gating `shm_ohlc_221` strictly on live `candle_manager` PID and clearing/signaling orphaned segments) and terminates requested tiers cleanly.
+8. **`freeze` / `unfreeze` / `stop-live` / `rest-fallback` / `reconcile` / `post-market` / `report` / `test`**: Manages disk+signal execution freezes (`logs/.freeze_*` + `SIGUSR1`/`SIGUSR2` on `exec_*`), REST fallback toggling (`logs/.allow_rest_fallback`), Groww broker position reconciliation, `.tar.gz` session archival, EOD journal reports, and `.venv/bin/python runner.py test` (`171` tests across `28` suites).
 
-#### Detailed CLI Subcommands:
+### 5.2 Distributed Process Supervisor (`scripts/run_distributed.py`) & Health Probes
 
-1. **`python3 runner.py prepare [--reset] [--date YYYYMMDD]`**:
-   - **Instrument Master Retrieval**: Downloads today's NSE/NFO security master from broker API.
-   - **F&O Universe Filtering**: Filters exactly the active 221 F&O underlying equities and writes `data/filtered_fno.csv`.
-   - **Volume Index Baseline Generation**: Analyzes the last 30 trading sessions to compute the median volume for every one-minute bucket ($09:15 \dots 15:30$ IST = 375 minutes) across all 221 stocks, saving `data/volume_profile_221.npy` of shape `(221, 375)`.
-   - **Stateless & Clean**: Prepares static files and exits immediately. Does **not** allocate shared memory (preventing Python resource-tracker unlinking upon exit).
+- Tracks every child process in `logs/pids.json` with role (`feed_handler`, `candle_manager`, `quotes_broker`, `rms_service`, `market_recorder`, `scoring_engine`, `web_server`, `exec_<mode>_<track>`), tier (`CORE`, `STRATEGY`, `EXEC`, `SYSTEM`), PID, start time, and `logs/exec_logs/<role>.log`.
+- **Consumer Signal Isolation**: SHM lifecycle notifications (`SHM_SIGNAL_DETACH`/`SHM_SIGNAL_REATTACH`) target `SHM_CONSUMER_ROLES` (`scoring_engine`, `web_server`) exclusively; execution mode freezes (`SIGUSR1`/`SIGUSR2`) target `exec_*` roles exclusively.
+- **Health Monitoring (`web/health_service.py`)**: Scans `logs/pids.json`, ZMQ IPC socket presence, SHM `candle_manager`-gated header counters, and `logs/exec_logs/*.log` IST levels, flagging UI status **RED** whenever `ERROR`/`CRITICAL` entries are logged.
 
-2. **`python3 runner.py core --feed <ws|mock> --candlemanager --quotesbroker [--record]`**:
-   - **Enforces Core Data Tier**: Requires `--feed`, `--candlemanager`, and `--quotesbroker` with their appropriate parameters, ensuring the entire foundational data infrastructure starts in harmony.
-   - **`--feed <ws|mock>`**: Starts `FeedHandler` connected to live Upstox WebSocket or replay server.
-   - **`--candlemanager`**: Starts `CandleManager`, which **creates, initializes, and owns** the 777 KB POSIX Shared Memory segment `shm_ohlc_221`.
-   - **`--quotesbroker`**: Starts `QuotesBroker` maintaining the Last Value Cache and 1-second heartbeat pulses.
-   - **`--record` (Optional)**: Forks `MarketRecorder` to stream raw ticks to Parquet in `recordings/YYYYMMDD/`.
-   - **Independent Component Invocations**: Any of these options can also be run completely independently if desired:
-     - `python3 runner.py feed --mode <ws|mock>`
-     - `python3 runner.py candlemanager` (allocates and owns `shm_ohlc_221`)
-     - `python3 runner.py quotesbroker` (maintains LVC & streams quotes/heartbeats)
-     - `python3 runner.py record` (optional standalone tick recorder)
-
-3. **`python3 runner.py start --strategy momentum_3_0 --mode <paper,paper_delayed,live> [--no-dashboard]`**:
-   - **Decoupled Strategy Lifecycle**: Can be launched, stopped, re-tuned, and restarted **without touching the live feed or dropping ticks**.
-   - **Attaches to Running SHM**: Connects to `shm_ohlc_221` with `create=False` and accesses the live 5-minute candles accumulated by `CandleManager`.
-   - **Dual Instance Protection**: Acquires an exclusive lock via `fcntl.flock` on `/tmp/strategy_momentum.lock`.
-   - **Spawns Signal Tier**: Launches `ScoringEngine3` (SHM spin-loop) and `RMSOptionResolver`.
-   - **Multi-Mode Concurrency**: Parses comma-separated modes (`paper`, `paper_delayed`, `live`) and forks an independent child process for each requested mode superstructure (`Superstructure_Paper`, `Superstructure_Delayed`, `Superstructure_Live`), which instantiates and executes its specified core and composite tracks.
-   - **Implicit Dashboard Launch**: Automatically spawns the **Universal Strategy Dashboard** (`ui/dashboard.py`) as a child process. (Pass `--no-dashboard` if running headless on server).
-   - **Full Reconciled Operational Flags**:
-     - `--confirm-live`: Strict required safety authorization flag; live execution will abort order transmission without this flag.
-     - `--mcx` / `--exchange MCX`: Full support for MCX commodities (09:00 to 23:30 IST) alongside default NSE equities/F&O.
-     - `--start-time HH:MM`: Enables mid-day startup; pre-start ticks are ingested in warm-up mode, and trade execution starts at `--start-time`.
-     - `--no-backfill`: Disables automatic priming backfill from today's session recording on startup.
-     - `--dynamic-lookback <min>`: Rolling lookback window for dynamic trio track allocation (default: 15 min).
-     - `--capital <float>`: Overrides starting capital per simulation track.
-     - `--track <name>`: Filter active strategy tracks (`ALL`, `ATM`, `ITM`, `OTM`, `DYNAMIC_TRIO`, `COMBINED_*`).
-     - `--view <name>`: Selects default dashboard telemetry view (`all`, `matrix`, `positions`, `alerts`, etc.).
-
-4. **`python3 runner.py dashboard`**:
-   - Standalone command to launch or reattach to the universal terminal dashboard (`ui/dashboard.py`).
-   - Subscribes to `rms_strike_pub.ipc` and continuously watches session trade journals to render live performance telemetry across all active modes.
-
-5. **`python3 runner.py sim --date YYYYMMDD --strategy momentum_3_0`**:
-   - Bypasses ZeroMQ multi-process IPC.
-   - Runs `simulation/columnar_sim_engine.py`, loading memory-mapped Polars/Arrow option depth tables and running equity bars through `ScoringEngine3` and `common/tracks/`.
-   - Completes the entire 375-minute day across 221 stocks in **3 to 5 seconds**, printing trade journal, win rate, Sharpe ratio, and slippage metrics.
-
-6. **`python3 runner.py replay --date YYYYMMDD --strategy momentum_3_0 --mode paper_delayed [--speed 1.0]`**:
-   - Runs deterministic multi-process replay through ZeroMQ sockets using recorded parquet files.
-
-7. **`python3 runner.py status`**:
-   - Inspects PIDs for Core Ingestion Tier and Strategy Tier.
-   - Verifies active `write_sequence` counter in `shm_ohlc_221`.
-   - Pings `QuotesBroker` snapshot socket and checks recent heartbeat timestamps.
-
-8. **`python3 runner.py stop [--strategy | --core | --all]`**:
-   - **`--strategy`**: Sends `SIGTERM` to `ScoringEngine`, `RMSResolver`, all mode superstructures/tracks, and the dashboard. **Leaves Core Data Tier, Recorder, and CandleManager running!** Allows instant strategy reloads during live market sessions.
-   - **`--core`**: Sends `SIGTERM` to `FeedHandler`, `CandleManager`, `QuotesBroker`, and `Recorder`.
-   - **`--all`**: Complete End-of-Day shutdown. Terminates all processes, cleanly flushes open recordings, unlinks `shm_ohlc_221`, and releases all instance file locks.
-
-9. **`python3 runner.py freeze --mode <live|paper|paper_delayed|all>`**:
-   - **Preserved & Hardened Operational Command**: Freezes the designated execution mode (or all modes).
-   - **Behavior**: Strictly blocks all NEW order entries while leaving existing positions active to be managed, trailed, and squared off at EOD.
-   - **IPC + Disk Persistence**: Touches `logs/.freeze_<mode>` for persistence across restarts AND emits a ZeroMQ control message so active superstructures toggle an atomic in-memory `is_frozen = True` flag immediately with zero per-tick disk I/O.
-
-10. **`python3 runner.py unfreeze --mode <live|paper|paper_delayed|all>`**:
-    - Unfreezes the designated execution mode (removes disk flag and publishes resume signal to superstructures), resuming normal new order entries.
-
-11. **`python3 runner.py stop-live`**:
-    - **Convenience Shortcut**: Equivalent to `runner.py freeze --mode live`. Instantly blocks new live broker orders while allowing active live positions to trail their stop-losses and exit normally.
-
-12. **`python3 runner.py report [--date YYYYMMDD] [--mode <paper|delayed|live>] [--pdf]`**:
-    - **Reconciled Operational Command**: Invokes `infrastructure/pnl/report_generator.py` (`DailyReportGenerator`) and `pdf_report.py` (`PDFReportGenerator`).
-    - Generates comprehensive End-of-Day P&L analytics, track-wise performance matrices, hourly return distribution, terminal Unicode equity curve, and compiles a vector PDF report to `recordings/YYYYMMDD/report_YYYYMMDD.pdf`.
-
-13. **`python3 runner.py post-market [--date YYYYMMDD] [--all] [--delete-raw]`**:
-    - **Reconciled Archiving Command**: Compresses raw session recordings (`market_events.jsonl`, `ticks.*`, `options_depth.*`, `metadata.json`) into compressed archives (`recordings/YYYYMMDD.tar.gz`).
-    - Fixes **CRIT-001** (missing `Tuple` import in typing header).
-    - Preserves raw data by default; safely removes raw files only when `--delete-raw` is explicitly passed.
-
-14. **`python3 runner.py reconcile [--confirm-live]`**:
-    - **Reconciled Broker Audit Command**: Triggers `GrowwLiveAdapter.reconcile_broker_positions()`.
-    - Queries Groww live REST API for active positions, compares against local state (`logs/live_positions_state.json`), closes external ghost positions, adopts orphan positions into local risk tracking, and reconciles lot quantity discrepancies.
-
-15. **`python3 runner.py rest-fallback [--action status|enable|disable]`**:
-    - **Reconciled Market Data Failover Command**: Dynamically checks or toggles the `.allow_rest_fallback` flag in `logs/`.
-    - When enabled, permits `FeedHandler` / `Listener` to fall back from dropped WebSockets to REST quote polling.
-
-16. **`python3 runner.py test`**:
-    - **Reconciled Test Suite Runner**: Executes unit, integration, simulation, and execution adapter tests across `tests/` (fixing **HIGH-004** by removing deprecated `legacy/tests/` coupling).
-
----
-
-### 5.2 Process Supervisor Architecture (`scripts/run_distributed.py`)
-
-The supervisor supports modular tier orchestration (`--tier core|strategy|all`), enabling independent process lifecycles:
-
-```python
-"""
-Process Supervisor: Multi-Tier Distributed Process Orchestration
-Decouples Core Data Tier (Feed, Recorder, CandleManager, QuotesBroker) from Strategy Tier.
-"""
-import argparse
-import fcntl
-import os
-import signal
-import subprocess
-import sys
-import time
-
-LOCK_CORE = "/tmp/trading_core.lock"
-LOCK_STRATEGY = "/tmp/trading_strategy.lock"
-
-def get_core_manifest(feed_mode: str = "ws", candlemanager: bool = True, quotesbroker: bool = True, record: bool = False):
-    manifest = []
-    if feed_mode:
-        manifest.append(("FeedHandler", [sys.executable, "-m", "core.feed.feed_handler", "--mode", feed_mode]))
-    if candlemanager:
-        manifest.append(("CandleManager", [sys.executable, "-m", "core.candles.candle_manager"]))
-    if quotesbroker:
-        manifest.append(("QuotesBroker", [sys.executable, "-m", "core.quotes.quotes_broker"]))
-    if record:
-        manifest.append(("MarketRecorder", [sys.executable, "-m", "core.recorder.market_recorder"]))
-    return manifest
-
-def get_strategy_manifest(strategy: str, modes: list[str], no_dashboard: bool = False):
-    manifest = [
-        ("ScoringEngine", [sys.executable, "-m", "strategies.momentum.scoring_engine", "--strategy", strategy]),
-        ("RMSResolver",   [sys.executable, "-m", "core.rms.rms_service"])
-    ]
-    for m in modes:
-        mode_clean = m.strip().lower()
-        if mode_clean == "paper":
-            manifest.append(("Superstructure_Paper",   [sys.executable, "-m", "execution.superstructures.paper", "--strategy", strategy]))
-        elif mode_clean == "paper_delayed":
-            manifest.append(("Superstructure_Delayed", [sys.executable, "-m", "execution.superstructures.delayed", "--strategy", strategy]))
-        elif mode_clean == "live":
-            manifest.append(("Superstructure_Live",    [sys.executable, "-m", "execution.superstructures.live", "--strategy", strategy]))
-            
-    # Implicitly launch Dashboard unless --no-dashboard is specified
-    if not no_dashboard:
-        manifest.append(("TerminalDashboard", [sys.executable, "-m", "ui.dashboard"]))
-        
-    return manifest
-
-def acquire_instance_lock():
-    lock_fd = open(LOCK_FILE, "w")
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print("[SUPERVISOR] FATAL: Another trading engine instance is already running!")
-        sys.exit(1)
-    return lock_fd
-
-def main():
-    lock_fd = acquire_instance_lock()
-    procs = []
-    print("[SUPERVISOR] Starting Trading Engine 2.0...")
-    
-    # Register clean shutdown
-    def shutdown(signum, frame):
-        print("\n[SUPERVISOR] Clean shutdown initiated. Terminating process group...")
-        # Send SIGTERM to entire process group
-        try:
-            os.killpg(os.getpgrp(), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-            
-        time.sleep(1.0)
-        for name, p in procs:
-            if p.poll() is None:
-                p.kill()
-                
-        # Clean up POSIX SHM
-        try:
-            from core.shm.candle_shm import unlink_shm
-            unlink_shm()
-        except Exception:
-            pass
-            
-        print("[SUPERVISOR] Teardown complete. Exiting.")
-        sys.exit(0)
-        
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
-    
-    # Spawn child processes in current process group
-    for name, cmd in PROCESSES:
-        p = subprocess.Popen(cmd)
-        procs.append((name, p))
-        print(f"[SUPERVISOR] Spawned {name} (PID: {p.pid})")
-        time.sleep(0.2) # Staggered startup for socket binding
-        
-    # Monitor children
-    while True:
-        for name, p in procs:
-            if p.poll() is not None:
-                print(f"[SUPERVISOR] CRITICAL: {name} exited unexpectedly with code {p.returncode}")
-                shutdown(None, None)
-        time.sleep(1.0)
-
-if __name__ == "__main__":
-    main()
-```
-
-### 5.3 CPU Affinity & OS Optimization (`common/utils/affinity.py`)
-
-- **Linux Environments**: Hard core pinning using `os.sched_setaffinity`:
-  - Core 1: `FeedHandler`
-  - Core 2: `CandleManager`
-  - Core 3: `QuotesBroker`
-  - Core 4: `ScoringEngine` (dedicated spin core)
-  - Core 5: `RMS & Superstructure`
-- **macOS Environments**:
-  - macOS does not support thread core pinning via standard `sched_setaffinity`.
-  - We configure high-priority POSIX scheduling via `os.nice(-10)` to lock processes to Apple Silicon Performance Cores (P-cores) and prevent scheduling onto Efficiency Cores (E-cores).
+### 5.3 Scheduling Priorities
+Processes initialize standardized IST logging (`core/common/logging_utils.py`) and can pin CPU affinity on Linux (`os.sched_setaffinity`) or high-priority QoS on macOS (`os.nice`) for performance cores.
 
 ---
 
@@ -1272,52 +844,25 @@ This Low-Level Design natively eradicates the architectural vulnerabilities iden
 
 To guarantee zero regressions and complete architectural integrity, the system implements a standardized testing matrix where every new component, schema, and edge-case rule has a dedicated test suite under `tests/`:
 
-### 7.1 Test Suites Directory Structure
+### 7.1 Verified Test Suites Directory Structure (`28` Files, `171` Tests via `runner.py test`)
 
-```
+```text
 tests/
-├── core/
-│   ├── test_shm_layout.py             # 48-byte struct stride, Seqlock concurrency, memory alignment
-│   ├── test_candle_manager.py         # 5m bar synthesis, incremental ATR-14, strict rVOL extrapolation
-│   ├── test_quotes_broker.py          # LVC latency (< 50us), REQ/REP batching, heartbeat streams
-│   ├── test_market_recorder.py        # Lossless Parquet streaming, clean flush on SIGTERM
-│   ├── test_scoring_engine_3_0.py     # 50% retracement tested FIRST, Pure Impulse, CLV >= 0.75
-│   └── test_rms_service.py            # Strike resolution, hybrid tick spread gate, daily loss circuit breaker
-├── execution/
-│   ├── test_superstructures.py        # Multi-mode process isolation, zero exit cross-talk (Gap 1)
-│   ├── test_paper_delayed.py          # Event-driven timestamp queue, cached quote fills (CRIT-007)
-│   ├── test_live_adapter.py           # Groww TOTP, 401 auto-freeze, resting SL, 25-mod limit, reconciliation
-│   ├── test_freeze_mode.py            # In-memory atomic IPC toggle, zero disk polling (Gap 5)
-│   └── test_trade_journal.py          # Single-owner JSONL logging, zero duplicate records (Gap 3)
-├── common/
-│   ├── test_tracks.py                 # BaseTrack lifecycle, FastMomentum, TrendPullback
-│   ├── test_composite_track.py        # Capital sharing, dynamic trio re-weighting without math bypass (Gap 6)
-│   └── test_risk_rules.py             # Target decay (15m), stagnation (30m), breakeven SL, fixed INR (₹750)
-├── simulation/
-│   ├── test_columnar_sim_engine.py    # Polars/Arrow exact ASOF join (Sim Bugs A & B), MCX hours (CRIT-006)
-│   └── test_historical_replay.py      # Historical timestamp preservation (HIGH-007)
-├── ui/
-│   └── test_dashboard.py              # ZeroMQ IPC telemetry consumption, low CPU (< 1%)
-└── integration/
-    └── test_e2e_pipeline.py           # Full system startup, replay -> scoring -> RMS -> execution -> report -> stop
-
+├── common/      # test_config_loader, test_ipc_schemas, test_new_tracks, test_symbol_utils, test_tracks
+├── core/        # test_candle_manager, test_historical_replay, test_listener, test_market_recorder,
+│                # test_position_registry, test_premarket, test_quotes_broker, test_rms_service,
+│                # test_shm_layout, test_shm_lifecycle, test_time_utils
+├── execution/   # test_groww_live, test_live_reconciliation, test_superstructures_2_0
+├── strategies/  # test_opportunity_pool, test_scoring_engine_3_0
+├── simulation/  # test_columnar_sim_engine
+├── ui/          # test_admin_health_and_determinism, test_batch_analytics, test_dashboard, test_sim_disk_cache, test_web
+└── test_audit_fixes.py
 ```
-
-### 7.2 Testing Philosophy & Invariants
-1. **Zero Synthetic Prices for Market Validation**: Real captured ticks from `recordings/` are used to test breakout detection, option strike resolution, and fill matching.
-2. **Nanosecond Determinism**: Simulation and replay tests verify that delayed orders fill at the exact quote prevailing at `trigger_ts + delay_sec`.
-3. **Automated Regression Suite Runner**: Executed directly via `python3 runner.py test` (or `python3 -m unittest discover tests/ -p "test_*.py"`).
 
 ---
 
-## 8. Next Steps & Implementation Sequencing
+## 8. Implementation Status & Verification
 
-With `ARCHITECTURE_SPEC_2_0.md`, `SCORING_ENGINE_3_0.md`, and this `LOW_LEVEL_DESIGN_2_0.md` completed, the next phase is executing the **Master Implementation Plan**:
-1. **Phase 1**: Core Data Infrastructure (`CANDLE_DTYPE`, POSIX SHM layout, ZeroMQ msgpack schemas, `tests/core/test_shm_layout.py`).
-2. **Phase 2**: Ingestion & State Layer (`FeedHandler`, `CandleManager`, `QuotesBroker`, `tests/core/test_candle_manager.py`, `tests/core/test_quotes_broker.py`).
-3. **Phase 3**: Scoring Engine 3.0 & RMS Option Resolver (`tests/core/test_scoring_engine_3_0.py`, `tests/core/test_rms_service.py`).
-4. **Phase 4**: Mode Superstructures & Common Tracks (`tests/execution/test_superstructures.py`, `tests/common/test_composite_track.py`, `tests/common/test_risk_rules.py`).
-5. **Phase 5**: Columnar Simulation Engine with Polars/Arrow (`tests/simulation/test_columnar_sim_engine.py`).
-6. **Phase 6**: Supervisor, Verification Suite & End-to-End Replay Testing (`tests/integration/test_e2e_pipeline.py`).
+Architecture 2.1, Scoring Engine 3.0 (`E10_W3_CAP3`), Core-Decoupled RMS, composite `origin_track` recovery/quarantine, proportional option convexity scaling, 21 active default tracks (including `volatility_expansion_ratchet` and `adaptive_regime_ratchet`), Signal-driven SHM lifecycle, IST logging, Admin/Health Web UI panels, and fixed-slot `SimDiskCache` are all implemented and verified (`171/171` passing tests). Ongoing enhancements and live-execution hardening live in [`IMPROVEMENTS.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/live/IMPROVEMENTS.md).
 
 

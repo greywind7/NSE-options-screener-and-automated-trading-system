@@ -3,8 +3,8 @@
 > **Document Type**: Strategy & Quantitative Signal Engine Specification  
 > **Version**: 3.1 (`E10_W3_CAP3` Calibration: 15s Elapsed, Flag Top-25%, Pure 3-Bar `0.45%`, RMS 3/Sym/Day Cap)  
 > **Status**: Production Source of Truth  
-> **Related Architecture**: [`ARCHITECTURE_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/ARCHITECTURE_SPEC_2_0.md)  
-> **Legacy Archive**: Legacy scoring documents are archived in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive).
+> **Related Architecture**: [`HIGH_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/HIGH_LEVEL_DESIGN_2_0.md) | [`LOW_LEVEL_DESIGN_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/sys/LOW_LEVEL_DESIGN_2_0.md)  
+> **Legacy Archive**: Archived ADRs ([`2026-11-28_ADR_SPEC_2_0.md`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive/2026-11-28_ADR_SPEC_2_0.md)) and legacy scoring docs live in [`docs/archive/`](file:///Users/yorha/Documents/Trading%20Stuff/docs/archive).
 
 ---
 

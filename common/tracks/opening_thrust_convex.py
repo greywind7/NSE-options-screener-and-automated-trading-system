@@ -75,14 +75,14 @@ class OpeningThrustConvexityTrack(BaseTrack):
         if bid <= trade.stop_loss:
             return "SL_HIT"
 
-        # 4. Stepped Trailing: At +15%, lock breakeven; for every +1% beyond, trail SL up by +1%
+        # 4. Stepped Trailing: At scaled breakeven_trigger_pct (+15%), lock BE; trail 1:1 beyond scaled +1%
         profit_pct = (bid - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
-        if profit_pct >= self.breakeven_trigger_pct - 1e-6:
-            # Base breakeven
+        eff_be = self._scaled_pct(trade, self.breakeven_trigger_pct)
+        eff_min_excess = self._scaled_pct(trade, 0.01)
+        if profit_pct >= eff_be - 1e-6:
             stepped_sl = trade.entry_price
-            # Additional 1:1 trail above 15%
-            excess = profit_pct - self.breakeven_trigger_pct
-            if excess > 0.01:
+            excess = profit_pct - eff_be
+            if excess > eff_min_excess:
                 stepped_sl = round(trade.entry_price * (1.0 + excess), 2)
             trade.stop_loss = max(trade.stop_loss, stepped_sl)
             trade.ratchet_level = max(trade.ratchet_level, 1)

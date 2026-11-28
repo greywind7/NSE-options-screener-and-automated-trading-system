@@ -344,6 +344,57 @@ class TestNewExecutionTracks(unittest.TestCase):
         self.assertIsNotNone(trade_sp)
         self.assertAlmostEqual(trade_sp.metadata["sl_pct"], 0.0625, places=4)
 
+    def test_convexity_scaling_propagates_to_breakeven_steps_and_tiered_ratchets(self):
+        # Expensive post-expiry quote: ask = 45.0 on 1500 spot -> prem_pct = 3.0% -> scale = 0.015 / 0.03 = 0.50
+        def _high_prem_opp():
+            opp = _make_dummy_opp(trigger_price=1500.0)
+            for k in ("ATM", "ITM1", "ITM", "ITM2"):
+                opp.strikes[k] = {"token": f"INFY_{k}", "strike": 1500.0, "ask": 45.0, "bid": 44.5, "lot_size": 300}
+            return opp
+
+        # 1. TrendPullbackV2: target 25%->12.5%, BE 4%->2%, trailing activates above 2%+0.5%=2.5%
+        tp2 = create_tracks(context=self.context, track_filter=["trend_pullback_v2_ITM1"])["trend_pullback_v2_ITM1"]
+        t_tp2 = tp2.on_opportunity(_high_prem_opp())
+        self.assertIsNotNone(t_tp2)
+        self.assertAlmostEqual(t_tp2.metadata["convexity_scale"], 0.50, places=4)
+        self.assertAlmostEqual(t_tp2.metadata["breakeven_trigger_pct"], 0.02, places=4)
+        # At +2.1% (45.95): scaled BE triggers cleanly before old 4% unscaled threshold
+        tp2.on_tick("INFY_ITM1", ltp=45.95, bid=45.95, ask=46.05, ts=t_tp2.entry_time + 10.0)
+        self.assertEqual(t_tp2.ratchet_level, 1)
+        self.assertEqual(t_tp2.stop_loss, 45.0)
+        # At +6.0% (47.70): excess over 2% is 4% > 0.5% activation -> locks 0.80 * 4% = +3.2% (46.44)
+        tp2.on_tick("INFY_ITM1", ltp=47.70, bid=47.70, ask=47.80, ts=t_tp2.entry_time + 20.0)
+        self.assertEqual(t_tp2.ratchet_level, 2)
+        self.assertAlmostEqual(t_tp2.stop_loss, 46.44, places=2)
+
+        # 2. VolatilityExpansionRatchet: target 25%->12.5%, BE 5%->2.5%, step 2.5%->1.25%
+        ver = create_tracks(context=self.context, track_filter=["volatility_expansion_ratchet_ATM"])["volatility_expansion_ratchet_ATM"]
+        t_ver = ver.on_opportunity(_high_prem_opp())
+        self.assertIsNotNone(t_ver)
+        # At +3.75% (46.69): 1 scaled step above 2.5% -> locks +1.25% (45.56)
+        ver.on_tick("INFY_ATM", ltp=46.69, bid=46.69, ask=46.79, ts=t_ver.entry_time + 15.0)
+        self.assertEqual(t_ver.ratchet_level, 2)
+        self.assertAlmostEqual(t_ver.stop_loss, 45.56, places=2)
+
+        # 3. FixedTarget: target 15%->7.5%, Tier 1 BE 8%->4.0% triggers inside scaled target
+        ft = create_tracks(context=self.context, track_filter=["fixed_target_ATM"])["fixed_target_ATM"]
+        t_ft = ft.on_opportunity(_high_prem_opp())
+        self.assertIsNotNone(t_ft)
+        # At +4.1% (46.85): scaled 4% BE locks entry 45.0
+        ft.on_tick("INFY_ATM", ltp=46.85, bid=46.85, ask=46.95, ts=t_ft.entry_time + 10.0)
+        self.assertEqual(t_ft.ratchet_level, 1)
+        self.assertEqual(t_ft.stop_loss, 45.0)
+
+        # 4. FastMomentum: decay starts from scaled target (7.5%) and decays by 0.5%/min
+        fm = create_tracks(context=self.context, track_filter=["fast_momentum_ATM"])["fast_momentum_ATM"]
+        t_fm = fm.on_opportunity(_high_prem_opp())
+        self.assertIsNotNone(t_fm)
+        orig_target = t_fm.target_price
+        fm.on_tick("INFY_ATM", ltp=45.5, bid=45.5, ask=45.6, ts=t_fm.entry_time + fm.target_decay_sec + 120.0)
+        self.assertLess(t_fm.target_price, orig_target)
+        # 2 extra minutes at 0.5%/min -> 7.5% - 1.0% = +6.5% (47.925)
+        self.assertAlmostEqual(t_fm.target_price, 45.0 * 1.065, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()

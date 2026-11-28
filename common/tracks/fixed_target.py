@@ -63,9 +63,10 @@ class FixedTargetTrack(BaseTrack):
         if bid <= trade.stop_loss:
             return "SL_HIT"
 
-        # 4. Breakeven Ratchet at +8%
-        profit_pct = (bid - trade.entry_price) / trade.entry_price
-        if profit_pct >= 0.08 - 1e-6 and trade.ratchet_level < 1:
+        # 4. Breakeven Ratchet at scaled +8%
+        profit_pct = (bid - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
+        eff_be_tier = self._scaled_pct(trade, 0.08)
+        if profit_pct >= eff_be_tier - 1e-6 and trade.ratchet_level < 1:
             trade.stop_loss = max(trade.stop_loss, trade.entry_price)
             trade.ratchet_level = 1
 

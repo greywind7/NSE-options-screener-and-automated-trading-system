@@ -58,23 +58,25 @@ class TrendPullbackTrack(BaseTrack):
         elapsed = ts - trade.entry_time
         trade.highest_price = max(trade.highest_price, bid)
 
-        # 1. Stepped Trailing Stop Loss Logic:
-        # After breakeven is triggered (at breakeven_trigger_pct, e.g. +2.5%),
-        # trail stop loss every 1% (trailing_step_pct) increase in the contract value.
+        # 1. Stepped Trailing Stop Loss Logic (scaled by option convexity factor):
+        # After breakeven is triggered (at scaled breakeven_trigger_pct),
+        # trail stop loss every scaled trailing_step_pct increase in contract value.
         if trade.entry_price > 0:
             max_profit_pct = (trade.highest_price - trade.entry_price) / trade.entry_price
+            eff_be = self._scaled_pct(trade, self.breakeven_trigger_pct)
+            eff_step = self._scaled_pct(trade, self.trailing_step_pct)
 
-            if self.breakeven_trigger_pct and max_profit_pct >= (self.breakeven_trigger_pct - 1e-6):
+            if self.breakeven_trigger_pct and max_profit_pct >= (eff_be - 1e-6):
                 # Lock in breakeven (entry price) as baseline stop-loss floor
                 trade.stop_loss = max(trade.stop_loss, trade.entry_price)
                 trade.metadata["breakeven_triggered"] = True
 
-                # For every trailing_step_pct increase above breakeven trigger, trail SL upward
-                if self.trailing_step_pct and self.trailing_step_pct > 0.0:
-                    excess_pct = max_profit_pct - self.breakeven_trigger_pct
-                    steps = int(excess_pct / self.trailing_step_pct)
+                # For every scaled trailing_step_pct increase above breakeven trigger, trail SL upward
+                if eff_step > 0.0:
+                    excess_pct = max_profit_pct - eff_be
+                    steps = int((excess_pct + 1e-9) / eff_step)
                     if steps > 0:
-                        stepped_sl = round(trade.entry_price * (1.0 + (steps * self.trailing_step_pct)), 2)
+                        stepped_sl = round(trade.entry_price * (1.0 + (steps * eff_step)), 2)
                         trade.stop_loss = max(trade.stop_loss, stepped_sl)
                         trade.ratchet_level = max(trade.ratchet_level, steps)
 

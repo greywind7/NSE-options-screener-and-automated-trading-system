@@ -294,7 +294,7 @@ def resolve_track_cache_specs(
         mode_glob = _normalize_global_settings_for_mode(mode, params)
         for desc in track_descriptors:
             key_payload = {
-                "cache_schema": 1,
+                "cache_schema": 2,
                 "date": c_date,
                 "mode": mode,
                 "track_name": desc["track_name"],

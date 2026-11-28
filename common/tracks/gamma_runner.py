@@ -50,18 +50,16 @@ class GammaRunnerTrack(BaseTrack):
         if bid <= trade.stop_loss:
             return "SL_HIT"
 
-        # 3. Tiered Ratchets for Explosive Runners
-        # Tier 3: At +75% profit, ratchet SL to lock in +50%
-        if profit_pct >= 0.75 - 1e-6 and trade.ratchet_level < 3:
-            trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * 1.50, 2))
-            trade.ratchet_level = 3
-        # Tier 2: At +50% profit, ratchet SL to lock in +25%
-        elif profit_pct >= 0.50 - 1e-6 and trade.ratchet_level < 2:
-            trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * 1.25, 2))
-            trade.ratchet_level = 2
-        # Tier 1: At +25% profit, lock Breakeven (+1% buffer)
-        elif profit_pct >= 0.25 - 1e-6 and trade.ratchet_level < 1:
-            trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * 1.01, 2))
-            trade.ratchet_level = 1
+        # 3. Tiered Ratchets for Explosive Runners (scaled by option convexity factor)
+        for lvl, trig_pct, lock_pct in (
+            (3, 0.75, 0.50),
+            (2, 0.50, 0.25),
+            (1, 0.25, 0.01),
+        ):
+            if profit_pct >= self._scaled_pct(trade, trig_pct) - 1e-6 and trade.ratchet_level < lvl:
+                sl_price = round(trade.entry_price * (1.0 + self._scaled_pct(trade, lock_pct)), 2)
+                trade.stop_loss = max(trade.stop_loss, sl_price)
+                trade.ratchet_level = lvl
+                break
 
         return None

@@ -51,22 +51,25 @@ class MicroChandelierTrack(BaseTrack):
         if bid <= trade.stop_loss:
             return "SL_HIT"
 
-        # 3. Micro-Trailing Ratchets
-        if profit_pct >= 0.09 - 1e-6 and trade.ratchet_level < 4:
-            trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * 1.07, 2))
-            trade.ratchet_level = 4
-        elif profit_pct >= 0.07 - 1e-6 and trade.ratchet_level < 3:
-            trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * 1.05, 2))
-            trade.ratchet_level = 3
-        elif profit_pct >= 0.05 - 1e-6 and trade.ratchet_level < 2:
-            trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * 1.03, 2))
-            trade.ratchet_level = 2
-        elif profit_pct >= 0.03 - 1e-6 and trade.ratchet_level < 1:
-            trade.stop_loss = max(trade.stop_loss, trade.entry_price)
-            trade.ratchet_level = 1
+        # 3. Micro-Trailing Ratchets (scaled by option convexity factor)
+        for lvl, trig_pct, lock_pct in (
+            (4, 0.09, 0.07),
+            (3, 0.07, 0.05),
+            (2, 0.05, 0.03),
+            (1, 0.03, 0.0),
+        ):
+            if profit_pct >= self._scaled_pct(trade, trig_pct) - 1e-6 and trade.ratchet_level < lvl:
+                sl_price = (
+                    round(trade.entry_price * (1.0 + self._scaled_pct(trade, lock_pct)), 2)
+                    if lock_pct > 0.0
+                    else trade.entry_price
+                )
+                trade.stop_loss = max(trade.stop_loss, sl_price)
+                trade.ratchet_level = lvl
+                break
 
-        # 4. Stagnation Timeout (5 min and profit < +2%)
-        if elapsed >= self.stagnation_timeout_sec and profit_pct < 0.02:
+        # 4. Stagnation Timeout (5 min and profit < scaled +2%)
+        if elapsed >= self.stagnation_timeout_sec and profit_pct < self._scaled_pct(trade, 0.02):
             return "STAGNATION_TIMEOUT"
 
         return None

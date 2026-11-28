@@ -59,9 +59,13 @@ class TrendPullbackV2Track(BaseTrack):
         self, trade: TradeState, ltp: float, bid: float, ask: float, ts: float
     ) -> Optional[str]:
         elapsed = ts - trade.entry_time
-        profit_pct = (bid - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
+        trade.highest_price = max(trade.highest_price, bid)
+        if trade.entry_price <= 0.0:
+            return None
 
-        # 1. Target Hit (+25%)
+        peak_profit_pct = (trade.highest_price - trade.entry_price) / trade.entry_price
+
+        # 1. Target Hit (+25% scaled)
         if bid >= trade.target_price:
             return "TARGET_HIT"
 
@@ -69,17 +73,19 @@ class TrendPullbackV2Track(BaseTrack):
         if bid <= trade.stop_loss:
             return "SL_HIT"
 
-        # 3. Dynamic Stepped Trailing above +4%
-        if profit_pct >= self.breakeven_trigger_pct - 1e-6:
-            # Base Breakeven
+        # 3. Dynamic Stepped Trailing above scaled breakeven (+4% * convexity_scale)
+        eff_be = self._scaled_pct(trade, self.breakeven_trigger_pct)
+        eff_activation = self._scaled_pct(trade, 0.01)
+        if peak_profit_pct >= eff_be - 1e-6:
             base_be = trade.entry_price
-            excess = profit_pct - self.breakeven_trigger_pct
-            if excess > 0.01:
-                # 0.8% trail for every 1% gain
-                trail_pts = trade.entry_price * (0.80 * excess)
-                base_be = round(trade.entry_price + trail_pts, 2)
+            excess = peak_profit_pct - eff_be
+            if excess > eff_activation:
+                # 0.8% trail per 1% advance above scaled breakeven (respects trailing_step_pct config)
+                trail_ratio = min(0.95, max(0.0, self.trailing_step_pct / 0.01)) if self.trailing_step_pct > 0 else 0.80
+                base_be = round(trade.entry_price * (1.0 + trail_ratio * excess), 2)
             trade.stop_loss = max(trade.stop_loss, base_be)
-            trade.ratchet_level = max(trade.ratchet_level, 1)
+            trade.metadata["breakeven_triggered"] = True
+            trade.ratchet_level = max(trade.ratchet_level, 2 if excess > eff_activation else 1)
 
         # 4. Timeout (60 minutes)
         if elapsed >= self.timeout_sec:

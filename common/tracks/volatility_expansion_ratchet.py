@@ -70,25 +70,28 @@ class VolatilityExpansionRatchetTrack(VolatilityExpansionTrack):
         if bid <= trade.stop_loss:
             return "SL_HIT"
 
-        # 3. Progressive Monotonic Ratcheting
-        if peak_profit_pct >= (self.breakeven_trigger_pct - 1e-6):
-            # Level 1: Lock entry + 0.5% brokerage buffer at breakeven trigger
-            be_floor = round(trade.entry_price * 1.005, 2)
+        # 3. Progressive Monotonic Ratcheting (scaled by option convexity factor)
+        eff_be = self._scaled_pct(trade, self.breakeven_trigger_pct)
+        eff_step = self._scaled_pct(trade, self.trailing_step_pct)
+        eff_buf = self._scaled_pct(trade, 0.005)
+        if peak_profit_pct >= (eff_be - 1e-6):
+            # Level 1: Lock entry + scaled 0.5% brokerage buffer at breakeven trigger
+            be_floor = round(trade.entry_price * (1.0 + eff_buf), 2)
             trade.stop_loss = max(trade.stop_loss, be_floor)
             trade.ratchet_level = max(trade.ratchet_level, 1)
             trade.metadata["breakeven_triggered"] = True
 
-            # Subsequent Levels: advance SL by trailing_step_pct per step above breakeven
-            if self.trailing_step_pct > 0.0:
-                excess_pct = peak_profit_pct - self.breakeven_trigger_pct
-                steps = int((excess_pct + 1e-9) / self.trailing_step_pct)
+            # Subsequent Levels: advance SL by scaled trailing_step_pct per step above breakeven
+            if eff_step > 0.0:
+                excess_pct = peak_profit_pct - eff_be
+                steps = int((excess_pct + 1e-9) / eff_step)
                 if steps > 0:
-                    stepped_sl = round(trade.entry_price * (1.0 + (steps * self.trailing_step_pct)), 2)
+                    stepped_sl = round(trade.entry_price * (1.0 + (steps * eff_step)), 2)
                     trade.stop_loss = max(trade.stop_loss, stepped_sl)
                     trade.ratchet_level = max(trade.ratchet_level, steps + 1)
 
         # 4. Early Deceleration Timeout (only before ratcheting locks profits beyond buffer)
-        if elapsed >= self.deceleration_timeout_sec and profit_pct < 0.03 and trade.ratchet_level < 2:
+        if elapsed >= self.deceleration_timeout_sec and profit_pct < self._scaled_pct(trade, 0.03) and trade.ratchet_level < 2:
             return "DECELERATION_TIMEOUT"
 
         return None

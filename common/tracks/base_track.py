@@ -13,6 +13,22 @@ from core.common.ipc_schemas import ActionableOpportunity, OrderRequest, OrderRe
 from core.common.symbol_utils import is_option_contract, normalize_instrument_token
 
 
+def compute_convexity_scale(
+    spot: float,
+    ask: float,
+    scaling_cfg: Optional[Dict[str, Any]],
+) -> float:
+    """Compute option leverage scaling factor bounded by [min_scale, max_scale]."""
+    if not scaling_cfg or not scaling_cfg.get("enabled", False) or spot <= 0.0 or ask <= 0.0:
+        return 1.0
+
+    ref_prem = float(scaling_cfg.get("reference_premium_pct", 0.015))
+    min_scale = float(scaling_cfg.get("min_scale", 0.45))
+    max_scale = float(scaling_cfg.get("max_scale", 1.25))
+    prem_pct = ask / spot
+    return max(min_scale, min(max_scale, ref_prem / max(1e-6, prem_pct)))
+
+
 def compute_convexity_scaled_targets(
     target_pct: float,
     sl_pct: float,
@@ -25,17 +41,14 @@ def compute_convexity_scaled_targets(
     if not scaling_cfg or not scaling_cfg.get("enabled", False) or spot <= 0.0 or ask <= 0.0:
         return float(target_pct), float(sl_pct)
 
-    ref_prem = float(scaling_cfg.get("reference_premium_pct", 0.015))
-    min_scale = float(scaling_cfg.get("min_scale", 0.45))
     max_scale = float(scaling_cfg.get("max_scale", 1.25))
     sl_min_scale = float(scaling_cfg.get("sl_min_scale", 0.75))
     sl_floor_min = float(scaling_cfg.get("sl_floor_min_pct", 0.035))
     sl_floor_max = float(scaling_cfg.get("sl_floor_max_pct", 0.12))
     sl_spread_mult = float(scaling_cfg.get("sl_spread_mult", 2.5))
 
-    prem_pct = ask / spot
+    scale = compute_convexity_scale(spot, ask, scaling_cfg)
     spread_pct = (ask - bid) / ask if bid > 0.0 else 0.02
-    scale = max(min_scale, min(max_scale, ref_prem / max(1e-6, prem_pct)))
     new_t = float(target_pct) * scale
     sl_floor = max(sl_floor_min, min(sl_floor_max, spread_pct * sl_spread_mult))
     sl_scaled = min(float(sl_pct) * max_scale, float(sl_pct) * max(sl_min_scale, scale))
@@ -187,6 +200,17 @@ class BaseTrack(ABC):
             return opp.strikes.get(m)
         return None
 
+    @staticmethod
+    def _trade_scale(trade: TradeState) -> float:
+        """Return option convexity scaling factor recorded on the trade (default 1.0)."""
+        return float(trade.metadata.get("convexity_scale", 1.0) or 1.0)
+
+    def _scaled_pct(self, trade: TradeState, base_pct: Optional[float]) -> float:
+        """Scale a configured percentage trigger/step/threshold by the trade's convexity scale."""
+        if base_pct is None:
+            return 0.0
+        return float(base_pct) * self._trade_scale(trade)
+
     @abstractmethod
     def evaluate_exit_rules(
         self, trade: TradeState, ltp: float, bid: float, ask: float, ts: float
@@ -254,15 +278,18 @@ class BaseTrack(ABC):
         # INVARIANT #2: Strict Ask-based entry, target, and SL computations (with optional Option Convexity Scaling)
         eff_target_pct = float(target_pct_override) if target_pct_override is not None else self.target_pct
         eff_sl_pct = float(sl_pct_override) if sl_pct_override is not None else self.sl_pct
+        spot_price = float(getattr(opp, "trigger_price", 0.0) or 0.0)
+        conv_scale = compute_convexity_scale(spot_price, ask, self.option_scaling_cfg)
         if self.option_scaling_cfg.get("enabled", False):
             eff_target_pct, eff_sl_pct = compute_convexity_scaled_targets(
                 eff_target_pct,
                 eff_sl_pct,
-                float(getattr(opp, "trigger_price", 0.0) or 0.0),
+                spot_price,
                 bid,
                 ask,
                 self.option_scaling_cfg,
             )
+        eff_be_pct = (float(self.breakeven_trigger_pct) * conv_scale) if self.breakeven_trigger_pct else 0.0
         entry_ask = ask
         target_price = entry_ask * (1.0 + eff_target_pct)
         stop_loss = entry_ask * (1.0 - eff_sl_pct)
@@ -312,8 +339,10 @@ class BaseTrack(ABC):
                 "entry_reason": entry_reason,
                 "preferred_mode": self.preferred_mode,
                 "required_capital": required_capital,
+                "convexity_scale": conv_scale,
                 "target_pct": eff_target_pct,
                 "sl_pct": eff_sl_pct,
+                "breakeven_trigger_pct": eff_be_pct,
                 "underlying_symbol": opp.symbol,
                 "underlying_entry_price": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
                 "trigger_price": float(opp.trigger_price) if getattr(opp, "trigger_price", None) else None,
@@ -423,10 +452,11 @@ class BaseTrack(ABC):
             trade.current_bid = bid
             trade.highest_price = max(trade.highest_price, bid)
 
-            # Breakeven Ratchet: if price reaches breakeven_trigger_pct, ratchet SL to entry_price (0% loss)
-            if self.breakeven_trigger_pct and self.breakeven_trigger_pct > 0.0:
+            # Breakeven Ratchet: if price reaches scaled breakeven_trigger_pct, ratchet SL to entry_price (0% loss)
+            eff_be_pct = float(trade.metadata.get("breakeven_trigger_pct", self.breakeven_trigger_pct or 0.0) or 0.0)
+            if eff_be_pct > 0.0:
                 profit_pct = (trade.highest_price - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
-                if profit_pct >= self.breakeven_trigger_pct - 1e-6:
+                if profit_pct >= eff_be_pct - 1e-6:
                     if trade.stop_loss < trade.entry_price:
                         trade.stop_loss = trade.entry_price
                         trade.metadata["breakeven_triggered"] = True

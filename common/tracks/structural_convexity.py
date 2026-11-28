@@ -78,17 +78,20 @@ class StructuralConvexityTrack(BaseTrack):
         if trade.target_price and bid >= trade.target_price:
             return "TARGET_HIT"
 
-        # 4. Asymmetric Trailing & Breakeven Ratchets
+        # 4. Asymmetric Trailing & Breakeven Ratchets (scaled by option convexity factor)
         profit_pct = (bid - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
         peak_profit_pct = (trade.highest_price - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
+        eff_be = self._scaled_pct(trade, self.breakeven_trigger_pct)
+        eff_buf = self._scaled_pct(trade, 0.005)
+        eff_trail_thresh = self._scaled_pct(trade, self.profit_trail_threshold_pct)
 
-        # Stage 1: Breakeven Free-Roll at +8% (locks entry + 0.5% brokerage buffer)
-        if profit_pct >= self.breakeven_trigger_pct - 1e-6 and trade.ratchet_level < 1:
-            trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * 1.005, 2))
+        # Stage 1: Breakeven Free-Roll at scaled +8% (locks entry + scaled brokerage buffer)
+        if profit_pct >= eff_be - 1e-6 and trade.ratchet_level < 1:
+            trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * (1.0 + eff_buf), 2))
             trade.ratchet_level = 1
 
-        # Stage 2: Asymmetric 50% Profit Trail at +15%
-        if peak_profit_pct >= self.profit_trail_threshold_pct - 1e-6:
+        # Stage 2: Asymmetric 50% Profit Trail at scaled +15%
+        if peak_profit_pct >= eff_trail_thresh - 1e-6:
             trail_sl = round(trade.entry_price * (1.0 + self.profit_trail_ratio * peak_profit_pct), 2)
             trade.stop_loss = max(trade.stop_loss, trail_sl)
             trade.ratchet_level = max(trade.ratchet_level, 2)

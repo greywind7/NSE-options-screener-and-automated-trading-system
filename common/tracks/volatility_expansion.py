@@ -52,13 +52,14 @@ class VolatilityExpansionTrack(BaseTrack):
         if bid <= trade.stop_loss:
             return "SL_HIT"
 
-        # 3. Breakeven Ratchet at +10%
-        if profit_pct >= self.breakeven_trigger_pct - 1e-6 and trade.ratchet_level < 1:
+        # 3. Breakeven Ratchet at scaled +10%
+        eff_be = self._scaled_pct(trade, self.breakeven_trigger_pct)
+        if profit_pct >= eff_be - 1e-6 and trade.ratchet_level < 1:
             trade.stop_loss = max(trade.stop_loss, trade.entry_price)
             trade.ratchet_level = 1
 
-        # 4. Deceleration Timeout: If after 5 minutes profit is < +3%, exit to avoid IV crush
-        if elapsed >= self.deceleration_timeout_sec and profit_pct < 0.03:
+        # 4. Deceleration Timeout: If after 5 minutes profit is < scaled +3%, exit to avoid IV crush
+        if elapsed >= self.deceleration_timeout_sec and profit_pct < self._scaled_pct(trade, 0.03):
             return "DECELERATION_TIMEOUT"
 
         return None

@@ -7,6 +7,7 @@ preventing profitable trades from decaying into timeouts or full stop-outs.
 from typing import Optional
 from common.interfaces import ExecutionContext, TradeState
 from common.tracks.adaptive_regime import AdaptiveRegimeTrack
+from core.common.ipc_schemas import ActionableOpportunity
 
 
 class AdaptiveRegimeRatchetTrack(AdaptiveRegimeTrack):
@@ -55,19 +56,28 @@ class AdaptiveRegimeRatchetTrack(AdaptiveRegimeTrack):
         self.midday_trailing_step_pct = mid_step
         self.midday_timeout_sec = float(midday_timeout_sec)
 
+    def on_opportunity(self, opp: ActionableOpportunity) -> Optional[TradeState]:
+        trade = super().on_opportunity(opp)
+        if trade and trade.metadata.get("regime_phase") == "MIDDAY":
+            trade.metadata["breakeven_trigger_pct"] = self._scaled_pct(trade, self.midday_breakeven_pct)
+        return trade
+
     def _apply_stepped_ratchet(self, trade: TradeState, peak_profit_pct: float, be_trigger: float, step_pct: float) -> None:
-        if peak_profit_pct < (be_trigger - 1e-6):
+        eff_be = self._scaled_pct(trade, be_trigger)
+        eff_step = self._scaled_pct(trade, step_pct)
+        eff_buf = self._scaled_pct(trade, 0.005)
+        if peak_profit_pct < (eff_be - 1e-6):
             return
-        be_floor = round(trade.entry_price * 1.005, 2)
+        be_floor = round(trade.entry_price * (1.0 + eff_buf), 2)
         trade.stop_loss = max(trade.stop_loss, be_floor)
         trade.ratchet_level = max(trade.ratchet_level, 1)
         trade.metadata["breakeven_triggered"] = True
 
-        if step_pct > 0.0:
-            excess_pct = peak_profit_pct - be_trigger
-            steps = int((excess_pct + 1e-9) / step_pct)
+        if eff_step > 0.0:
+            excess_pct = peak_profit_pct - eff_be
+            steps = int((excess_pct + 1e-9) / eff_step)
             if steps > 0:
-                stepped_sl = round(trade.entry_price * (1.0 + (steps * step_pct)), 2)
+                stepped_sl = round(trade.entry_price * (1.0 + (steps * eff_step)), 2)
                 trade.stop_loss = max(trade.stop_loss, stepped_sl)
                 trade.ratchet_level = max(trade.ratchet_level, steps + 1)
 
@@ -92,7 +102,7 @@ class AdaptiveRegimeRatchetTrack(AdaptiveRegimeTrack):
         if bid <= trade.stop_loss:
             return "SL_HIT"
 
-        # 3. Consistent Regime-Calibrated Stepped Ratcheting
+        # 3. Consistent Regime-Calibrated Stepped Ratcheting (scaled by option convexity factor)
         if phase == "MIDDAY":
             self._apply_stepped_ratchet(
                 trade,
@@ -100,7 +110,7 @@ class AdaptiveRegimeRatchetTrack(AdaptiveRegimeTrack):
                 be_trigger=self.midday_breakeven_pct,
                 step_pct=self.midday_trailing_step_pct,
             )
-            if elapsed >= self.midday_timeout_sec and profit_pct < 0.02 and trade.ratchet_level < 2:
+            if elapsed >= self.midday_timeout_sec and profit_pct < self._scaled_pct(trade, 0.02) and trade.ratchet_level < 2:
                 return "MIDDAY_CONSOLIDATION_TIMEOUT"
         elif phase == "AFTERNOON":
             self._apply_stepped_ratchet(
@@ -109,7 +119,7 @@ class AdaptiveRegimeRatchetTrack(AdaptiveRegimeTrack):
                 be_trigger=self.breakeven_trigger_pct,
                 step_pct=self.trailing_step_pct,
             )
-            if peak_profit_pct >= 0.10 - 1e-6:
+            if peak_profit_pct >= self._scaled_pct(trade, 0.10) - 1e-6:
                 trail_sl = round(trade.entry_price * (1.0 + 0.50 * peak_profit_pct), 2)
                 trade.stop_loss = max(trade.stop_loss, trail_sl)
                 trade.ratchet_level = max(trade.ratchet_level, 2)

@@ -53,7 +53,7 @@ class DeltaScalpTrack(BaseTrack):
             return "SL_HIT"
 
         # 3. Velocity Timeout: If trade hasn't moved into profit within 180 seconds, cut to preserve capital
-        if elapsed >= self.velocity_timeout_sec and profit_pct < 0.02:
+        if elapsed >= self.velocity_timeout_sec and profit_pct < self._scaled_pct(trade, 0.02):
             return "VELOCITY_TIMEOUT"
 
         return None

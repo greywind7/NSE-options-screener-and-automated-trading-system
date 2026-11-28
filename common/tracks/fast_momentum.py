@@ -54,10 +54,13 @@ class FastMomentumTrack(BaseTrack):
     ) -> Optional[str]:
         elapsed = ts - trade.entry_time
 
-        # 1. Target Decay: After target_decay_sec, decay target by 1% per minute down to decay_floor_pct
+        # 1. Target Decay: After target_decay_sec, decay target by scaled 1%/min down to scaled decay_floor_pct
         if elapsed >= self.target_decay_sec:
             extra_mins = int((elapsed - self.target_decay_sec) // 60)
-            decayed_target_pct = max(self.decay_floor_pct, self.target_pct - (extra_mins * 0.01))
+            base_target_pct = float(trade.metadata.get("target_pct", self.target_pct))
+            decay_step = self._scaled_pct(trade, 0.01)
+            decay_floor = self._scaled_pct(trade, self.decay_floor_pct)
+            decayed_target_pct = max(decay_floor, base_target_pct - (extra_mins * decay_step))
             trade.target_price = min(trade.target_price, trade.entry_price * (1.0 + decayed_target_pct))
 
         # 2. Hard Target Check
@@ -68,21 +71,25 @@ class FastMomentumTrack(BaseTrack):
         if bid <= trade.stop_loss:
             return "SL_HIT"
 
-        # 4. Multi-tier Trailing SL Ratchets
-        profit_pct = (bid - trade.entry_price) / trade.entry_price
+        # 4. Multi-tier Trailing SL Ratchets (scaled by option convexity factor)
+        profit_pct = (bid - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
+        tier1_trigger = self._scaled_pct(trade, 0.06)
+        tier2_trigger = self._scaled_pct(trade, 0.09)
+        tier2_lock = self._scaled_pct(trade, 0.04)
+        stag_floor = self._scaled_pct(trade, 0.03)
 
-        # Tier 1: At +6% profit, ratchet SL to breakeven (entry price)
-        if profit_pct >= 0.06 - 1e-6 and trade.ratchet_level < 1:
+        # Tier 1: At scaled +6% profit, ratchet SL to breakeven (entry price)
+        if profit_pct >= tier1_trigger - 1e-6 and trade.ratchet_level < 1:
             trade.stop_loss = max(trade.stop_loss, trade.entry_price)
             trade.ratchet_level = 1
 
-        # Tier 2: At +9% profit, ratchet SL to lock in +4%
-        if profit_pct >= 0.09 - 1e-6 and trade.ratchet_level < 2:
-            trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * 1.04, 2))
+        # Tier 2: At scaled +9% profit, ratchet SL to lock in scaled +4%
+        if profit_pct >= tier2_trigger - 1e-6 and trade.ratchet_level < 2:
+            trade.stop_loss = max(trade.stop_loss, round(trade.entry_price * (1.0 + tier2_lock), 2))
             trade.ratchet_level = 2
 
-        # 5. Stagnation Timeout: stagnation_timeout_sec and profit < +3%
-        if elapsed >= self.stagnation_timeout_sec and profit_pct < (0.03 - 1e-6):
+        # 5. Stagnation Timeout: stagnation_timeout_sec and profit < scaled +3%
+        if elapsed >= self.stagnation_timeout_sec and profit_pct < (stag_floor - 1e-6):
             return "STAGNATION_TIMEOUT"
 
         return None

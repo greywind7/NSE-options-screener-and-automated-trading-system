@@ -361,9 +361,11 @@ Enabled globally via [`config/strategies.json`](file:///Users/yorha/Documents/Tr
 - **Scaling Equations** (given underlying `spot`, option `bid`, `ask`, and base track `target_pct`, `sl_pct`):
   $$\text{prem\_pct} = \frac{\text{ask}}{\text{spot}}, \qquad \text{spread\_pct} = \frac{\text{ask} - \text{bid}}{\text{ask}}$$
   $$\text{scale} = \operatorname{clip}\left(\frac{\text{reference\_premium\_pct}}{\max(10^{-6}, \text{prem\_pct})}, \; \text{min\_scale}, \; \text{max\_scale}\right)$$
-  $$\text{scaled\_target\_pct} = \text{target\_pct} \times \text{scale}$$
+  $$\text{scaled\_target\_pct} = \text{target\_pct} \times \text{scale}, \qquad \text{scaled\_be\_pct} = \text{breakeven\_trigger\_pct} \times \text{scale}$$
+  $$\text{scaled\_step\_pct} = \text{trailing\_step\_pct} \times \text{scale}$$
   $$\text{sl\_floor} = \operatorname{clip}\left(\text{spread\_pct} \times \text{sl\_spread\_mult}, \; \text{sl\_floor\_min\_pct}, \; \text{sl\_floor\_max\_pct}\right)$$
   $$\text{scaled\_sl\_pct} = \max\left(\text{sl\_floor}, \; \min\left(\text{sl\_pct} \times \text{max\_scale}, \; \text{sl\_pct} \times \max(\text{sl\_min\_scale}, \text{scale})\right)\right)$$
+- **Uniform Ratchet & Exit Propagation**: Every trade records `convexity_scale` and `breakeven_trigger_pct` in `TradeState.metadata`. Both [`BaseTrack`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py) and all track subclasses scale breakeven triggers, stepped trailing increments, tiered ratchet levels, `FastMomentum` target decay rates, and timeout minimum-profit thresholds proportionally by `convexity_scale`, keeping pre-expiry and post-expiry RVOL exits invariant.
 - **Parity**: Executed identically across [`BaseTrack.on_opportunity()`](file:///Users/yorha/Documents/Trading%20Stuff/common/tracks/base_track.py) (Live/Paper/Delayed) and `ColumnarSimEngine`.
 
 ### 5.2 Composite `origin_track`, `sub_track_rule` & Legacy Quarantine
