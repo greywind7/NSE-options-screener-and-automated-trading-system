@@ -436,7 +436,8 @@
             <div class="form-group">
               <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
                 <span>Track Profile Preset</span>
-                <span class="badge" style="font-size:10px; background:rgba(0,229,255,0.15); color:var(--accent-cyan);">config/tracks</span>
+                <span class="badge"
+                  style="font-size:10px; background:rgba(0,229,255,0.15); color:var(--accent-cyan);">config/tracks</span>
               </label>
               <select id="sim-track-profile-select" class="custom-select" style="width:100%;">
                 <option value="default" selected>Default (All Tracks — v1 &amp; v2)</option>
@@ -581,7 +582,9 @@
           <div class="table-panel">
             <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
               <div class="panel-title"><span>🛠️ Configure Strategy Archetype Parameters</span></div>
-              <span id="sim-active-profile-tag" class="badge" style="background:rgba(0,229,255,0.15); color:var(--accent-cyan); font-size:11px;">Profile: Default</span>
+              <span id="sim-active-profile-tag" class="badge"
+                style="background:rgba(0,229,255,0.15); color:var(--accent-cyan); font-size:11px;">Profile:
+                Default</span>
             </div>
             <div id="sim-base-tracks-container" style="padding:14px; display:flex; flex-direction:column; gap:14px;">
               <!-- Dynamic Base Track Cards populated by simulation_tab.js based on selected profile -->
@@ -599,7 +602,8 @@
       <div class="sr-subview-bar">
         <div class="pill-group">
           <button type="button" id="sr-subview-single-btn" class="pill-btn active">Single Run Report</button>
-          <button type="button" id="sr-subview-batch-btn" class="pill-btn">📈 Batch Analytics & Multi-Day Report</button>
+          <button type="button" id="sr-subview-batch-btn" class="pill-btn">📈 Batch Analytics & Multi-Day
+            Report</button>
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
           <button type="button" id="sr-back-to-sim-top-btn" class="btn btn-secondary btn-sm">
@@ -609,180 +613,181 @@
       </div>
 
       <div id="sr-single-view">
-      <!-- Top Run Bar & Action Controls -->
-      <div class="controls-bar" style="margin-bottom:14px; justify-content:space-between; flex-wrap:wrap; gap:10px;">
-        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <!-- Top Run Bar & Action Controls -->
+        <div class="controls-bar" style="margin-bottom:14px; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+          <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <div class="filter-group">
+              <span class="filter-label">Select Simulation Run:</span>
+              <select id="sr-run-select" class="custom-select" style="min-width:240px;"></select>
+            </div>
+            <span id="sr-status-badge" class="badge badge-win">COMPLETED</span>
+            <span id="sr-net-badge" class="badge">₹0.00</span>
+            <span id="sr-runtime-badge" class="chart-subtext">Elapsed: -</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <button type="button" id="sr-open-new-tab-btn" class="btn btn-primary btn-sm"
+              title="Open this report in a new clean browser tab">
+              <span>↗ Open in New Browser Tab</span>
+            </button>
+            <button type="button" id="sr-back-to-sim-btn" class="btn btn-secondary btn-sm">
+              <span>⚡ Back to Simulation Lab</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Parameters Used Hero Drawer -->
+        <div class="form-card srm-params-card">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span
+              style="font-size:11px; font-weight:700; text-transform:uppercase; color:var(--accent-cyan); letter-spacing:0.5px;">
+              ⚙️ Strategy Parameters Used in This Run
+            </span>
+            <button type="button" id="sr-params-toggle" class="btn btn-secondary btn-sm"
+              style="font-size:10px; padding:2px 8px;">
+              Collapse Parameters ▲
+            </button>
+          </div>
+          <div id="sr-params-body" class="srm-params-body"></div>
+        </div>
+
+        <!-- Executive Stat Cards -->
+        <div class="stats-grid"
+          style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 14px;">
+          <div class="stat-card">
+            <div class="stat-label">Net P&L (Avg / Track)</div>
+            <div id="sr-stat-net-pnl" class="stat-value">₹0.00</div>
+            <div class="stat-subtext">After Brokerage</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Gross P&L (Avg / Track)</div>
+            <div id="sr-stat-gross-pnl" class="stat-value">₹0.00</div>
+            <div class="stat-subtext">Before Brokerage</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Win Rate</div>
+            <div id="sr-stat-win-rate" class="stat-value">0.0%</div>
+            <div class="stat-subtext">Return &gt; +2.5%</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Trades</div>
+            <div id="sr-stat-trades" class="stat-value">0 Trades</div>
+            <div class="stat-subtext">Session Total</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Brokerage</div>
+            <div id="sr-stat-brokerage" class="stat-value">₹0.00</div>
+            <div class="stat-subtext">Round-Trip Total</div>
+          </div>
+        </div>
+
+        <!-- Mode Filter Bar -->
+        <div class="controls-bar" style="margin-bottom:14px;">
           <div class="filter-group">
-            <span class="filter-label">Select Simulation Run:</span>
-            <select id="sr-run-select" class="custom-select" style="min-width:240px;"></select>
-          </div>
-          <span id="sr-status-badge" class="badge badge-win">COMPLETED</span>
-          <span id="sr-net-badge" class="badge">₹0.00</span>
-          <span id="sr-runtime-badge" class="chart-subtext">Elapsed: -</span>
-        </div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <button type="button" id="sr-open-new-tab-btn" class="btn btn-primary btn-sm"
-            title="Open this report in a new clean browser tab">
-            <span>↗ Open in New Browser Tab</span>
-          </button>
-          <button type="button" id="sr-back-to-sim-btn" class="btn btn-secondary btn-sm">
-            <span>⚡ Back to Simulation Lab</span>
-          </button>
-        </div>
-      </div>
-
-      <!-- Parameters Used Hero Drawer -->
-      <div class="form-card srm-params-card">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-          <span
-            style="font-size:11px; font-weight:700; text-transform:uppercase; color:var(--accent-cyan); letter-spacing:0.5px;">
-            ⚙️ Strategy Parameters Used in This Run
-          </span>
-          <button type="button" id="sr-params-toggle" class="btn btn-secondary btn-sm"
-            style="font-size:10px; padding:2px 8px;">
-            Collapse Parameters ▲
-          </button>
-        </div>
-        <div id="sr-params-body" class="srm-params-body"></div>
-      </div>
-
-      <!-- Executive Stat Cards -->
-      <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 14px;">
-        <div class="stat-card">
-          <div class="stat-label">Net P&L (Avg / Track)</div>
-          <div id="sr-stat-net-pnl" class="stat-value">₹0.00</div>
-          <div class="stat-subtext">After Brokerage</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Gross P&L (Avg / Track)</div>
-          <div id="sr-stat-gross-pnl" class="stat-value">₹0.00</div>
-          <div class="stat-subtext">Before Brokerage</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Win Rate</div>
-          <div id="sr-stat-win-rate" class="stat-value">0.0%</div>
-          <div class="stat-subtext">Return &gt; +2.5%</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Total Trades</div>
-          <div id="sr-stat-trades" class="stat-value">0 Trades</div>
-          <div class="stat-subtext">Session Total</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Total Brokerage</div>
-          <div id="sr-stat-brokerage" class="stat-value">₹0.00</div>
-          <div class="stat-subtext">Round-Trip Total</div>
-        </div>
-      </div>
-
-      <!-- Mode Filter Bar -->
-      <div class="controls-bar" style="margin-bottom:14px;">
-        <div class="filter-group">
-          <span class="filter-label">Filter Results by Mode:</span>
-          <div class="pill-group">
-            <button class="pill-btn sr-mode-pill active" data-mode="all">All Modes</button>
-            <button class="pill-btn sr-mode-pill" data-mode="paper">Paper</button>
-            <button class="pill-btn sr-mode-pill" data-mode="paper_delayed">Paper Delayed</button>
-          </div>
-        </div>
-        <div style="font-size:11px; color:var(--text-dim);">
-          Click any track row below to view its simulated performance curve and trades.
-        </div>
-      </div>
-
-      <!-- Results Matrix Table (Full-Width, Unconstrained Scroll) -->
-      <div class="table-panel">
-        <div class="panel-header">
-          <div class="panel-title"><span>📊 Simulation Results Matrix</span></div>
-        </div>
-        <div class="table-wrapper">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Mode</th>
-                <th>Track</th>
-                <th class="text-center">Trades</th>
-                <th class="text-center">Wins</th>
-                <th class="text-center">B/E</th>
-                <th class="text-center">Losses</th>
-                <th class="text-center">Win Rate</th>
-                <th class="text-right">Start Budget</th>
-                <th class="text-right">End Budget</th>
-                <th class="text-right">Gross P&L</th>
-                <th class="text-right">Brokerage</th>
-                <th class="text-right">Net P&L</th>
-                <th class="text-right">Return %</th>
-              </tr>
-            </thead>
-            <tbody id="sr-matrix-tbody"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Drilldown Detail Panel (Performance Curve & Trades) -->
-      <div id="sr-detail-panel" class="detail-panel" style="display:none; margin-top:14px;">
-        <div class="detail-header">
-          <div class="detail-title-group">
-            <span id="sr-detail-mode-badge" class="badge">MODE</span>
-            <span id="sr-detail-title" class="detail-title">Track Name</span>
-          </div>
-          <div>
-            <span class="stat-label">Net Performance:</span>
-            <span id="sr-detail-net" class="stat-value" style="font-size:18px; margin-left:8px;">₹0.00</span>
-          </div>
-        </div>
-
-        <!-- Canvas Curve -->
-        <div class="chart-box">
-          <div class="chart-header">
-            <span class="chart-title">Simulated Intraday Cumulative P&L Curve</span>
-            <div style="display:flex; align-items:center; gap:12px;">
-              <div class="pill-group">
-                <button type="button" id="sr-aspect-square" class="pill-btn active">1:1 Square</button>
-                <button type="button" id="sr-aspect-wide" class="pill-btn">Wide</button>
-              </div>
-              <label class="chart-checkbox-label">
-                <input type="checkbox" id="sr-brokerage-toggle" checked />
-                <span>Include Brokerage</span>
-              </label>
+            <span class="filter-label">Filter Results by Mode:</span>
+            <div class="pill-group">
+              <button class="pill-btn sr-mode-pill active" data-mode="all">All Modes</button>
+              <button class="pill-btn sr-mode-pill" data-mode="paper">Paper</button>
+              <button class="pill-btn sr-mode-pill" data-mode="paper_delayed">Paper Delayed</button>
             </div>
           </div>
-          <div id="sr-curve-wrapper" class="chart-square-wrapper">
-            <canvas id="sr-chart-canvas" class="chart-canvas chart-square"></canvas>
+          <div style="font-size:11px; color:var(--text-dim);">
+            Click any track row below to view its simulated performance curve and trades.
           </div>
         </div>
 
-        <!-- Simulated Trade Log Table -->
+        <!-- Results Matrix Table (Full-Width, Unconstrained Scroll) -->
         <div class="table-panel">
           <div class="panel-header">
-            <div class="panel-title">
-              <span>📋 Simulated Trades Executed (Click any trade to inspect 5m Candle Charts)</span>
-            </div>
+            <div class="panel-title"><span>📊 Simulation Results Matrix</span></div>
           </div>
           <div class="table-wrapper">
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>Trade ID</th>
-                  <th>Symbol</th>
-                  <th>Contract</th>
-                  <th class="text-center">Qty</th>
-                  <th class="text-center">Entry Reason</th>
-                  <th class="text-right">Entry Price</th>
-                  <th class="text-center">Entry Time</th>
-                  <th class="text-right">Exit Price</th>
-                  <th class="text-center">Exit Time</th>
-                  <th class="text-center">Exit Reason</th>
-                  <th class="text-right">Return %</th>
+                  <th>Mode</th>
+                  <th>Track</th>
+                  <th class="text-center">Trades</th>
+                  <th class="text-center">Wins</th>
+                  <th class="text-center">B/E</th>
+                  <th class="text-center">Losses</th>
+                  <th class="text-center">Win Rate</th>
+                  <th class="text-right">Start Budget</th>
+                  <th class="text-right">End Budget</th>
+                  <th class="text-right">Gross P&L</th>
                   <th class="text-right">Brokerage</th>
                   <th class="text-right">Net P&L</th>
+                  <th class="text-right">Return %</th>
                 </tr>
               </thead>
-              <tbody id="sr-trades-tbody"></tbody>
+              <tbody id="sr-matrix-tbody"></tbody>
             </table>
           </div>
         </div>
-      </div>
+
+        <!-- Drilldown Detail Panel (Performance Curve & Trades) -->
+        <div id="sr-detail-panel" class="detail-panel" style="display:none; margin-top:14px;">
+          <div class="detail-header">
+            <div class="detail-title-group">
+              <span id="sr-detail-mode-badge" class="badge">MODE</span>
+              <span id="sr-detail-title" class="detail-title">Track Name</span>
+            </div>
+            <div>
+              <span class="stat-label">Net Performance:</span>
+              <span id="sr-detail-net" class="stat-value" style="font-size:18px; margin-left:8px;">₹0.00</span>
+            </div>
+          </div>
+
+          <!-- Canvas Curve -->
+          <div class="chart-box">
+            <div class="chart-header">
+              <span class="chart-title">Simulated Intraday Cumulative P&L Curve</span>
+              <div style="display:flex; align-items:center; gap:12px;">
+                <div class="pill-group">
+                  <button type="button" id="sr-aspect-square" class="pill-btn active">1:1 Square</button>
+                  <button type="button" id="sr-aspect-wide" class="pill-btn">Wide</button>
+                </div>
+                <label class="chart-checkbox-label">
+                  <input type="checkbox" id="sr-brokerage-toggle" checked />
+                  <span>Include Brokerage</span>
+                </label>
+              </div>
+            </div>
+            <div id="sr-curve-wrapper" class="chart-square-wrapper">
+              <canvas id="sr-chart-canvas" class="chart-canvas chart-square"></canvas>
+            </div>
+          </div>
+
+          <!-- Simulated Trade Log Table -->
+          <div class="table-panel">
+            <div class="panel-header">
+              <div class="panel-title">
+                <span>📋 Simulated Trades Executed (Click any trade to inspect 5m Candle Charts)</span>
+              </div>
+            </div>
+            <div class="table-wrapper">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Trade ID</th>
+                    <th>Symbol</th>
+                    <th>Contract</th>
+                    <th class="text-center">Qty</th>
+                    <th class="text-center">Entry Reason</th>
+                    <th class="text-right">Entry Price</th>
+                    <th class="text-center">Entry Time</th>
+                    <th class="text-right">Exit Price</th>
+                    <th class="text-center">Exit Time</th>
+                    <th class="text-center">Exit Reason</th>
+                    <th class="text-right">Return %</th>
+                    <th class="text-right">Brokerage</th>
+                    <th class="text-right">Net P&L</th>
+                  </tr>
+                </thead>
+                <tbody id="sr-trades-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </div> <!-- end sr-single-view -->
 
       <!-- ===================================================================
@@ -837,7 +842,8 @@
         </div>
 
         <!-- Executive Batch Summary Strip -->
-        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); margin-bottom:14px;">
+        <div class="stats-grid"
+          style="grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); margin-bottom:14px;">
           <div class="stat-card">
             <div class="stat-label">Sessions Analyzed</div>
             <div id="br-stat-sessions" class="stat-value">0 / 0</div>
@@ -903,10 +909,21 @@
               <button type="button" class="pill-btn br-regime-pill" data-regime="TREND_DOWN">Trend Down</button>
               <button type="button" class="pill-btn br-regime-pill" data-regime="CHOPPY_RANGE">Choppy/Range</button>
               <button type="button" class="pill-btn br-regime-pill" data-regime="V_REVERSAL">V-Reversal</button>
-              <button type="button" class="pill-btn br-regime-pill" data-regime="HIGH_VOL_EXPIRY">High-Vol/Expiry</button>
+              <button type="button" class="pill-btn br-regime-pill"
+                data-regime="HIGH_VOL_EXPIRY">High-Vol/Expiry</button>
             </div>
           </div>
-          <span class="chart-subtext">Multi-winner curves alternate metric colors</span>
+          <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <span class="chart-subtext">Multi-winner curves alternate metric colors</span>
+            <div class="filter-group" style="gap:6px;">
+              <span class="filter-label">Chart Mode:</span>
+              <div class="pill-group">
+                <button type="button" class="pill-btn br-chart-mode-pill active"
+                  data-chart-mode="cumulative">Cumulative</button>
+                <button type="button" class="pill-btn br-chart-mode-pill" data-chart-mode="daily">Day-by-Day</button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div id="br-regime-breakdown" class="br-regime-strip"></div>
@@ -917,7 +934,8 @@
             <div class="chart-header" style="flex-wrap:wrap; gap:8px;">
               <div>
                 <span class="chart-title">🏅 Spotlight Winners Comparison</span>
-                <span id="br-winners-subtitle" class="chart-subtext" style="margin-left:6px;">Deduplicated Top Performers</span>
+                <span id="br-winners-subtitle" class="chart-subtext" style="margin-left:6px;">Deduplicated Top
+                  Performers</span>
               </div>
               <div id="br-winners-legend" class="br-winners-legend"></div>
             </div>
@@ -930,7 +948,8 @@
             <div class="chart-header" style="flex-wrap:wrap; gap:8px;">
               <div>
                 <span class="chart-title">📈 Track / Portfolio Equity &amp; Drawdown</span>
-                <span id="br-chart-subtitle" class="chart-subtext" style="margin-left:6px;">Equal-Weighted Portfolio</span>
+                <span id="br-chart-subtitle" class="chart-subtext" style="margin-left:6px;">Equal-Weighted
+                  Portfolio</span>
               </div>
               <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                 <select id="br-chart-track-select" class="custom-select" style="min-width:190px;">
@@ -972,7 +991,8 @@
                 <button type="button" class="pill-btn br-rank-pill" data-metric="profit_factor">Profit Factor</button>
                 <button type="button" class="pill-btn br-rank-pill" data-metric="lowest_maxdd">Lowest MaxDD</button>
                 <button type="button" class="pill-btn br-rank-pill" data-metric="expectancy">Exp / Trade</button>
-                <button type="button" class="pill-btn br-rank-pill" data-metric="delayed_retention">Delayed Ret %</button>
+                <button type="button" class="pill-btn br-rank-pill" data-metric="delayed_retention">Delayed Ret
+                  %</button>
                 <button type="button" class="pill-btn br-rank-pill" data-metric="sharpe">Sharpe</button>
               </div>
             </div>
@@ -1008,9 +1028,12 @@
         <div class="table-panel" style="margin-top:14px;">
           <div class="panel-header" style="justify-content:space-between; flex-wrap:wrap; gap:8px;">
             <div class="panel-title"><span>📅 Session-by-Session P&amp;L Attribution &amp; Top Track</span></div>
-            <span class="chart-subtext">Entry-window attribution (Click a window chip to filter; click a date row to inspect Single Run)</span>
+            <span class="chart-subtext">Entry-window attribution (Click a window chip to filter; click a date row to
+              inspect Single Run)</span>
           </div>
-          <div id="br-intraday-windows-bar" style="padding:10px 14px; display:flex; gap:8px; flex-wrap:wrap; border-bottom:1px solid var(--border-subtle);"></div>
+          <div id="br-intraday-windows-bar"
+            style="padding:10px 14px; display:flex; gap:8px; flex-wrap:wrap; border-bottom:1px solid var(--border-subtle);">
+          </div>
           <div class="table-wrapper" style="max-height:320px; overflow-y:auto;">
             <table class="data-table">
               <thead>

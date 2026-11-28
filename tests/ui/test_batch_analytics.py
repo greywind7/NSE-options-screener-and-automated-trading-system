@@ -420,6 +420,7 @@ class TestBatchWebEndpoints(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp_idx.status, 200)
         self.assertIn("br-winners-canvas", resp_idx.text)
         self.assertIn("br-equity-canvas", resp_idx.text)
+        self.assertIn("br-chart-mode-pill", resp_idx.text)
         self.assertIn("br-rankings-metric-pills", resp_idx.text)
         self.assertIn("br-sessions-tbody", resp_idx.text)
 

@@ -56,6 +56,7 @@ window.SimResultsPage = {
         pills.forEach((x) => x.classList.remove("active"));
         p.classList.add("active");
         this.currentModeFilter = p.getAttribute("data-mode");
+        this.renderStats();
         this.renderMatrix();
       });
     });
@@ -170,23 +171,34 @@ window.SimResultsPage = {
     // Render parameters used
     this.renderParams();
 
-    // Compute executive totals averaged over active tracks
+    // Render executive totals averaged over active (mode, track) entries
+    this.renderStats();
+
+    // Render Matrix table
+    this.renderMatrix();
+
+    // Reset drilldown
+    const detailPanel = document.getElementById("srp-detail-panel");
+    if (detailPanel) detailPanel.style.display = "none";
+  },
+
+  renderStats() {
+    if (!this.run) return;
     let totalGross = 0;
     let totalFees = 0;
     let totalNet = 0;
     let totalTrades = 0;
     let totalWins = 0;
-    let activeTrackCount = 0;
+    let entryCount = 0;
+    const targetMode = this.currentModeFilter || "all";
 
     if (this.run.results && this.run.results.matrix) {
       const matrix = this.run.results.matrix;
-      const targetMode = this.currentModeFilter;
 
       if (targetMode === "all") {
-        const uniqueTracks = new Set();
-        for (const [mName, mTracks] of Object.entries(matrix)) {
-          for (const [trName, st] of Object.entries(mTracks)) {
-            uniqueTracks.add(trName);
+        for (const mTracks of Object.values(matrix)) {
+          for (const st of Object.values(mTracks)) {
+            entryCount += 1;
             totalGross += st.gross_pnl || 0;
             totalFees += st.total_brokerage || 0;
             totalNet += st.net_pnl || 0;
@@ -194,11 +206,10 @@ window.SimResultsPage = {
             totalWins += st.wins || 0;
           }
         }
-        activeTrackCount = Object.keys(matrix.paper || {}).length || uniqueTracks.size || 1;
       } else {
         const mTracks = matrix[targetMode] || {};
-        activeTrackCount = Object.keys(mTracks).length || 1;
         for (const st of Object.values(mTracks)) {
+          entryCount += 1;
           totalGross += st.gross_pnl || 0;
           totalFees += st.total_brokerage || 0;
           totalNet += st.net_pnl || 0;
@@ -208,13 +219,14 @@ window.SimResultsPage = {
       }
     }
 
-    const avgNet = activeTrackCount > 0 ? totalNet / activeTrackCount : 0;
-    const avgGross = activeTrackCount > 0 ? totalGross / activeTrackCount : 0;
+    const avgNet = entryCount > 0 ? totalNet / entryCount : 0;
+    const avgGross = entryCount > 0 ? totalGross / entryCount : 0;
+    const modeTag = targetMode === "paper" ? "Paper" : (targetMode === "paper_delayed" ? "Delayed" : "All");
 
     const netBadge = document.getElementById("srp-net-badge");
     if (netBadge) {
       netBadge.className = `badge ${avgNet >= 0 ? 'badge-win' : 'badge-loss'}`;
-      netBadge.innerText = `Avg: ${this.formatINR(avgNet)}`;
+      netBadge.innerText = `Avg (${modeTag}): ${this.formatINR(avgNet)}`;
     }
 
     const statNet = document.getElementById("srp-stat-net-pnl");
@@ -238,13 +250,6 @@ window.SimResultsPage = {
 
     const statFees = document.getElementById("srp-stat-brokerage");
     if (statFees) statFees.innerText = this.formatINR(totalFees, false);
-
-    // Render Matrix table
-    this.renderMatrix();
-
-    // Reset drilldown
-    const detailPanel = document.getElementById("srp-detail-panel");
-    if (detailPanel) detailPanel.style.display = "none";
   },
 
   toggleParams() {

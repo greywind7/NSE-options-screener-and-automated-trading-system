@@ -26,6 +26,7 @@ window.SimulationTab = {
   batchModeFilter: "all",
   batchSelectedTrack: "__portfolio__",
   batchCompareDelayed: true,
+  batchChartMode: "cumulative",
   currentBatchReport: null,
   batchesList: [],
   _isBatchRunning: false,
@@ -130,7 +131,7 @@ window.SimulationTab = {
       if (newBootId) {
         localStorage.setItem("sim_server_boot_id", newBootId);
       }
-    } catch (e) {}
+    } catch (e) { }
 
     const navTab = document.getElementById("nav-tab-sim-results");
     if (navTab) navTab.style.display = "none";
@@ -146,7 +147,7 @@ window.SimulationTab = {
     try {
       const raw = localStorage.getItem("sim_runs");
       if (raw) cachedRuns = JSON.parse(raw);
-    } catch (e) {}
+    } catch (e) { }
 
     const map = new Map();
     // 1. Keep any existing in-memory / completed runs first
@@ -366,6 +367,7 @@ window.SimulationTab = {
         p.classList.add("active");
         this.currentModeFilter = p.getAttribute("data-mode");
         if (this.currentRun && this.currentRun.results) {
+          this.renderRunStats();
           this.renderRunMatrix();
         }
       });
@@ -447,6 +449,21 @@ window.SimulationTab = {
         }
       });
     }
+
+    document.querySelectorAll(".br-chart-mode-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        document.querySelectorAll(".br-chart-mode-pill").forEach((x) => x.classList.remove("active"));
+        pill.classList.add("active");
+        this.batchChartMode = pill.getAttribute("data-chart-mode") === "daily" ? "daily" : "cumulative";
+        if (this.currentBatchReport) {
+          this.renderBatchWinnersChart(this.currentBatchReport);
+          this.renderBatchEquityChart(this.currentBatchReport);
+        } else {
+          if (this.batchWinnersChart) this.batchWinnersChart.setChartMode(this.batchChartMode);
+          if (this.batchChart) this.batchChart.setChartMode(this.batchChartMode);
+        }
+      });
+    });
 
     document.querySelectorAll(".br-regime-pill").forEach((pill) => {
       pill.addEventListener("click", () => {
@@ -994,7 +1011,7 @@ window.SimulationTab = {
               const checkSt = await checkRes.json();
               if (!checkSt.is_running) break;
             }
-          } catch (_) {}
+          } catch (_) { }
           await new Promise((r) => setTimeout(r, 500));
         }
         // Clean settle delay between sequential batch runs
@@ -1008,7 +1025,7 @@ window.SimulationTab = {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ batch_id: batchId, label: batchLabel, run_ids: batchRunIds }),
           });
-        } catch (_) {}
+        } catch (_) { }
       }
 
       if (progFill) progFill.style.width = "100%";
@@ -1341,23 +1358,36 @@ window.SimulationTab = {
     // Render parameters used
     this.renderRunParams(run);
 
-    // Compute executive totals averaged over active tracks
+    // Render executive totals averaged over active (mode, track) entries
+    this.renderRunStats();
+
+    // Render Matrix table
+    this.renderRunMatrix();
+
+    // Reset drilldown
+    const detailPanel = document.getElementById("sr-detail-panel");
+    if (detailPanel) detailPanel.style.display = "none";
+  },
+
+  renderRunStats() {
+    const run = this.currentRun;
+    if (!run) return;
+
     let totalGross = 0;
     let totalFees = 0;
     let totalNet = 0;
     let totalTrades = 0;
     let totalWins = 0;
-    let activeTrackCount = 0;
+    let entryCount = 0;
+    const targetMode = this.currentModeFilter || "all";
 
     if (run.results && run.results.matrix) {
       const matrix = run.results.matrix;
-      const targetMode = this.currentModeFilter;
 
       if (targetMode === "all") {
-        const uniqueTracks = new Set();
-        for (const [mName, mTracks] of Object.entries(matrix)) {
-          for (const [trName, st] of Object.entries(mTracks)) {
-            uniqueTracks.add(trName);
+        for (const mTracks of Object.values(matrix)) {
+          for (const st of Object.values(mTracks)) {
+            entryCount += 1;
             totalGross += st.gross_pnl || 0;
             totalFees += st.total_brokerage || 0;
             totalNet += st.net_pnl || 0;
@@ -1365,11 +1395,10 @@ window.SimulationTab = {
             totalWins += st.wins || 0;
           }
         }
-        activeTrackCount = Object.keys(matrix.paper || {}).length || uniqueTracks.size || 1;
       } else {
         const mTracks = matrix[targetMode] || {};
-        activeTrackCount = Object.keys(mTracks).length || 1;
         for (const st of Object.values(mTracks)) {
+          entryCount += 1;
           totalGross += st.gross_pnl || 0;
           totalFees += st.total_brokerage || 0;
           totalNet += st.net_pnl || 0;
@@ -1379,13 +1408,14 @@ window.SimulationTab = {
       }
     }
 
-    const avgNet = activeTrackCount > 0 ? totalNet / activeTrackCount : 0;
-    const avgGross = activeTrackCount > 0 ? totalGross / activeTrackCount : 0;
+    const avgNet = entryCount > 0 ? totalNet / entryCount : 0;
+    const avgGross = entryCount > 0 ? totalGross / entryCount : 0;
+    const modeTag = targetMode === "paper" ? "Paper" : (targetMode === "paper_delayed" ? "Delayed" : "All");
 
     const netBadge = document.getElementById("sr-net-badge");
     if (netBadge) {
       netBadge.className = `badge ${avgNet >= 0 ? 'badge-win' : 'badge-loss'}`;
-      netBadge.innerText = `Avg: ${window.App.formatINR(avgNet)}`;
+      netBadge.innerText = `Avg (${modeTag}): ${window.App.formatINR(avgNet)}`;
     }
 
     const statNet = document.getElementById("sr-stat-net-pnl");
@@ -1409,13 +1439,6 @@ window.SimulationTab = {
 
     const statFees = document.getElementById("sr-stat-brokerage");
     if (statFees) statFees.innerText = window.App.formatINR(totalFees, false);
-
-    // Render Matrix table
-    this.renderRunMatrix();
-
-    // Reset drilldown
-    const detailPanel = document.getElementById("sr-detail-panel");
-    if (detailPanel) detailPanel.style.display = "none";
   },
 
   toggleParamsCollapse() {
@@ -2219,7 +2242,8 @@ window.SimulationTab = {
     });
 
     const winnersList = Array.from(dedupMap.values());
-    if (subEl) subEl.innerText = `${winnersList.length} Unique Winner${winnersList.length === 1 ? "" : "s"}`;
+    const modeTag = this.batchChartMode === "daily" ? "Day-by-Day" : "Cumulative";
+    if (subEl) subEl.innerText = `${winnersList.length} Unique Winner${winnersList.length === 1 ? "" : "s"} (${modeTag})`;
 
     if (legendEl) {
       legendEl.innerHTML = "";
@@ -2241,6 +2265,7 @@ window.SimulationTab = {
     }
 
     if (this.batchWinnersChart) {
+      this.batchWinnersChart.setChartMode(this.batchChartMode);
       this.batchWinnersChart.setData(winnersList);
     }
   },
@@ -2281,7 +2306,9 @@ window.SimulationTab = {
       }
     }
 
-    if (sub) sub.innerText = pLabel;
+    const modeTag = this.batchChartMode === "daily" ? "Day-by-Day" : "Cumulative";
+    if (sub) sub.innerText = `${pLabel} • ${modeTag}`;
+    this.batchChart.setChartMode(this.batchChartMode);
     this.batchChart.setData(primary, compare, pLabel, cLabel);
   },
 
@@ -2454,6 +2481,6 @@ window.SimulationTab = {
           statusText.innerText = `Dataset for ${st.cached_date} is cached in memory ⚡`;
         }
       }
-    } catch (e) {}
+    } catch (e) { }
   },
 };
